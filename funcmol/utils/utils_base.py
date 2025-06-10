@@ -5,6 +5,8 @@ import os
 import torch
 from wandb.integration.lightning.fabric import WandbLogger
 from lightning.fabric.strategies import DDPStrategy
+# import tensorboard
+from torch.utils.tensorboard import SummaryWriter
 
 
 from funcmol.utils.constants import PADDING_INDEX

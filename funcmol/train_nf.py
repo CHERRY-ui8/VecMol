@@ -383,7 +383,8 @@ def train_nf(
         reconstruction_loss = reconstruction_loss / batch_size
         
         # 总损失 = 重建损失 + 梯度场损失
-        loss = reconstruction_loss + field_loss
+        # loss = reconstruction_loss + field_loss
+        loss = field_loss
         
         # 检查损失是否为NaN或Inf
         if torch.isnan(loss) or torch.isinf(loss):
