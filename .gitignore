@@ -1,0 +1,4 @@
+funcmol/exps/*
+funcmol/dataset/*
+funcmol/wandb/*
+exps/*
