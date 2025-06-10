@@ -6,60 +6,24 @@ from scipy import ndimage as ndi
 from collections import defaultdict
 from tqdm import tqdm
 from itertools import chain
-# from funcmol.models.mfn import GaborNet
 from funcmol.models.egnn import EGNNVectorField
 
-
 class Decoder(nn.Module):
-    def __init__(
-        self,
-        n_channels: int,
-        hidden_dim: int = 2048,
-        code_dim: int = 2048,
-        coord_dim: int = 3,
-        n_layers: int = 6,
-        input_scale: int = 64,
-        grid_dim: int = 32,
-        fabric=None,
-    ):
+    def __init__(self, config):
         """
         Initializes the Decoder class.
 
         Args:
-            n_channels (int): Number of channels for the output.
-            hidden_dim (int, optional): Dimension of the hidden layers. Defaults to 2048.
-            code_dim (int, optional): Dimension of the code. Defaults to 2048.
-            coord_dim (int, optional): Dimension of the coordinates. Defaults to 3.
-            n_layers (int, optional): Number of layers in the network. Defaults to 6.
-            input_scale (int, optional): Scale of the input. Defaults to 64.
-            grid_dim (int, optional): Dimension of the grid. Defaults to 32.
-            fabric (optional): Fabric object for device management and printing. Defaults to None.
+            config (dict): Configuration dictionary containing parameters for the decoder.
         """
         super().__init__()
-        self.n_channels = n_channels
-        self.hidden_dim = hidden_dim
-        self.coord_dim = coord_dim
-        self.code_dim = code_dim
-        self.grid_dim = grid_dim
-        self.fabric = fabric
-        self.coords = get_grid(self.grid_dim)[1].unsqueeze(0).to(self.fabric.device)
-        fabric.print(">> coords shape:", self.coords.shape)
-        # self.net = GaborNet(
-        #     self.coord_dim,
-        #     self.hidden_dim,
-        #     self.code_dim,
-        #     n_channels,
-        #     n_layers,
-        #     input_scale=input_scale
-        # )
-        # 使用EGNNVectorField作为新的网络结构
         self.net = EGNNVectorField(
-            grid_size=8,
-            feature_dim=64,
-            hidden_dim=hidden_dim,
-            num_layers=n_layers,
-            k_neighbors=8,
-            n_atom_types=self.n_channels // 3
+            grid_size=config["grid_size"],
+            hidden_dim=config["hidden_dim"],
+            num_layers=config["n_layers"],
+            k_neighbors=config["k_neighbors"],
+            n_atom_types=config["n_channels"],
+            code_dim=config["code_dim"]
         )
 
     def forward(self, x: torch.Tensor, codes: torch.Tensor = None) -> torch.Tensor:
@@ -68,19 +32,15 @@ class Decoder(nn.Module):
 
         Args:
             x: Input tensor of shape (batch_size, n_points, 3)
-            codes: Optional tensor of codes (not used in new architecture)
+            codes: Optional tensor of codes of shape (batch_size, code_dim)
 
         Returns:
             Tensor: Output tensor of shape (batch_size, n_points, n_atom_types, 3)
         """
-        vector_field = self.net(x)
+        vector_field = self.net(x, codes)
         
-        batch_size, n_points, _ = vector_field.shape
-        n_atom_types = self.n_channels // 3
-        
-        # 重塑为 [batch_size, n_points, n_atom_types, 3]
-        vector_field = vector_field.reshape(batch_size, n_points, n_atom_types, 3)
-        
+        # 注意⚠️！这里vector_field 已经是 [batch_size, n_points, n_atom_types, 3] 的形状
+        # 不需要再次重塑
         return vector_field
 
     def render_code(

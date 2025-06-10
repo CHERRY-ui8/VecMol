@@ -11,6 +11,7 @@ from funcmol.models.decoder import Decoder, _normalize_coords, get_atom_coords
 from funcmol.models.encoder import Encoder
 from funcmol.utils.utils_base import convert_xyzs_to_sdf, save_xyz
 from funcmol.utils.utils_vis import visualize_voxel_grid
+import time
 
 
 def create_neural_field(config: dict, fabric: object) -> tuple:
@@ -46,16 +47,18 @@ def create_neural_field(config: dict, fabric: object) -> tuple:
     n_params_enc = sum(p.numel() for p in enc.parameters() if p.requires_grad)
     fabric.print(f">> enc has {(n_params_enc/1e6):.02f}M parameters")
 
-    dec = Decoder(
-        n_channels=config["dset"]["n_channels"],
-        grid_dim=config["dset"]["grid_dim"],
-        hidden_dim=config["decoder"]["hidden_dim"],
-        code_dim=config["decoder"]["code_dim"],
-        coord_dim=config["decoder"]["coord_dim"],
-        n_layers=config["decoder"]["n_layers"],
-        input_scale=config["decoder"]["input_scale"],
-        fabric=fabric
-    )
+    # 创建decoder配置
+    decoder_config = {
+        "grid_size": config["decoder"]["grid_size"],
+        "hidden_dim": config["decoder"]["hidden_dim"],
+        "n_layers": config["decoder"]["n_layers"],
+        "k_neighbors": config["decoder"]["k_neighbors"],
+        "n_channels": config["dset"]["n_channels"],
+        "code_dim": config["decoder"]["code_dim"]
+    }
+    
+    # 创建decoder
+    dec = Decoder(decoder_config)
     n_params_dec = sum(p.numel() for p in dec.parameters() if p.requires_grad)
     fabric.print(f">> dec has {(n_params_dec/1e6):.02f}M parameters")
 
@@ -78,50 +81,286 @@ def train_nf(
     fabric: object,
     metrics=None,
     field_maker=None,
-) -> tuple:
+    epoch: int = 0,
+) -> float:
     """
-    Trains the neural field autoencoder model.
+    Trains the neural field model.
 
     Args:
-        config (dict): Configuration dictionary containing training parameters.
-        loader (torch.utils.data.DataLoader): DataLoader for the training data.
-        dec (nn.Module): Decoder neural network module.
-        optim_dec (torch.optim.Optimizer): Optimizer for the decoder.
-        enc (nn.Module): Encoder neural network module.
-        optim_enc (torch.optim.Optimizer): Optimizer for the encoder.
+        config (dict): Configuration dictionary.
+        loader (DataLoader): DataLoader for training data.
+        dec (nn.Module): Decoder network.
+        optim_dec (Optimizer): Optimizer for decoder.
+        enc (nn.Module): Encoder network.
+        optim_enc (Optimizer): Optimizer for encoder.
         criterion (nn.Module): Loss function.
         fabric (object): Fabric object for distributed training.
-        metrics (optional): Metrics object for evaluating the model.
-        field_maker (optional): field_maker object for processing input data.
+        metrics (dict, optional): Dictionary of metrics to track. Defaults to None.
+        field_maker (object, optional): Field maker object. Defaults to None.
+        epoch (int, optional): Current epoch number. Defaults to 0.
 
     Returns:
-        tuple: A tuple containing the average loss and computed metrics.
+        float: The computed loss value.
     """
+    # 添加调试信息
+    fabric.print(f">> Starting train_nf function")
+    fabric.print(f">> Global rank: {fabric.global_rank}")
+    fabric.print(f">> Config dirname: {config['dirname']}")
+    
     enc.train()
     dec.train()
     if metrics is not None:
         for key in metrics.keys():
             metrics[key].reset()
 
+    # 创建保存可视化结果的目录
+    vis_dir = os.path.join(config["dirname"], "visualizations")
+    os.makedirs(vis_dir, exist_ok=True)
+    fabric.print(f">> Created visualization directory: {vis_dir}")
+    
+    # 创建日志文件
+    log_dir = os.path.join(config["dirname"], "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, f"gradient_field_epoch_{epoch}.log")
+    fabric.print(f">> Created log directory: {log_dir}")
+    fabric.print(f">> Created log file: {log_file}")
+    
+    # 确保日志文件存在
+    if fabric.global_rank == 0:
+        try:
+            with open(log_file, 'w') as f:
+                f.write(f"=== Training Log for Epoch {epoch} ===\n")
+                f.write(f"Started at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            fabric.print(f">> Successfully wrote initial content to log file")
+        except Exception as e:
+            fabric.print(f">> Error writing to log file: {e}")
+    
+    # 创建进度条，只在主进程显示
+    if fabric.global_rank == 0:
+        pbar = tqdm(total=len(loader), desc="Training", leave=True)
+    total_loss = 0.0
+    
+    # 设置梯度裁剪阈值，之前训练时，梯度爆炸，所以添加梯度裁剪
+    max_grad_norm = 1.0
+    
     for i, batch in enumerate(loader):
-        # Forward pass through 3D CNN encoder
-        codes, occs = infer_codes_occs_batch(batch, enc, config, to_cpu=False, field_maker=field_maker)
+        # 获取查询点
+        query_points = batch["xs"].to(fabric.device)  # [16, 500, 3]
+        
+        # 获取目标矢量场
+        occs_points, occs_grid = field_maker.forward(batch)  # [16, 500, 5], [16, 15, 32, 32, 32]
+        coords = batch["coords"].to(fabric.device)  # [16, n_atoms, 3]
+        atoms_channel = batch["atoms_channel"].to(fabric.device)  # [16, n_atoms]
+        target_field = compute_vector_field(query_points, coords, atoms_channel, n_atom_types=config["dset"]["n_channels"] // 3, device=fabric.device)  # [16, 500, 5, 3]
+        
+        # 前向传播
+        pred_field = dec(query_points)  # [16, 500, 5, 3]
+        
+        # 记录梯度场信息到日志文件
+        if fabric.global_rank == 0 and i % 100 == 0:  # 每100个batch记录一次
+            try:
+                with open(log_file, 'a') as f:
+                    f.write(f"\n=== Gradient Field Information (Epoch {epoch}, Batch {i}) ===\n")
+                    f.write(f"Query points shape: {query_points.shape}\n")
+                    f.write(f"Target field shape: {target_field.shape}\n")
+                    f.write(f"Predicted field shape: {pred_field.shape}\n")
+                    
+                    # 记录数值范围
+                    f.write("\nValue ranges:\n")
+                    f.write(f"Query points range: [{query_points.min().item():.3f}, {query_points.max().item():.3f}]\n")
+                    f.write(f"Target field range: [{target_field.min().item():.3f}, {target_field.max().item():.3f}]\n")
+                    f.write(f"Predicted field range: [{pred_field.min().item():.3f}, {pred_field.max().item():.3f}]\n")
+                    
+                    # 记录范数
+                    f.write("\nNorms:\n")
+                    f.write(f"Target field norm: {target_field.norm().item():.3f}\n")
+                    f.write(f"Predicted field norm: {pred_field.norm().item():.3f}\n")
+                    
+                    # 记录NaN和Inf检查
+                    f.write("\nNaN/Inf check:\n")
+                    f.write(f"Target field NaN count: {torch.isnan(target_field).sum().item()}\n")
+                    f.write(f"Target field Inf count: {torch.isinf(target_field).sum().item()}\n")
+                    f.write(f"Predicted field NaN count: {torch.isnan(pred_field).sum().item()}\n")
+                    f.write(f"Predicted field Inf count: {torch.isinf(pred_field).sum().item()}\n")
+                    
+                    # 记录一些具体的值
+                    f.write("\nSample values (first batch, first point, first atom type):\n")
+                    f.write(f"Target field: {target_field[0, 0, 0].tolist()}\n")
+                    f.write(f"Predicted field: {pred_field[0, 0, 0].tolist()}\n")
+                    f.write("================================\n")
+                fabric.print(f">> Wrote gradient field info to log file at batch {i}")
+            except Exception as e:
+                fabric.print(f">> Error writing to log file: {e}")
+        
+        # 计算梯度场损失
+        field_loss = criterion(pred_field, target_field)
+        
+        # 计算重建损失（使用梯度场的差异来近似）
+        batch_size = coords.size(0)
+        reconstruction_loss = 0.0
+        
+        for b in range(batch_size):
+            # 获取当前样本的有效原子
+            mask = atoms_channel[b] != PADDING_INDEX
+            valid_coords = coords[b, mask]  # [n_valid_atoms, 3]
+            valid_types = atoms_channel[b, mask]  # [n_valid_atoms]
+            
+            if valid_coords.size(0) == 0:
+                continue
+            
+            # 每隔一定轮次可视化分子结构
+            if fabric.global_rank == 0 and i % config.get("vis_every", 1000) == 0:  # 增加间隔到1000
+                try:
+                    fabric.print(f"\nAttempting visualization for batch {b}, iteration {i}")
+                    fabric.print(f"Original coords shape: {valid_coords.shape}")
+                    fabric.print(f"Original types shape: {valid_types.shape}")
+                    fabric.print(f"Predicted field shape: {pred_field[b].shape}")
+                    
+                    # 清理GPU缓存
+                    torch.cuda.empty_cache()
+                    
+                    # 使用GNFConverter重建分子结构
+                    gnf_converter = GNFConverter(
+                        sigma=1.0,
+                        n_query_points=200,  # 减少查询点数量
+                        n_iter=500,  # 减少迭代次数
+                        step_size=0.005,
+                        merge_threshold=0.2,
+                        device=fabric.device
+                    )
+                    
+                    # 确保输入维度正确
+                    pred_field_b = pred_field[b].unsqueeze(0)  # [1, n_points, n_atom_types, 3]
+                    valid_types_b = valid_types.unsqueeze(0)  # [1, n_valid_atoms]
+                    
+                    fabric.print(f"Input field shape: {pred_field_b.shape}")
+                    fabric.print(f"Input types shape: {valid_types_b.shape}")
+                    
+                    # 重建分子结构
+                    with torch.amp.autocast(device_type='cuda'):  # 移除 device_type 和 dtype 参数
+                        reconstructed_coords, reconstructed_types = gnf_converter.gnf2mol(
+                            pred_field_b,
+                            valid_types_b
+                        )
+                    
+                    fabric.print(f"Reconstructed coords shape: {reconstructed_coords.shape}")
+                    fabric.print(f"Reconstructed types shape: {reconstructed_types.shape}")
+                    
+                    # 创建可视化目录
+                    vis_dir = os.path.join(config["dirname"], "visualizations")
+                    os.makedirs(vis_dir, exist_ok=True)
+                    
+                    # 保存可视化结果
+                    save_path = os.path.join(vis_dir, f"molecule_epoch{epoch:04d}_batch{i:04d}_sample{b:02d}.png")
+                    
+                    # 使用try-finally确保PyMOL正确关闭
+                    try:
+                        from funcmol.utils.visualize_molecules import visualize_molecule_comparison
+                        visualize_molecule_comparison(
+                            valid_coords,
+                            valid_types,
+                            reconstructed_coords,
+                            reconstructed_types,
+                            save_path=save_path
+                        )
+                        fabric.print(f"Visualization saved to: {save_path}")
+                    except Exception as e:
+                        fabric.print(f"Visualization failed: {str(e)}")
+                    finally:
+                        # 确保PyMOL进程被终止
+                        import psutil
+                        for proc in psutil.process_iter(['pid', 'name']):
+                            if 'pymol' in proc.info['name'].lower():
+                                try:
+                                    proc.kill()
+                                except:
+                                    pass
+                    
+                except Exception as e:
+                    fabric.print(f"Error during visualization: {str(e)}")
+                    continue
 
-        # Forward pass through INR decoder
-        pred = dec(batch["xs"], codes)
+            # 计算每个原子位置处的预测梯度场
+            atom_gradients = pred_field[b]  # [n_points, n_atom_types, 3]
+            target_gradients = target_field[b]  # [n_points, n_atom_types, 3]
+            
+            # 计算原子位置到查询点的距离
+            dist = torch.norm(query_points[b].unsqueeze(1) - valid_coords.unsqueeze(0), dim=2)  # [n_points, n_atoms]
+            
+            # 使用距离的倒数作为权重
+            weights = 1.0 / (dist + 1e-8)  # [n_points, n_atoms]
+            # 添加钳位操作，防止权重过大
+            weights = torch.clamp(weights, max=1e4) # 将最大权重限制为10000
+            weights = weights / weights.sum(dim=0, keepdim=True)  # 归一化权重
+            
+            # 计算梯度场差异
+            grad_diff = torch.norm(atom_gradients - target_gradients, dim=-1)  # [n_points, n_atom_types]
+            
+            # 扩展权重维度以匹配梯度场差异
+            weights = weights.unsqueeze(-1)  # [n_points, n_atoms, 1]
+            
+            # 计算加权梯度场差异
+            weighted_grad_diff = torch.sum(weights * grad_diff.unsqueeze(1), dim=0)  # [n_atoms, n_atom_types]
+            
+            # 取最小差异作为重建损失
+            reconstruction_loss += torch.min(weighted_grad_diff).mean()
+        
+        # 平均重建损失
+        reconstruction_loss = reconstruction_loss / batch_size
+        
+        # 总损失 = 重建损失 + 梯度场损失
+        # loss = reconstruction_loss + field_loss
+        loss = field_loss
+        
+        # 检查损失是否为NaN或Inf
+        if torch.isnan(loss) or torch.isinf(loss):
+            fabric.print(f"WARNING: Loss is NaN or Inf at epoch {epoch}, batch {i}. Skipping update.")
+            fabric.print(f"  reconstruction_loss: {reconstruction_loss.item():.4f}")
+            fabric.print(f"  field_loss: {field_loss.item():.4f}")
+            fabric.print(f"  pred_field norm: {pred_field.norm().item():.4f}")
+            fabric.print(f"  target_field norm: {target_field.norm().item():.4f}")
+            torch.cuda.empty_cache()
+            continue
 
-        # optimize best loss
-        loss = criterion(pred, occs)
-        metrics["miou"].update((pred > 0.5).to(torch.uint8), (occs > 0.5).to(torch.uint8))
-        optim_enc.zero_grad()
+        fabric.print(f"DEBUG: Batch {i}, Original Loss: {loss.item():.4f}")
+        
+        total_loss += loss.item()
+        
+        # 更新进度条（只在主进程）
+        if fabric.global_rank == 0:
+            pbar.update(1)
+            pbar.set_postfix({
+                'loss': f'{loss:.4f}',
+                'recon_loss': f'{reconstruction_loss:.4f}',
+                'field_loss': f'{field_loss:.4f}',
+                'avg_loss': f'{metrics["loss"].compute().item():.4f}'
+            })
+        
+        # 反向传播
         optim_dec.zero_grad()
+        optim_enc.zero_grad()
         fabric.backward(loss)
-        optim_enc.step()
+        
+        # 梯度裁剪
+        torch.nn.utils.clip_grad_norm_(dec.parameters(), max_grad_norm)
+        torch.nn.utils.clip_grad_norm_(enc.parameters(), max_grad_norm)
+        
         optim_dec.step()
+        optim_enc.step()
+        
+        # 更新指标
+        # 钳位损失值，防止初期大损失影响平均显示
+        clipped_loss = torch.clamp(loss, max=1000.0) # 将损失值最大限制为1000
+        fabric.print(f"DEBUG: Batch {i}, Clipped Loss: {clipped_loss.item():.4f}")
+        metrics["loss"].update(clipped_loss)
+        
+        # 确保所有进程同步
+        fabric.barrier()
 
-        metrics["loss"].update(loss)
+    if fabric.global_rank == 0:
+        pbar.close()
 
-    return metrics["loss"].compute().item(), metrics["miou"].compute().item()
+    return metrics["loss"].compute().item()
 
 
 @torch.no_grad()
@@ -136,64 +375,55 @@ def eval_nf(
     fabric=None,
     field_maker=None,
     sample_full_grid=False,
-) -> tuple:
+) -> float:
     """
-    Evaluate a neural field model using the provided data loader, encoder, decoder, and criterion.
+    Evaluates the neural field model.
 
     Args:
-        loader (torch.utils.data.DataLoader): DataLoader for the dataset to evaluate.
-        dec (nn.Module): Decoder model (INR decoder).
-        enc (nn.Module): Encoder model (3D CNN encoder).
-        criterion (nn.Module): Loss function to compute the evaluation loss.
-        config (dict): Configuration dictionary containing various settings.
-        metrics (dict, optional): Dictionary of metrics to update during evaluation. Defaults to None.
-        save_plot_png (bool, optional): Whether to save evaluation plots as PNG files. Defaults to False.
-        fabric (optional): Fabric object for saving plots. Defaults to None.
-        field_maker (optional): Field maker object for generating fields. Defaults to None.
+        loader (DataLoader): DataLoader for evaluation data.
+        dec (nn.Module): Decoder network.
+        enc (nn.Module): Encoder network.
+        criterion (nn.Module): Loss function.
+        config (dict): Configuration dictionary.
+        metrics (dict, optional): Dictionary of metrics to track. Defaults to None.
+        save_plot_png (bool, optional): Whether to save plots. Defaults to False.
+        fabric (object, optional): Fabric object for distributed training. Defaults to None.
+        field_maker (object, optional): Field maker object. Defaults to None.
         sample_full_grid (bool, optional): Whether to sample the full grid. Defaults to False.
 
     Returns:
-        tuple: A tuple containing the computed loss and mean intersection over union (mIoU) values.
+        float: The computed loss value.
     """
-    dec = dec.module
-    enc = enc.module
     dec.eval()
     enc.eval()
-    for key in metrics.keys():
-        metrics[key].reset()
-    mols_gt = []
-    mols_pred = []
-    mols_pred_dict = defaultdict(list)
-    codes_dict = defaultdict(list)
-    for i, batch in enumerate(loader):
-        # Forward pass through 3D CNN encoder
-        codes, _ = infer_codes_occs_batch(batch, enc, config, to_cpu=False, field_maker=field_maker)
+    if metrics is not None:
+        for key in metrics.keys():
+            metrics[key].reset()
 
-        # Forward pass through INR decoder
-        xs = batch["xs"].to(fabric.device)
+    for i, batch in enumerate(loader):
+        # 获取查询点
+        query_points = batch["xs"].to(fabric.device)
         
         # 获取目标矢量场
+        occs_points, occs_grid = field_maker.forward(batch)
         coords = batch["coords"].to(fabric.device)
         atoms_channel = batch["atoms_channel"].to(fabric.device)
-        target_field = compute_vector_field(xs, coords, atoms_channel, n_atom_types=config["dset"]["n_channels"] // 3, device=fabric.device)
-
-        if sample_full_grid:
-            xs = xs[0].unsqueeze(0)
-            occs_pred = dec(xs, codes)
-        else:
-            occs_pred = dec(xs, codes)
-
-        # Compute loss and update metrics
-        loss = criterion(occs_pred, target_field)
-        metrics["miou"].update((occs_pred.norm(dim=-1) > 0.5).to(torch.uint8), (target_field.norm(dim=-1) > 0.5).to(torch.uint8))
+        target_field = compute_vector_field(query_points, coords, atoms_channel, n_atom_types=config["dset"]["n_channels"] // 3, device=fabric.device)
+        
+        # 前向传播
+        pred_field = dec(query_points)
+        
+        # 计算损失
+        loss = criterion(pred_field, target_field)
+        
+        # 更新指标
         metrics["loss"].update(loss)
+        
+        # 保存可视化结果
+        if save_plot_png and i == 0:
+            save_voxel_eval_nf(config, fabric, pred_field, target_field)
 
-        if save_plot_png:
-            save_voxel_eval_nf(config, fabric, occs_gt=target_field, mols_gt=mols_gt, occs_pred=occs_pred, refine=True, i=i, mols_pred=mols_pred, mols_pred_dict=mols_pred_dict, codes=codes, codes_dict=codes_dict)
-    if save_plot_png:
-        save_sdf_eval_nf(config, fabric, mols_pred=mols_pred, mols_gt=mols_gt, dec=dec, mols_pred_dict=mols_pred_dict, codes_dict=codes_dict, refine=True)
-
-    return metrics["loss"].compute().item(), metrics["miou"].compute().item()
+    return metrics["loss"].compute().item()
 
 
 def save_voxel_eval_nf(config, fabric, occs_pred, occs_gt=None, refine=True, i=0, mols_pred=[], mols_gt=[], mols_pred_dict=defaultdict(list), codes=None, codes_dict=defaultdict(list)):

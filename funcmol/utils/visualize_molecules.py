@@ -47,14 +47,19 @@ align reconstructed, original
 hide all
 show spheres, original
 show spheres, reconstructed
-set sphere_scale, 0.3
+set sphere_scale, 0.1, reconstructed  # 增大重建分子的球体大小
+set sphere_scale, 0.1, original
 
 # 为重建分子设置特定颜色和透明度
-set transparency, 0.5, reconstructed
+set transparency, 0.7, reconstructed
 set transparency, 0, original
 
 # 设置视图
 orient
+
+# 设置背景颜色和光线追踪背景不透明，确保在png命令前执行
+set bg_rgb, [0,0,1] # 将背景设置为蓝色，以便更容易观察
+set ray_opaque_background, on 
 
 # 保存图像
 png {save_path}, ray=1, width=1200, height=600
@@ -114,16 +119,23 @@ def create_pdb(coords, atom_types, output_file):
         else:
             raise ValueError(f"Unexpected atom_types shape: {atom_types.shape}")
             
-        # 如果atom_types数量不足，用最后一个类型填充
+        # 如果atom_types数量不足，用最后一个类型填充 (这里的逻辑可能需要更健壮)
         if atom_types.shape[1] < n_atoms:
-            last_type = atom_types[0, -1]
+            # 确保 atom_types[0] 不为空，或者提供一个默认填充值
+            last_type = atom_types[0, -1] if atom_types.shape[1] > 0 else 0 # 默认填充为0 (C)
             padding = np.full((1, n_atoms - atom_types.shape[1]), last_type)
             atom_types = np.concatenate([atom_types, padding], axis=1)
         
         # 写入PDB文件
         for i in range(n_atoms):
             coord = coords[0, i]
-            atom_type = ELEMENTS_HASH_INV[atom_types[0, i]]
+            atom_type_idx = int(atom_types[0, i])
+            # 处理未知原子类型，防止 KeyError
+            if atom_type_idx in ELEMENTS_HASH_INV:
+                atom_type = ELEMENTS_HASH_INV[atom_type_idx]
+            else:
+                atom_type = 'X' # 使用 'X' 表示未知原子类型
+                # print(f"Warning: Unknown atom type index {atom_type_idx} encountered. Using 'X'.")
             f.write(f"HETATM{i+1:5d} {atom_type:4s} MOL A{i+1:4d}    {coord[0]:8.3f}{coord[1]:8.3f}{coord[2]:8.3f}  1.00  0.00\n")
         f.write("END\n")
 
@@ -239,7 +251,7 @@ def visualize_reconstruction_process(
     # 设置视角
     pymol.cmd.orient()
     
-    # 设置背景颜色
+    # 设置背景颜色 (可能被后续的ray_opaque_background覆盖，所以这里重复设置一次)
     pymol.cmd.bg_color("white")
     
     # 保存图片

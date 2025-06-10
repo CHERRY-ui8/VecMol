@@ -5,6 +5,7 @@ from scipy.spatial.distance import cdist
 from scipy.optimize import linear_sum_assignment
 from typing import Callable, Optional, Tuple, List
 from scipy.spatial import cKDTree
+import torch.nn.functional as F
 
 class MolecularStructure:
     """Data class to represent a molecular structure."""
@@ -202,110 +203,52 @@ class GNFConverter(nn.Module):
             
         return gradients
 
-    def gnf2mol(self, coords: torch.Tensor, 
+    def gnf2mol(self, grad_field: torch.Tensor, 
                 atom_types: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
-        Convert gradient field to molecule coordinates.
-        
-        Args:
-            coords: Initial coordinates [batch_size, n_points, n_atom_types, 3]
-            atom_types: Optional atom types [batch_size, n_atoms]
-            
-        Returns:
-            Tuple of (final_coords, atom_types)
+            直接用梯度场重建分子坐标。
+            grad_field: [batch, n_points, n_atom_types, 3]  # 神经场输出
+            返回: (final_coords, final_types)
         """
-        device = coords.device
-        batch_size = coords.shape[0]
-        n_points = coords.shape[1]
-        n_atom_types = coords.shape[2]
-        
-        # 减少查询点数量
-        n_query_points = min(self.n_query_points, 200)  # 限制最大查询点数量
-        
-        # 初始化采样点
-        z = torch.rand(batch_size, n_query_points, 3, device=device) * 30 - 15
-        
-        # 创建GNF函数
-        def gnf_func(points):
-            # 使用更小的批次大小
-            chunk_size = 50  # 减小块大小
-            n_chunks = (n_query_points + chunk_size - 1) // chunk_size
-            gradients = []
-            
-            for i in range(n_chunks):
-                start_idx = i * chunk_size
-                end_idx = min((i + 1) * chunk_size, n_query_points)
-                chunk_points = points[:, start_idx:end_idx]
-                
-                # 重塑输入以匹配维度
-                chunk_points = chunk_points.view(batch_size, -1, 1, 3)  # [B, M', 1, 3]
-                
-                # 分批处理原子类型
-                type_chunk_size = 2  # 每次处理2种原子类型
-                n_type_chunks = (n_atom_types + type_chunk_size - 1) // type_chunk_size
-                type_gradients = []
-                
-                for j in range(n_type_chunks):
-                    start_type = j * type_chunk_size
-                    end_type = min((j + 1) * type_chunk_size, n_atom_types)
-                    
-                    # 只处理当前类型的原子
-                    coords_chunk = coords[:, :, start_type:end_type, :]  # [B, N, T', 3]
-                    coords_reshaped = coords_chunk.unsqueeze(2)  # [B, N, 1, T', 3]
-                    
-                    # 计算距离
-                    diff = coords_reshaped - chunk_points.unsqueeze(1)  # [B, N, M', T', 3]
-                    dist = torch.norm(diff, dim=-1)  # [B, N, M', T']
-                    
-                    # 计算高斯权重
-                    weights = torch.exp(-0.5 * (dist / self.sigma) ** 2)  # [B, N, M', T']
-                    weights = weights / (weights.sum(dim=1, keepdim=True) + 1e-8)  # [B, N, M', T']
-                    
-                    # 计算梯度场
-                    diff_norm = diff / (dist.unsqueeze(-1) + 1e-8)  # [B, N, M', T', 3]
-                    chunk_gradients = torch.sum(weights.unsqueeze(-1) * diff_norm, dim=1)  # [B, M', T', 3]
-                    type_gradients.append(chunk_gradients)
-                    
-                    # 清理不需要的张量
-                    del diff, dist, weights, diff_norm, chunk_gradients
-                    torch.cuda.empty_cache()
-                
-                # 合并所有类型的结果
-                type_gradients = torch.cat(type_gradients, dim=2)  # [B, M', T, 3]
-                gradients.append(type_gradients)
-                
-                # 清理不需要的张量
-                del type_gradients
-                torch.cuda.empty_cache()
-            
-            # 合并所有块的结果
-            gradients = torch.cat(gradients, dim=1)  # [B, M, T, 3]
-            return gradients.view(batch_size, n_query_points, -1)  # [B, M, T*3]
-        
-        # 梯度上升
-        for i in range(self.n_iter):
-            gradients = gnf_func(z)
-            z = z + self.step_size * gradients[..., :3]  # 只使用前三个维度
-            
-            # 清理不需要的张量
-            del gradients
-            torch.cuda.empty_cache()
-        
-        # 转换为numpy进行合并
-        z_np = z.detach().cpu().numpy()
-        
-        # 合并点
-        merged_points = self._merge_points(z_np)
-        
-        # 转换回tensor
-        final_coords = torch.from_numpy(merged_points).to(device)
-        
-        return final_coords, atom_types
+        device = grad_field.device
+        batch_size, n_points, n_atom_types, _ = grad_field.shape
+        n_query_points = min(self.n_query_points, n_points)
 
-    def _find_nearest_atoms(self, points: torch.Tensor, atoms: torch.Tensor) -> torch.Tensor:
-        """找到每个采样点最近的原子"""
-        dist = torch.cdist(points, atoms) # x1：形状为(N,D)；x2：形状为(M,D)；返回值：形状为 (N,M) 的张量，每个元素 (i,j) 表示 x1[i] 和 x2[j] 之间的距离
-        return torch.argmin(dist, dim=1)
+        all_coords = []
+        all_types = []
+        # 对每个batch分别处理
+        for b in range(batch_size):
+            coords_list = []
+            types_list = []
+            # 对每个原子类型分别做流动和聚类
+            for t in range(n_atom_types):
+                # 1. 初始化采样点（可用均匀网格或随机点）
+                z = torch.rand(n_query_points, 3, device=device) * 2 - 1  # [-1,1]区间
+                # 2. 梯度上升
+                for i in range(self.n_iter):
+                    # 最近邻查找，把z映射到最近的query点
+                    dists = torch.cdist(z, grad_field.new_tensor(np.linspace(-1, 1, n_points)).unsqueeze(1).repeat(1, 3), p=2)
+                    idx = dists.argmin(dim=1)  # [n_query_points]
+                    grad = grad_field[b, idx, t, :]  # [n_query_points, 3]
+                    z = z + self.step_size * grad
+                # 3. 聚类/合并
+                z_np = z.detach().cpu().numpy()
+                merged_points = self._merge_points(z_np)
+                if len(merged_points) > 0:
+                    coords_list.append(torch.from_numpy(merged_points).to(device))
+                    types_list.append(torch.full((len(merged_points),), t, dtype=torch.long, device=device))
+            # 合并所有类型
+            if coords_list:
+                all_coords.append(torch.cat(coords_list, dim=0))
+                all_types.append(torch.cat(types_list, dim=0))
+            else:
+                all_coords.append(torch.empty(0, 3, device=device))
+                all_types.append(torch.empty(0, dtype=torch.long, device=device))
+        # pad到batch最大长度
+        max_atoms = max([c.size(0) for c in all_coords]) if all_coords else 0
+        final_coords = torch.stack([F.pad(c, (0,0,0,max_atoms-c.size(0))) if c.size(0)<max_atoms else c for c in all_coords], dim=0)
+        final_types = torch.stack([F.pad(t, (0,max_atoms-t.size(0)), value=-1) if t.size(0)<max_atoms else t for t in all_types], dim=0)
+        return final_coords, final_types
 
     def _merge_points(self, points: np.ndarray) -> np.ndarray:
         """Merge close points and automatically determine the number of atoms."""

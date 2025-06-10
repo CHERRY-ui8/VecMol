@@ -1,5 +1,158 @@
 import torch
-from torch import nn
+import torch.nn as nn
+from torch_geometric.nn import MessagePassing, knn_graph
+import torch.nn.functional as F
+
+
+class CrossGraphEncoder(nn.Module):
+    def __init__(self, n_atom_types, grid_size, code_dim, hidden_dim=128, num_layers=4, k_neighbors=8):
+        super().__init__()
+        self.grid_size = grid_size
+        self.code_dim = code_dim
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.k_neighbors = k_neighbors
+        self.n_atom_types = n_atom_types
+
+        # learnable latent code for each grid point (G_L)
+        self.grid_codes = nn.Parameter(torch.zeros(grid_size**3, code_dim, requires_grad=True)) # 之前这里用buffer，出现报错element 0 of tensors does not require grad and does not have a grad_fn
+        # nn.init.xavier_uniform_(self.grid_codes)
+
+        # GNN layers
+        self.layers = nn.ModuleList([
+            MessagePassingGNN(n_atom_types, code_dim, hidden_dim)
+            for _ in range(num_layers)
+        ])
+
+    def forward(self, coords, atoms_channel):
+        """
+        coords: [N_atoms, 3]
+        atoms_channel: [N_atoms] (int, 0~n_atom_types-1)
+        """
+        device = coords.device
+        if coords.dim() == 3:  # 批处理输入 [batch_size, N_atoms, 3]
+            B, N_atoms, _ = coords.size()
+            coords = coords.reshape(-1, 3)  # [total_N_atoms, 3]
+            atoms_channel = atoms_channel.reshape(-1)  # [total_N_atoms]
+            if batch is None:
+                batch = torch.arange(B, device=device).repeat_interleave(N_atoms)
+        else:
+            B = 1
+            N_atoms = coords.size(0)
+            batch = torch.zeros(N_atoms, dtype=torch.long, device=device)
+
+        n_grid = self.grid_size ** 3
+
+        # 调试 atoms_channel
+        print(f"atoms_channel shape: {atoms_channel.shape}, dtype: {atoms_channel.dtype}")
+        print(f"atoms_channel min: {atoms_channel.min().item()}, max: {atoms_channel.max().item()}")
+
+        # 处理填充值并转换为 torch.long
+        PADDING_VALUE = 1000  # 根据调试输出设置
+        valid_mask = atoms_channel != PADDING_VALUE  # 过滤填充值
+        atoms_channel = atoms_channel.long()  # 转换为 torch.long
+        atoms_channel[~valid_mask] = 0  # 将填充值设为 0（或其他有效索引）
+
+        # 验证值范围
+        valid_atoms = atoms_channel[valid_mask]
+        if valid_atoms.numel() > 0:
+            assert valid_atoms.min() >= 0, f"Negative values in atoms_channel: {valid_atoms.min()}"
+            assert valid_atoms.max() < self.n_atom_types, f"atoms_channel max {valid_atoms.max()} >= n_atom_types {self.n_atom_types}"
+        
+        # 1. 原子类型one-hot
+        atom_feat = F.one_hot(atoms_channel, num_classes=self.n_atom_types).float()  # [N_atoms, n_atom_types]
+        
+        # 2. 构造 grid 坐标
+        grid_coords = self._make_grid_coords(device, B)  # [B, n_grid, 3]
+        grid_coords_flat = grid_coords.reshape(-1, 3)  # [B*n_grid, 3]
+
+        # 3. grid latent code
+        grid_codes = self.grid_codes.unsqueeze(0).expand(B, -1, -1).reshape(-1, self.code_dim)  # [B*n_grid, code_dim]
+
+        # 4. 拼接所有节点
+        # 确保特征维度匹配
+        if atom_feat.size(-1) != self.code_dim:
+            # 如果维度不匹配，使用线性层进行转换
+            if not hasattr(self, 'atom_feat_proj'):
+                self.atom_feat_proj = nn.Linear(self.n_atom_types, self.code_dim).to(device)
+            atom_feat = self.atom_feat_proj(atom_feat)  # [N_atoms, code_dim]
+
+        node_feats = torch.cat([atom_feat, grid_codes], dim=0)  # [N_atoms+B*n_grid, code_dim]
+        node_pos = torch.cat([coords, grid_coords_flat], dim=0)  # [N_atoms+B*n_grid, 3]
+        node_batch = torch.zeros(N_atoms + n_grid, dtype=torch.long, device=device)
+
+        # 5. 建边（KNN，原子和grid点都可互连）
+        edge_index = knn_graph(
+            x=node_pos, k=self.k_neighbors, batch=node_batch, loop=False
+        )
+
+        # 6. GNN消息传递
+        h = node_feats
+        for layer in self.layers:
+            h = layer(h, node_pos, edge_index)
+
+        # 7. 只取 grid 部分
+        grid_h = h[N_atoms:].reshape(B, n_grid, self.code_dim)
+        return grid_h  # [B, n_grid, code_dim]
+
+    def _make_grid_coords(self, device, batch_size):
+        # 生成 [-1,1] 区间的均匀网格
+        grid_1d = torch.linspace(-1, 1, self.grid_size, device=device)
+        mesh = torch.meshgrid(grid_1d, grid_1d, grid_1d, indexing='ij')
+        coords = torch.stack(mesh, dim=-1).reshape(-1, 3)  # [n_grid, 3]
+        coords = coords.unsqueeze(0).expand(batch_size, -1, -1)  # [B, n_grid, 3]
+        return coords
+
+
+class MessagePassingGNN(MessagePassing):
+    def __init__(self, atom_feat_dim, code_dim, hidden_dim):
+        super().__init__(aggr='mean')
+        self.code_dim = code_dim
+        self.hidden_dim = hidden_dim
+        # 修改MLP的输入维度，使其匹配实际输入
+        self.mlp = nn.Sequential(
+            nn.Linear(2*code_dim + 1, hidden_dim, bias=True),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, code_dim, bias=True)
+        )
+        
+        # 确保所有参数都设置了requires_grad=True
+        for param in self.parameters():
+            param.requires_grad = True
+
+    def forward(self, x, pos, edge_index):
+        # x: [N, code_dim], pos: [N, 3]
+        row, col = edge_index
+        rel = pos[row] - pos[col]  # [E, 3]
+        dist = torch.norm(rel, dim=-1, keepdim=True)  # [E, 1]
+        
+        # 确保数据类型正确
+        x = x.float()  # 确保x是float类型
+        rel = rel.float()  # 确保rel是float类型
+        dist = dist.float()  # 确保dist是float类型
+        
+        # 打印调试信息
+        print(f"x shape: {x.shape}, code_dim: {x.size(-1)}")
+        print(f"msg_input shape before cat: x[row]: {x[row].shape}, x[col]: {x[col].shape}, dist: {dist.shape}")
+        
+        msg_input = torch.cat([x[row], x[col], dist], dim=-1)  # [E, 2*code_dim+1]
+        print(f"msg_input shape: {msg_input.shape}")
+        print(f"mlp first layer weight shape: {self.mlp[0].weight.shape}")
+        
+        # 确保输入维度与MLP匹配
+        if msg_input.size(-1) != self.mlp[0].weight.size(1):
+            print(f"Warning: msg_input dimension {msg_input.size(-1)} != mlp input dimension {self.mlp[0].weight.size(1)}")
+            # 重新初始化MLP以匹配输入维度
+            self.mlp = nn.Sequential(
+                nn.Linear(msg_input.size(-1), self.hidden_dim),
+                nn.ReLU(),
+                nn.Linear(self.hidden_dim, self.code_dim)
+            ).to(msg_input.device)
+        
+        msg = self.mlp(msg_input)  # [E, code_dim]
+        aggr = self.propagate(edge_index, x=x, message=msg)  # [N, code_dim]
+        x = x + aggr  # 残差连接
+        return x
 
 
 class Encoder(nn.Module):
