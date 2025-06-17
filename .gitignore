@@ -2,3 +2,8 @@ funcmol/exps/*
 funcmol/dataset/data/*
 funcmol/wandb/*
 exps/*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
