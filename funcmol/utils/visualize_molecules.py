@@ -33,7 +33,7 @@ def visualize_molecule_comparison(
         create_pdb(reconstructed_coords, reconstructed_types, reconstructed_pdb)
         
         if save_path:
-            # 创建PyMOL脚本
+            view_file = os.path.join(os.path.dirname(save_path), 'view.txt')
             with open(pml_script, 'w') as f:
                 script_content = f'''
 # 加载分子
@@ -56,10 +56,11 @@ set transparency, 0, original
 
 # 设置视图
 orient
-
-# 设置背景颜色和光线追踪背景不透明，确保在png命令前执行
 set bg_rgb, [0,0,1] # 将背景设置为蓝色，以便更容易观察
 set ray_opaque_background, on 
+
+# 保存当前视角
+cmd.save_view("{view_file}")
 
 # 保存图像
 png {save_path}, ray=1, width=1200, height=600
@@ -265,4 +266,55 @@ def visualize_reconstruction_process(
     os.remove(field_pdb)
     
     # 关闭PyMOL
-    pymol.cmd.quit() 
+    pymol.cmd.quit()
+
+def visualize_single_molecule(
+    coords,
+    atom_types,
+    save_path=None,
+    title="Single Molecule"
+):
+    pdb_file = 'single.pdb'
+    pml_script = 'visualize_single.pml'
+    session_path = None
+    if save_path:
+        view_file = os.path.join(os.path.dirname(save_path), 'view.txt')
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        session_dir = os.path.join(os.path.dirname(save_path).replace('visualizations', 'pymol_sessions'))
+        os.makedirs(session_dir, exist_ok=True)
+        session_name = os.path.basename(save_path).replace('.png', '.pse')
+        session_path = os.path.join(session_dir, session_name)
+
+    try:
+        create_pdb(coords, atom_types, pdb_file)
+        if save_path:
+            with open(pml_script, 'w') as f:
+                script_content = f'''
+load {pdb_file}, mol
+hide all
+show spheres, mol
+set sphere_scale, 0.1, mol
+set transparency, 0, mol
+orient
+set bg_rgb, [0,0,1]
+set ray_opaque_background, on
+'''
+                # 只有在view.txt存在时才写入cmd.load_view
+                if os.path.exists(view_file):
+                    script_content += f'cmd.load_view("{view_file}")\n'
+                script_content += f'png {save_path}, ray=1, width=1200, height=600\n'
+                if session_path:
+                    script_content += f'save {session_path}\n'
+                script_content += 'quit\n'
+                f.write(script_content)
+            import subprocess
+            subprocess.run(['pymol', '-qc', pml_script], check=True)
+    except Exception as e:
+        print(f"Error in single molecule visualization: {str(e)}")
+    finally:
+        for f in [pdb_file, pml_script]:
+            try:
+                if os.path.exists(f):
+                    os.remove(f)
+            except:
+                pass 

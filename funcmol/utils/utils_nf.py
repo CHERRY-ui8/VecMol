@@ -82,9 +82,12 @@ def train_nf(
     metrics=None,
     field_maker=None,
     epoch: int = 0,
+    batch_train_losses=None,  # 新增：用于记录每个batch的loss
+    global_step=0,  # 新增：全局步数
+    plot_frequency=100,  # 新增：绘制频率
 ) -> float:
     """
-    Trains the neural field model.
+    Trains the neural field model for one epoch.
 
     Args:
         config (dict): Configuration dictionary.
@@ -98,263 +101,161 @@ def train_nf(
         metrics (dict, optional): Dictionary of metrics to track. Defaults to None.
         field_maker (object, optional): Field maker object. Defaults to None.
         epoch (int, optional): Current epoch number. Defaults to 0.
+        batch_train_losses (list, optional): List to store batch-wise losses. Defaults to None.
+        global_step (int, optional): Global training step. Defaults to 0.
+        plot_frequency (int, optional): Frequency of plotting loss curves. Defaults to 100.
 
     Returns:
         float: The computed loss value.
     """
-    # 添加调试信息
-    fabric.print(f">> Starting train_nf function")
-    fabric.print(f">> Global rank: {fabric.global_rank}")
-    fabric.print(f">> Config dirname: {config['dirname']}")
-    
-    enc.train()
     dec.train()
-    if metrics is not None:
-        for key in metrics.keys():
-            metrics[key].reset()
-
-    # 创建保存可视化结果的目录
-    vis_dir = os.path.join(config["dirname"], "visualizations")
-    os.makedirs(vis_dir, exist_ok=True)
-    fabric.print(f">> Created visualization directory: {vis_dir}")
-    
-    # 创建日志文件
-    log_dir = os.path.join(config["dirname"], "logs")
-    os.makedirs(log_dir, exist_ok=True)
-    log_file = os.path.join(log_dir, f"gradient_field_epoch_{epoch}.log")
-    fabric.print(f">> Created log directory: {log_dir}")
-    fabric.print(f">> Created log file: {log_file}")
-    
-    # 确保日志文件存在
-    if fabric.global_rank == 0:
-        try:
-            with open(log_file, 'w') as f:
-                f.write(f"=== Training Log for Epoch {epoch} ===\n")
-                f.write(f"Started at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            fabric.print(f">> Successfully wrote initial content to log file")
-        except Exception as e:
-            fabric.print(f">> Error writing to log file: {e}")
-    
-    # 创建进度条，只在主进程显示
-    if fabric.global_rank == 0:
-        pbar = tqdm(total=len(loader), desc="Training", leave=True)
+    enc.train()
     total_loss = 0.0
-    
-    # 设置梯度裁剪阈值，之前训练时，梯度爆炸，所以添加梯度裁剪
     max_grad_norm = 1.0
     
+    if fabric.global_rank == 0:
+        pbar = tqdm(total=len(loader), desc=f"Training Epoch {epoch}", 
+                   bar_format='{l_bar}{bar:10}{r_bar}{bar:-10b}',
+                   dynamic_ncols=True)
+    else:
+        pbar = None
+
+    # 创建可视化目录
+    if fabric.global_rank == 0:
+        vis_dir = os.path.join(config["dirname"], "visualizations", f"epoch_{epoch}")
+        os.makedirs(vis_dir, exist_ok=True)
+
+    # 预先创建GNFConverter实例
+    gnf_converter = GNFConverter(
+        sigma=config["gnf_converter"]["sigma"],
+        n_query_points=config["gnf_converter"]["n_query_points"],
+        n_iter=config["gnf_converter"]["n_iter"],
+        step_size=config["gnf_converter"]["step_size"],
+        merge_threshold=config["gnf_converter"]["merge_threshold"],
+        device=fabric.device
+    )
+
     for i, batch in enumerate(loader):
-        # 获取查询点
-        query_points = batch["xs"].to(fabric.device)  # [16, 500, 3]
-        
-        # 获取目标矢量场
-        occs_points, occs_grid = field_maker.forward(batch)  # [16, 500, 5], [16, 15, 32, 32, 32]
-        coords = batch["coords"].to(fabric.device)  # [16, n_atoms, 3]
-        atoms_channel = batch["atoms_channel"].to(fabric.device)  # [16, n_atoms]
-        target_field = compute_vector_field(query_points, coords, atoms_channel, n_atom_types=config["dset"]["n_channels"] // 3, device=fabric.device)  # [16, 500, 5, 3]
-        
-        # 前向传播
-        pred_field = dec(query_points)  # [16, 500, 5, 3]
-        
-        # 记录梯度场信息到日志文件
-        if fabric.global_rank == 0 and i % 100 == 0:  # 每100个batch记录一次
-            try:
-                with open(log_file, 'a') as f:
-                    f.write(f"\n=== Gradient Field Information (Epoch {epoch}, Batch {i}) ===\n")
-                    f.write(f"Query points shape: {query_points.shape}\n")
-                    f.write(f"Target field shape: {target_field.shape}\n")
-                    f.write(f"Predicted field shape: {pred_field.shape}\n")
-                    
-                    # 记录数值范围
-                    f.write("\nValue ranges:\n")
-                    f.write(f"Query points range: [{query_points.min().item():.3f}, {query_points.max().item():.3f}]\n")
-                    f.write(f"Target field range: [{target_field.min().item():.3f}, {target_field.max().item():.3f}]\n")
-                    f.write(f"Predicted field range: [{pred_field.min().item():.3f}, {pred_field.max().item():.3f}]\n")
-                    
-                    # 记录范数
-                    f.write("\nNorms:\n")
-                    f.write(f"Target field norm: {target_field.norm().item():.3f}\n")
-                    f.write(f"Predicted field norm: {pred_field.norm().item():.3f}\n")
-                    
-                    # 记录NaN和Inf检查
-                    f.write("\nNaN/Inf check:\n")
-                    f.write(f"Target field NaN count: {torch.isnan(target_field).sum().item()}\n")
-                    f.write(f"Target field Inf count: {torch.isinf(target_field).sum().item()}\n")
-                    f.write(f"Predicted field NaN count: {torch.isnan(pred_field).sum().item()}\n")
-                    f.write(f"Predicted field Inf count: {torch.isinf(pred_field).sum().item()}\n")
-                    
-                    # 记录一些具体的值
-                    f.write("\nSample values (first batch, first point, first atom type):\n")
-                    f.write(f"Target field: {target_field[0, 0, 0].tolist()}\n")
-                    f.write(f"Predicted field: {pred_field[0, 0, 0].tolist()}\n")
-                    f.write("================================\n")
-                fabric.print(f">> Wrote gradient field info to log file at batch {i}")
-            except Exception as e:
-                fabric.print(f">> Error writing to log file: {e}")
-        
-        # 计算梯度场损失
-        field_loss = criterion(pred_field, target_field)
-        
-        # 计算重建损失（使用梯度场的差异来近似）
-        batch_size = coords.size(0)
-        reconstruction_loss = 0.0
-        
-        for b in range(batch_size):
-            # 获取当前样本的有效原子
+        # 1. 准备数据
+        coords = batch["coords"].to(fabric.device)  # [B, n_atoms, 3]
+        atoms_channel = batch["atoms_channel"].to(fabric.device)  # [B, n_atoms]
+        query_points = batch["xs"].to(fabric.device)  # [B, n_points, 3]
+        B, n_atoms, _ = coords.shape
+
+        # 2. Encoder: 分子图 -> latent code (codes)
+        codes = enc(coords, atoms_channel)  # [B, n_grid, code_dim]
+
+        # 3. Decoder: codes + query_points -> pred_field
+        pred_field = dec(query_points, codes)  # [B, n_points, n_atom_types, 3]
+
+        # 输出5个query_point的梯度场大小（每50个batch输出一次）
+        if i % 50 == 0 and fabric.global_rank == 0:
+            import random
+            b_idx = 0  # 只看第一个样本
+            n_points = pred_field.shape[1]
+            idxs = random.sample(range(n_points), min(5, n_points))
+            norms = []
+            for idx in idxs:
+                # 取该query_point所有原子类型的3D向量，计算范数
+                vec = pred_field[b_idx, idx]  # [n_atom_types, 3]
+                norm = torch.norm(vec, dim=-1)  # [n_atom_types]
+                norms.append(norm.detach().cpu().numpy())
+            fabric.print(f"[Debug] 5个query_point的vector field范数: {norms}")
+
+        # 4. 用 GNFConverter 重建分子
+        with torch.no_grad():  # 在GNF转换时不计算梯度
+            recon_coords, recon_types = gnf_converter.gnf2mol(
+                pred_field.detach(),  # [B, n_points, n_atom_types, 3]
+                dec,  # 传入解码器
+                codes,  # 传入编码器的输出
+                atoms_channel  # 传入原子类型
+            )  # [B, n_atoms', 3], [B, n_atoms']
+
+        # 5. 计算重建loss（RMSD或类似指标）
+        loss = 0.0
+        for b in range(B):
             mask = atoms_channel[b] != PADDING_INDEX
-            valid_coords = coords[b, mask]  # [n_valid_atoms, 3]
-            valid_types = atoms_channel[b, mask]  # [n_valid_atoms]
-            
-            if valid_coords.size(0) == 0:
-                continue
-            
-            # 每隔一定轮次可视化分子结构
-            if fabric.global_rank == 0 and i % config.get("vis_every", 1000) == 0:  # 增加间隔到1000
-                try:
-                    fabric.print(f"\nAttempting visualization for batch {b}, iteration {i}")
-                    fabric.print(f"Original coords shape: {valid_coords.shape}")
-                    fabric.print(f"Original types shape: {valid_types.shape}")
-                    fabric.print(f"Predicted field shape: {pred_field[b].shape}")
-                    
-                    # 清理GPU缓存
-                    torch.cuda.empty_cache()
-                    
-                    # 使用GNFConverter重建分子结构
-                    gnf_converter = GNFConverter(
-                        sigma=1.0,
-                        n_query_points=200,  # 减少查询点数量
-                        n_iter=500,  # 减少迭代次数
-                        step_size=0.005,
-                        merge_threshold=0.2,
-                        device=fabric.device
-                    )
-                    
-                    # 确保输入维度正确
-                    pred_field_b = pred_field[b].unsqueeze(0)  # [1, n_points, n_atom_types, 3]
-                    valid_types_b = valid_types.unsqueeze(0)  # [1, n_valid_atoms]
-                    
-                    fabric.print(f"Input field shape: {pred_field_b.shape}")
-                    fabric.print(f"Input types shape: {valid_types_b.shape}")
-                    
-                    # 重建分子结构
-                    with torch.amp.autocast(device_type='cuda'):  # 移除 device_type 和 dtype 参数
-                        reconstructed_coords, reconstructed_types = gnf_converter.gnf2mol(
-                            pred_field_b,
-                            valid_types_b
-                        )
-                    
-                    fabric.print(f"Reconstructed coords shape: {reconstructed_coords.shape}")
-                    fabric.print(f"Reconstructed types shape: {reconstructed_types.shape}")
-                    
-                    # 创建可视化目录
-                    vis_dir = os.path.join(config["dirname"], "visualizations")
-                    os.makedirs(vis_dir, exist_ok=True)
-                    
-                    # 保存可视化结果
-                    save_path = os.path.join(vis_dir, f"molecule_epoch{epoch:04d}_batch{i:04d}_sample{b:02d}.png")
-                    
-                    # 使用try-finally确保PyMOL正确关闭
-                    try:
-                        from funcmol.utils.visualize_molecules import visualize_molecule_comparison
-                        visualize_molecule_comparison(
-                            valid_coords,
-                            valid_types,
-                            reconstructed_coords,
-                            reconstructed_types,
-                            save_path=save_path
-                        )
-                        fabric.print(f"Visualization saved to: {save_path}")
-                    except Exception as e:
-                        fabric.print(f"Visualization failed: {str(e)}")
-                    finally:
-                        # 确保PyMOL进程被终止
-                        import psutil
-                        for proc in psutil.process_iter(['pid', 'name']):
-                            if 'pymol' in proc.info['name'].lower():
-                                try:
-                                    proc.kill()
-                                except:
-                                    pass
-                    
-                except Exception as e:
-                    fabric.print(f"Error during visualization: {str(e)}")
-                    continue
+            gt_coords = coords[b, mask]
+            pred_coords = recon_coords[b]
+            if gt_coords.size(0) > 0 and pred_coords.size(0) > 0:
+                loss += compute_rmsd(gt_coords, pred_coords)
+        loss = loss / B
 
-            # 计算每个原子位置处的预测梯度场
-            atom_gradients = pred_field[b]  # [n_points, n_atom_types, 3]
-            target_gradients = target_field[b]  # [n_points, n_atom_types, 3]
-            
-            # 计算原子位置到查询点的距离
-            dist = torch.norm(query_points[b].unsqueeze(1) - valid_coords.unsqueeze(0), dim=2)  # [n_points, n_atoms]
-            
-            # 使用距离的倒数作为权重
-            weights = 1.0 / (dist + 1e-8)  # [n_points, n_atoms]
-            # 添加钳位操作，防止权重过大
-            weights = torch.clamp(weights, max=1e4) # 将最大权重限制为10000
-            weights = weights / weights.sum(dim=0, keepdim=True)  # 归一化权重
-            
-            # 计算梯度场差异
-            grad_diff = torch.norm(atom_gradients - target_gradients, dim=-1)  # [n_points, n_atom_types]
-            
-            # 扩展权重维度以匹配梯度场差异
-            weights = weights.unsqueeze(-1)  # [n_points, n_atoms, 1]
-            
-            # 计算加权梯度场差异
-            weighted_grad_diff = torch.sum(weights * grad_diff.unsqueeze(1), dim=0)  # [n_atoms, n_atom_types]
-            
-            # 取最小差异作为重建损失
-            reconstruction_loss += torch.min(weighted_grad_diff).mean()
-        
-        # 平均重建损失
-        reconstruction_loss = reconstruction_loss / batch_size
-        
-        # 总损失 = 重建损失 + 梯度场损失
-        # loss = reconstruction_loss + field_loss
-        loss = field_loss
-        
-        # 检查损失是否为NaN或Inf
-        if torch.isnan(loss) or torch.isinf(loss):
-            fabric.print(f"WARNING: Loss is NaN or Inf at epoch {epoch}, batch {i}. Skipping update.")
-            fabric.print(f"  reconstruction_loss: {reconstruction_loss.item():.4f}")
-            fabric.print(f"  field_loss: {field_loss.item():.4f}")
-            fabric.print(f"  pred_field norm: {pred_field.norm().item():.4f}")
-            fabric.print(f"  target_field norm: {target_field.norm().item():.4f}")
-            torch.cuda.empty_cache()
-            continue
-
-        fabric.print(f"DEBUG: Batch {i}, Original Loss: {loss.item():.4f}")
-        
-        total_loss += loss.item()
-        
-        # 更新进度条（只在主进程）
-        if fabric.global_rank == 0:
-            pbar.update(1)
-            pbar.set_postfix({
-                'loss': f'{loss:.4f}',
-                'recon_loss': f'{reconstruction_loss:.4f}',
-                'field_loss': f'{field_loss:.4f}',
-                'avg_loss': f'{metrics["loss"].compute().item():.4f}'
-            })
-        
-        # 反向传播
+        # 6. 反向传播与优化
         optim_dec.zero_grad()
         optim_enc.zero_grad()
         fabric.backward(loss)
-        
-        # 梯度裁剪
         torch.nn.utils.clip_grad_norm_(dec.parameters(), max_grad_norm)
         torch.nn.utils.clip_grad_norm_(enc.parameters(), max_grad_norm)
-        
         optim_dec.step()
         optim_enc.step()
-        
-        # 更新指标
-        # 钳位损失值，防止初期大损失影响平均显示
-        clipped_loss = torch.clamp(loss, max=1000.0) # 将损失值最大限制为1000
-        fabric.print(f"DEBUG: Batch {i}, Clipped Loss: {clipped_loss.item():.4f}")
-        metrics["loss"].update(clipped_loss)
-        
-        # 确保所有进程同步
+
+        # 7. 记录与可视化
+        total_loss += loss.item()
+        if metrics is not None:
+            metrics["loss"].update(loss)
+            
+        # 记录每个batch的loss
+        if batch_train_losses is not None:
+            batch_train_losses.append(loss.item())
+            
+        # 每隔一定步数绘制loss曲线
+        if fabric.global_rank == 0 and (global_step + i) % plot_frequency == 0:
+            try:
+                from funcmol.train_nf import plot_loss_curve
+                # 绘制最近的loss曲线
+                recent_losses = batch_train_losses[-plot_frequency*2:]  # 取最近2倍频率的数据点
+                plot_loss_curve(
+                    recent_losses,
+                    None,
+                    os.path.join(vis_dir, f"loss_curve_step_{global_step + i}.png"),
+                    f"(Step {global_step + i})"
+                )
+            except Exception as e:
+                fabric.print(f"Error plotting loss curve: {str(e)}")
+            
+        if fabric.global_rank == 0:
+            pbar.update(1)
+            pbar.set_postfix({
+                'batch': f'{i+1}/{len(loader)}',  # 显示当前batch数和总batch数
+                'loss': f'{loss.item():.4f}', 
+                'avg_loss': f'{metrics["loss"].compute().item():.4f}'
+            })
+            pbar.refresh()  # 强制刷新进度条
+
+        # 可视化
+        if fabric.global_rank == 0 and i % config.get("vis_every", 1000) == 0:
+            try:
+                for b in range(B):
+                    mask = atoms_channel[b] != PADDING_INDEX
+                    valid_coords = coords[b, mask]
+                    valid_types = atoms_channel[b, mask]
+                    save_path = os.path.join(vis_dir, f"sample{b:02d}-epoch{epoch:04d}-batch{i:04d}.png")
+                    from funcmol.utils.visualize_molecules import visualize_molecule_comparison, visualize_single_molecule
+                    visualize_molecule_comparison(
+                        valid_coords,
+                        valid_types,
+                        recon_coords[b],
+                        recon_types[b],
+                        save_path=save_path
+                    )
+                    # 新增：只画原始分子
+                    save_path_ori = os.path.join(vis_dir, f"sample{b:02d}-epoch{epoch:04d}-batch{i:04d}_ori.png")
+                    visualize_single_molecule(
+                        valid_coords,
+                        valid_types,
+                        save_path=save_path_ori
+                    )
+                    # 新增：只画重建分子
+                    save_path_recon = os.path.join(vis_dir, f"sample{b:02d}-epoch{epoch:04d}-batch{i:04d}_recon.png")
+                    visualize_single_molecule(
+                        recon_coords[b],
+                        recon_types[b],
+                        save_path=save_path_recon
+                    )
+            except Exception as e:
+                fabric.print(f"Visualization failed: {str(e)}")
+
         fabric.barrier()
 
     if fabric.global_rank == 0:
@@ -809,3 +710,32 @@ def compute_vector_field(
                 vector_field[b, :, t, :] = type_gradients
     
     return vector_field
+
+
+def compute_rmsd(coords1, coords2):
+    """
+    Calculate symmetric RMSD between two sets of coordinates.
+    
+    Args:
+        coords1 (torch.Tensor): First set of coordinates
+        coords2 (torch.Tensor): Second set of coordinates
+        
+    Returns:
+        torch.Tensor: RMSD value
+    """
+    # 确保输入张量保持梯度
+    coords1 = coords1.detach().requires_grad_(True)
+    coords2 = coords2.detach().requires_grad_(True)
+    
+    # 计算距离（不是平方距离）
+    dist1 = torch.sqrt(torch.sum((coords1.unsqueeze(1) - coords2.unsqueeze(0))**2, dim=2) + 1e-8)
+    dist2 = torch.sqrt(torch.sum((coords2.unsqueeze(1) - coords1.unsqueeze(0))**2, dim=2) + 1e-8)
+    
+    # 对距离取min
+    min_dist1 = torch.min(dist1, dim=1)[0]  # 对于coords1中的每个点，找到最近的coords2中的点
+    min_dist2 = torch.min(dist2, dim=1)[0]  # 对于coords2中的每个点，找到最近的coords1中的点
+    
+    # 直接平均，不需要再开方
+    rmsd = (torch.mean(min_dist1) + torch.mean(min_dist2)) / 2
+    
+    return rmsd

@@ -204,11 +204,18 @@ class GNFConverter(nn.Module):
         return gradients
 
     def gnf2mol(self, grad_field: torch.Tensor, 
+                decoder: nn.Module,
+                codes: torch.Tensor,
                 atom_types: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
-            直接用梯度场重建分子坐标。
+        直接用梯度场重建分子坐标。
+        Args:
             grad_field: [batch, n_points, n_atom_types, 3]  # 神经场输出
-            返回: (final_coords, final_types)
+            decoder: 解码器模型，用于动态计算向量场
+            codes: [batch, grid_size**3, code_dim]  # 编码器的输出
+            atom_types: 可选的原子类型
+        Returns:
+            (final_coords, final_types)
         """
         device = grad_field.device
         batch_size, n_points, n_atom_types, _ = grad_field.shape
@@ -223,20 +230,28 @@ class GNFConverter(nn.Module):
             # 对每个原子类型分别做流动和聚类
             for t in range(n_atom_types):
                 # 1. 初始化采样点（可用均匀网格或随机点）
-                z = torch.rand(n_query_points, 3, device=device) * 2 - 1  # [-1,1]区间
+                z = torch.rand(n_query_points, 3, device=device) * 4 - 2  # [-2,2]区间
                 # 2. 梯度上升
                 for i in range(self.n_iter):
-                    # 最近邻查找，把z映射到最近的query点
-                    dists = torch.cdist(z, grad_field.new_tensor(np.linspace(-1, 1, n_points)).unsqueeze(1).repeat(1, 3), p=2)
-                    idx = dists.argmin(dim=1)  # [n_query_points]
-                    grad = grad_field[b, idx, t, :]  # [n_query_points, 3]
+                    # 将采样点扩展为batch形式
+                    z_batch = z.unsqueeze(0)  # [1, n_query_points, 3]
+                    # 使用decoder计算当前点的向量场
+                    current_field = decoder(z_batch, codes[b:b+1])  # [1, n_query_points, n_atom_types, 3]
+                    grad = current_field[0, :, t, :]  # [n_query_points, 3]
+                    
+                    # 更新采样点位置
                     z = z + self.step_size * grad
+                    
+                    # 可选：添加一些正则化或约束
+                    z = torch.clamp(z, min=-2, max=2)  # 限制在[-2,2]范围内
+                
                 # 3. 聚类/合并
                 z_np = z.detach().cpu().numpy()
                 merged_points = self._merge_points(z_np)
                 if len(merged_points) > 0:
                     coords_list.append(torch.from_numpy(merged_points).to(device))
                     types_list.append(torch.full((len(merged_points),), t, dtype=torch.long, device=device))
+            
             # 合并所有类型
             if coords_list:
                 all_coords.append(torch.cat(coords_list, dim=0))
@@ -244,6 +259,7 @@ class GNFConverter(nn.Module):
             else:
                 all_coords.append(torch.empty(0, 3, device=device))
                 all_types.append(torch.empty(0, dtype=torch.long, device=device))
+        
         # pad到batch最大长度
         max_atoms = max([c.size(0) for c in all_coords]) if all_coords else 0
         final_coords = torch.stack([F.pad(c, (0,0,0,max_atoms-c.size(0))) if c.size(0)<max_atoms else c for c in all_coords], dim=0)

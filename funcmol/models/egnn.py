@@ -61,8 +61,8 @@ class EGNNLayer(MessagePassing):
         m_aggr = self.propagate(edge_index, x=x, message=m_ij)  # [N, hidden_channels]
         
         # 打印调试信息
-        print(f"h shape: {h.shape}, m_aggr shape: {m_aggr.shape}")
-        print(f"h device: {h.device}, m_aggr device: {m_aggr.device}")
+        # print(f"h shape: {h.shape}, m_aggr shape: {m_aggr.shape}")
+        # print(f"h device: {h.device}, m_aggr device: {m_aggr.device}")
         
         # 确保h和m_aggr在同一个设备上
         if h.device != m_aggr.device:
@@ -175,7 +175,7 @@ class EGNNVectorField(nn.Module):
             if codes.size(0) == 1:
                 grid_features = codes.expand(batch_size, -1, -1)  # [batch_size, n_grid, code_dim]
             else:
-                assert codes.size(0) == batch_size, f"codes batch_size {codes.size(0)} != query_points batch_size {batch_size}"
+                assert codes.size(0) == batch_size
                 grid_features = codes
         else:
             grid_features = self.grid_features.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, n_grid, code_dim]
@@ -209,17 +209,28 @@ class EGNNVectorField(nn.Module):
         h, x = node_features, node_coords
         for layer in self.layers:
             h, x = layer(x, h, edge_index)
+            # 清理不需要的中间变量
+            torch.cuda.empty_cache()
 
         # 7. 取出查询点部分的特征
-        h = h.view(batch_size, total_nodes, -1)  # [batch_size, total_nodes, code_dim]
-        h_query = h[:, :n_points, :]  # [batch_size, n_points, code_dim]
+        h = h.view(batch_size, total_nodes, -1)
+        h_query = h[:, :n_points, :]
+        x = x.view(batch_size, total_nodes, 3)
+        x_query = x[:, :n_points, :]
 
         # 8. 预测基准场和差值场
-        base_field = self.base_field_layer(h_query)  # [batch_size, n_points, n_atom_types * 3]
-        delta_field = self.delta_field_layer(h_query)  # [batch_size, n_points, n_atom_types * 3]
+        base_field = self.base_field_layer(h_query)
+        delta_field = self.delta_field_layer(h_query)
         
-        # 9. 合并基准场和差值场
-        vector_field = base_field + delta_field  # 残差连接
+        # 9. 合并基准场和差值场，并计算相对于查询点的位移
+        vector_field = base_field + delta_field
         vector_field = vector_field.view(batch_size, n_points, self.n_atom_types, 3)
+        
+        # 10. 计算最终的向量场（相对于查询点的位移）
+        vector_field = vector_field - query_points.unsqueeze(2) # ⚠️需要保证输出的是差量
+        
+        # 清理不需要的中间变量
+        del h, x, node_features, node_coords, edge_index
+        torch.cuda.empty_cache()
         
         return vector_field

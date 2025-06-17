@@ -16,7 +16,7 @@ n_samples: None
 
 # training params
 n_epochs: 1000
-eval_every: 5
+eval_every: 1
 use_ema: False
 lr_decay: False
 vis_every: 100  # 每100个batch可视化一次
@@ -30,7 +30,7 @@ decoder:
   n_layers: 3
   input_scale: 32
   grid_size: 8
-  k_neighbors: 8
+  k_neighbors: 32
 
 # set the running dir
 hydra:
@@ -61,21 +61,23 @@ dset:
   n_points: 100
   subsampling_ratio: 2
   num_workers: 4
-  batch_size: 32
+  batch_size: 8
   lr_enc: 0.0001
   lr_dec: 0.0005
 
 encoder:
   use_attention: false
   level_channels:
+  - 64
+  - 64
   - 128
-  - 256
-  - 512
   smaller: true
 
 gnf_converter:
   sigma: 1.0
   n_query_points: 100
   n_iter: 200
-  step_size: 0.01
+  step_size: 0.001
   merge_threshold: 0.6
+
+plot_frequency: 20
