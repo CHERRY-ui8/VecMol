@@ -8,6 +8,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 from torch.utils.data import Subset
+from torch_geometric.data import Data
+from torch_geometric.loader import DataLoader as PyGDataLoader
 
 from funcmol.models.decoder import get_grid
 from funcmol.utils.constants import ELEMENTS_HASH, PADDING_INDEX
@@ -101,13 +103,34 @@ class FieldDataset(Dataset):
     def __len__(self):
         return self.field_idxs.size(0)
 
-    def __getitem__(self, index) -> dict:
-        index = self.field_idxs[index]
-        sample_raw = self.data[index]
+    def __getitem__(self, index) -> Data:
+        # get raw data
+        idx = self.field_idxs[index]
+        sample_raw = self.data[idx]
+        
+        # preprocess molecule (handles rotation and centering)
         sample = self._preprocess_molecule(sample_raw)
-        sample.update({"xs": self._get_xs(sample)})
 
-        return sample
+        # sample points for field prediction
+        xs = self._get_xs(sample)
+
+        # get data from preprocessed sample
+        coords = sample["coords"]
+        atoms_channel = sample["atoms_channel"]
+
+        # remove padding to handle variable-sized molecules
+        valid_mask = atoms_channel != PADDING_INDEX
+        coords = coords[valid_mask]
+        atoms_channel = atoms_channel[valid_mask]
+
+        # create torch_geometric data object
+        data = Data(
+            pos=coords.float(),
+            x=atoms_channel.long(),
+            xs=xs.float(),
+            idx=torch.tensor([index], dtype=torch.long)
+        )
+        return data
 
     def _preprocess_molecule(self, sample_raw) -> dict:
         """
@@ -378,7 +401,7 @@ def create_field_loaders(
         if len(dset) > len(indexes):
             dset = Subset(dset, indexes)  # Smaller training set for debugging
 
-    loader = torch.utils.data.DataLoader(
+    loader = PyGDataLoader(
         dset,
         batch_size=min(config["dset"]["batch_size"], len(dset)),
         num_workers=config["dset"]["num_workers"],

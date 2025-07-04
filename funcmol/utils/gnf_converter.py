@@ -172,36 +172,58 @@ class GNFConverter(nn.Module):
         return total_gradients
 
     def _compute_gnf(self, coords: torch.Tensor, query_points: torch.Tensor, version: int) -> torch.Tensor:
-        """计算分子梯度场"""
-        # 确保输入维度正确
-        if len(coords.shape) == 2:  # [N, 3]
-            coords = coords.unsqueeze(0)  # [1, N, 3]
-        if len(query_points.shape) == 2:  # [M, 3]
-            query_points = query_points.unsqueeze(0)  # [1, M, 3]
-            
-        N = coords.shape[1]  # 原子数量
-        M = query_points.shape[1]  # 查询点数量
+        """Internal function to compute GNF for a single atom type"""
+        coords = coords.unsqueeze(1)      # (N, 1, 3)
+        query_points = query_points.unsqueeze(0)  # (1, M, 3)
         
-        # 计算原子到查询点的距离向量
-        diff = coords.unsqueeze(2) - query_points.unsqueeze(1)  # [B, N, M, 3]
-        dist = torch.norm(diff, dim=-1)  # [B, N, M]
+        diff = coords - query_points      # (N, M, 3)
+        dist_sq = torch.sum(diff ** 2, dim=-1, keepdim=True)  # (N, M, 1)
         
-        # 计算高斯权重
-        weights = torch.exp(-0.5 * (dist / self.sigma) ** 2)  # [B, N, M]
-        
-        # 归一化权重
-        weights = weights / (weights.sum(dim=1, keepdim=True) + 1e-8)  # [B, N, M]
-        
-        # 计算梯度场
+        individual_gradients = diff * torch.exp(-dist_sq / (2 * self.sigma ** 2)) / (self.sigma ** 2)
+
         if version == 1:
-            # 使用距离向量的归一化版本
-            diff_norm = diff / (dist.unsqueeze(-1) + 1e-8)  # [B, N, M, 3]
-            gradients = torch.sum(weights.unsqueeze(-1) * diff_norm, dim=1)  # [B, M, 3]
-        else:
-            # 使用原始距离向量
-            gradients = torch.sum(weights.unsqueeze(-1) * diff, dim=1)  # [B, M, 3]
-            
-        return gradients
+            return torch.sum(individual_gradients, dim=0)  # (M, 3)
+
+        if version == 2:  # 使用LogSumExp函数处理梯度场，可以有效拉近远近点的影响差异
+            eps = 1e-8
+
+            # 对每个原子产生的梯度分别进行幅度的对数变换
+            gradient_magnitudes = torch.norm(individual_gradients, dim=2, keepdim=True)  # (N, M, 1)，计算每个梯度向量的模长
+            gradient_directions = individual_gradients / (gradient_magnitudes + eps)  # (N, M, 3)，归一化
+
+            # 计算LogSumExp
+            log_sum_exp = torch.logsumexp(gradient_magnitudes, dim=0, keepdim=True)  # (1, M, 1)
+
+            # 检查是否有负值
+            if torch.any(log_sum_exp < 0):
+                # 如果出现负值，我们可以选择将其截断为非负值
+                log_sum_exp = torch.clamp(log_sum_exp, min=0)
+
+            # 计算最终梯度：方向之和 × LogSumExp(log(||∇fᵢ(z)||))
+            final_gradients = torch.sum(gradient_directions, dim=0) * log_sum_exp.squeeze(0)  # (M, 3)
+
+            return final_gradients
+
+        if version == 3:
+            final_gradients = self.compute_transformed_gradients(
+                individual_gradients,
+                log_method='log',
+                normalize_directions=True,
+                magnitude_clip=0.5,
+                step_clip=1.0,
+                lr=0.1
+            )
+            return final_gradients
+
+        if version == 4:
+            temperature = 0.5
+            distances = torch.sqrt(dist_sq.squeeze(-1))  # (N, M)
+            weights = torch.softmax(-distances / temperature, dim=0)  # (N, M)
+            weights = weights.unsqueeze(-1)  # (N, M, 1)
+            weighted_gradients = diff * weights  # (N, M, 3)
+            return torch.sum(weighted_gradients, dim=0)  # (M, 3)
+        
+        return torch.sum(individual_gradients, dim=0)  # (M, 3)
 
     def gnf2mol(self, grad_field: torch.Tensor, 
                 decoder: nn.Module,
@@ -230,21 +252,18 @@ class GNFConverter(nn.Module):
             # 对每个原子类型分别做流动和聚类
             for t in range(n_atom_types):
                 # 1. 初始化采样点（可用均匀网格或随机点）
-                z = torch.rand(n_query_points, 3, device=device) * 4 - 2  # [-2,2]区间
-                # 2. 梯度上升
+                z = torch.rand(n_query_points, 3, device=device) * 2 - 1  # [-1,1]区间
+                
+                # 2. 梯度上升（每次迭代都重新计算梯度！）
                 for i in range(self.n_iter):
-                    # 将采样点扩展为batch形式
+                    # 在新位置计算梯度场
                     z_batch = z.unsqueeze(0)  # [1, n_query_points, 3]
-                    # 使用decoder计算当前点的向量场
                     current_field = decoder(z_batch, codes[b:b+1])  # [1, n_query_points, n_atom_types, 3]
                     grad = current_field[0, :, t, :]  # [n_query_points, 3]
                     
                     # 更新采样点位置
                     z = z + self.step_size * grad
-                    
-                    # 可选：添加一些正则化或约束
-                    z = torch.clamp(z, min=-2, max=2)  # 限制在[-2,2]范围内
-                
+                                    
                 # 3. 聚类/合并
                 z_np = z.detach().cpu().numpy()
                 merged_points = self._merge_points(z_np)

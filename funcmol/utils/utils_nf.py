@@ -6,68 +6,12 @@ from torch import nn
 import shutil
 from funcmol.utils.constants import PADDING_INDEX
 from funcmol.utils.gnf_converter import GNFConverter
-
+from torch_geometric.utils import to_dense_batch
+from funcmol.models.encoder import CrossGraphEncoder
 from funcmol.models.decoder import Decoder, _normalize_coords, get_atom_coords
-from funcmol.models.encoder import Encoder
 from funcmol.utils.utils_base import convert_xyzs_to_sdf, save_xyz
 from funcmol.utils.utils_vis import visualize_voxel_grid
 import time
-
-
-def create_neural_field(config: dict, fabric: object) -> tuple:
-    """
-    Creates and compiles the Encoder and Decoder neural network models based on the provided configuration.
-
-    Args:
-        config (dict): A dictionary containing the configuration parameters for the models.
-            Expected keys:
-                - "decoder": A dictionary with the following keys:
-                    - "code_dim" (int): The dimension of the bottleneck code.
-                    - "hidden_dim" (int): The hidden dimension of the decoder.
-                    - "coord_dim" (int): The coordinate dimension for the decoder.
-                    - "n_layers" (int): The number of layers in the decoder.
-                    - "input_scale" (float): The input scale for the decoder.
-                - "dset": A dictionary with the following keys:
-                    - "n_channels" (int): The number of input channels.
-                    - "grid_dim" (int): The grid dimension of the dataset.
-                - "encoder": A dictionary with the following keys:
-                    - "level_channels" (list of int): The number of channels at each level of the encoder.
-                    - "smaller" (bool, optional): A flag indicating whether to use a smaller encoder. Defaults to False.
-        fabric (object): An object that provides utility functions such as printing and model compilation.
-
-    Returns:
-        tuple: A tuple containing the compiled Encoder and Decoder models.
-    """
-    enc = Encoder(
-        bottleneck_channel=config["decoder"]["code_dim"],
-        in_channels=config["dset"]["n_channels"],
-        level_channels=config["encoder"]["level_channels"],
-        smaller=config["encoder"]["smaller"] if "smaller" in config["encoder"] else False,
-    )
-    n_params_enc = sum(p.numel() for p in enc.parameters() if p.requires_grad)
-    fabric.print(f">> enc has {(n_params_enc/1e6):.02f}M parameters")
-
-    # 创建decoder配置
-    decoder_config = {
-        "grid_size": config["decoder"]["grid_size"],
-        "hidden_dim": config["decoder"]["hidden_dim"],
-        "n_layers": config["decoder"]["n_layers"],
-        "k_neighbors": config["decoder"]["k_neighbors"],
-        "n_channels": config["dset"]["n_channels"],
-        "code_dim": config["decoder"]["code_dim"]
-    }
-    
-    # 创建decoder
-    dec = Decoder(decoder_config)
-    n_params_dec = sum(p.numel() for p in dec.parameters() if p.requires_grad)
-    fabric.print(f">> dec has {(n_params_dec/1e6):.02f}M parameters")
-
-    fabric.print(">> compiling models...")
-    dec = torch.compile(dec)
-    enc = torch.compile(enc)
-    fabric.print(">> models compiled")
-
-    return enc, dec
 
 
 def train_nf(
@@ -82,9 +26,8 @@ def train_nf(
     metrics=None,
     field_maker=None,
     epoch: int = 0,
-    batch_train_losses=None,  # 新增：用于记录每个batch的loss
-    global_step=0,  # 新增：全局步数
-    plot_frequency=100,  # 新增：绘制频率
+    batch_train_losses=None, 
+    global_step=0, 
 ) -> float:
     """
     Trains the neural field model for one epoch.
@@ -103,7 +46,6 @@ def train_nf(
         epoch (int, optional): Current epoch number. Defaults to 0.
         batch_train_losses (list, optional): List to store batch-wise losses. Defaults to None.
         global_step (int, optional): Global training step. Defaults to 0.
-        plot_frequency (int, optional): Frequency of plotting loss curves. Defaults to 100.
 
     Returns:
         float: The computed loss value.
@@ -125,7 +67,7 @@ def train_nf(
         vis_dir = os.path.join(config["dirname"], "visualizations", f"epoch_{epoch}")
         os.makedirs(vis_dir, exist_ok=True)
 
-    # 预先创建GNFConverter实例
+    # 创建GNFConverter
     gnf_converter = GNFConverter(
         sigma=config["gnf_converter"]["sigma"],
         n_query_points=config["gnf_converter"]["n_query_points"],
@@ -134,22 +76,30 @@ def train_nf(
         merge_threshold=config["gnf_converter"]["merge_threshold"],
         device=fabric.device
     )
-
-    for i, batch in enumerate(loader):
+    
+    for i, data_batch in enumerate(loader):
+        data_batch = data_batch.to(fabric.device)
         # 1. 准备数据
-        coords = batch["coords"].to(fabric.device)  # [B, n_atoms, 3]
-        atoms_channel = batch["atoms_channel"].to(fabric.device)  # [B, n_atoms]
-        query_points = batch["xs"].to(fabric.device)  # [B, n_points, 3]
-        B, n_atoms, _ = coords.shape
+        # 使用 to_dense_batch 将 torch_geometric Batch 对象转换为填充后的稠密张量
+        # 以便与代码库中其他需要固定大小输入的功能兼容
+        coords, atom_mask = to_dense_batch(data_batch.pos, data_batch.batch, fill_value=0)
+        atoms_channel, _ = to_dense_batch(data_batch.x, data_batch.batch, fill_value=PADDING_INDEX)
+        B = coords.size(0)
+
+        # Reshape query_points to [B, n_points, 3]
+        query_points = data_batch.xs.to(fabric.device)
+        if query_points.dim() == 2:
+            n_points = config["dset"]["n_points"]
+            query_points = query_points.view(B, n_points, 3)
 
         # 2. Encoder: 分子图 -> latent code (codes)
-        codes = enc(coords, atoms_channel)  # [B, n_grid, code_dim]
+        codes = enc(data_batch)  # [B, n_grid, code_dim]
 
         # 3. Decoder: codes + query_points -> pred_field
         pred_field = dec(query_points, codes)  # [B, n_points, n_atom_types, 3]
-
+        
         # 输出5个query_point的梯度场大小（每50个batch输出一次）
-        if i % 50 == 0 and fabric.global_rank == 0:
+        if i % 500 == 0 and fabric.global_rank == 0:
             import random
             b_idx = 0  # 只看第一个样本
             n_points = pred_field.shape[1]
@@ -161,27 +111,48 @@ def train_nf(
                 norm = torch.norm(vec, dim=-1)  # [n_atom_types]
                 norms.append(norm.detach().cpu().numpy())
             fabric.print(f"[Debug] 5个query_point的vector field范数: {norms}")
+            
+        # 4. 计算目标矢量场
+        target_field = compute_vector_field(
+            query_points, 
+            coords, 
+            atoms_channel, 
+            n_atom_types=config["dset"]["n_channels"], 
+            device=fabric.device
+        )  # [B, n_points, n_atom_types, 3]
 
-        # 4. 用 GNFConverter 重建分子
-        with torch.no_grad():  # 在GNF转换时不计算梯度
-            recon_coords, recon_types = gnf_converter.gnf2mol(
-                pred_field.detach(),  # [B, n_points, n_atom_types, 3]
-                dec,  # 传入解码器
-                codes,  # 传入编码器的输出
-                atoms_channel  # 传入原子类型
-            )  # [B, n_atoms', 3], [B, n_atoms']
+        # 5. 计算神经场损失
+        # 确保维度匹配
+        assert pred_field.shape == target_field.shape, f"Shape mismatch: pred_field {pred_field.shape} vs target_field {target_field.shape}"
+        field_loss = criterion(pred_field, target_field)
+        
+        # 6. 用 GNFConverter 重建分子（每1000个batch做一次，其余batch跳过重建）
+        if i % 1000 == 0:
+            with torch.no_grad():  # 在GNF转换时不计算梯度
+                recon_coords, recon_types = gnf_converter.gnf2mol(
+                    pred_field.detach(),  # [B, n_points, n_atom_types, 3]
+                    dec,  # 传入解码器
+                    codes,  # 传入编码器的输出
+                    atoms_channel  # 传入原子类型
+                )  # [B, n_atoms', 3], [B, n_atoms']
+            # 7. 计算重建loss（RMSD）
+            recon_loss = 0.0
+            for b in range(B):
+                mask = atoms_channel[b] != PADDING_INDEX
+                gt_coords = coords[b, mask]
+                pred_coords = recon_coords[b]
+                if gt_coords.size(0) > 0 and pred_coords.size(0) > 0:
+                    recon_loss += compute_rmsd(gt_coords, pred_coords)
+            recon_loss = recon_loss / B
+        else:
+            recon_loss = 0.0
+        
+        # 8. 计算总损失（可以调整权重）
+        field_weight = config.get("field_loss_weight", 1.0)
+        recon_weight = config.get("recon_loss_weight", 1.0)
+        loss = field_weight * field_loss + recon_weight * recon_loss
 
-        # 5. 计算重建loss（RMSD或类似指标）
-        loss = 0.0
-        for b in range(B):
-            mask = atoms_channel[b] != PADDING_INDEX
-            gt_coords = coords[b, mask]
-            pred_coords = recon_coords[b]
-            if gt_coords.size(0) > 0 and pred_coords.size(0) > 0:
-                loss += compute_rmsd(gt_coords, pred_coords)
-        loss = loss / B
-
-        # 6. 反向传播与优化
+        # 9. 反向传播与优化
         optim_dec.zero_grad()
         optim_enc.zero_grad()
         fabric.backward(loss)
@@ -189,22 +160,28 @@ def train_nf(
         torch.nn.utils.clip_grad_norm_(enc.parameters(), max_grad_norm)
         optim_dec.step()
         optim_enc.step()
-
-        # 7. 记录与可视化
+        
+        # 10. 记录与可视化
         total_loss += loss.item()
         if metrics is not None:
             metrics["loss"].update(loss)
+            metrics["field_loss"].update(field_loss)
+            metrics["recon_loss"].update(recon_loss)
             
         # 记录每个batch的loss
         if batch_train_losses is not None:
-            batch_train_losses.append(loss.item())
+            batch_train_losses.append({
+                "total_loss": loss.item(),
+                "field_loss": field_loss.item(),
+                "recon_loss": recon_loss.item() if isinstance(recon_loss, torch.Tensor) else recon_loss,
+            })
             
         # 每隔一定步数绘制loss曲线
-        if fabric.global_rank == 0 and (global_step + i) % plot_frequency == 0:
+        if fabric.global_rank == 0 and i % config.get("vis_every", 1000) == 0:
             try:
                 from funcmol.train_nf import plot_loss_curve
                 # 绘制最近的loss曲线
-                recent_losses = batch_train_losses[-plot_frequency*2:]  # 取最近2倍频率的数据点
+                recent_losses = [l["total_loss"] for l in batch_train_losses[-config.get("vis_every", 1000)*2:]]
                 plot_loss_curve(
                     recent_losses,
                     None,
@@ -219,11 +196,13 @@ def train_nf(
             pbar.set_postfix({
                 'batch': f'{i+1}/{len(loader)}',  # 显示当前batch数和总batch数
                 'loss': f'{loss.item():.4f}', 
+                'field_loss': f'{field_loss.item():.4f}',
+                'recon_loss': f'{recon_loss.item():.4f}' if isinstance(recon_loss, torch.Tensor) else f'{recon_loss:.4f}',
                 'avg_loss': f'{metrics["loss"].compute().item():.4f}'
             })
             pbar.refresh()  # 强制刷新进度条
 
-        # 可视化
+        # 可视化分子结构
         if fabric.global_rank == 0 and i % config.get("vis_every", 1000) == 0:
             try:
                 for b in range(B):
@@ -301,18 +280,33 @@ def eval_nf(
         for key in metrics.keys():
             metrics[key].reset()
 
-    for i, batch in enumerate(loader):
-        # 获取查询点
-        query_points = batch["xs"].to(fabric.device)
+    for i, data_batch in enumerate(loader):
+        data_batch = data_batch.to(fabric.device)
+
+        # 使用 to_dense_batch 转换数据格式以兼容现有函数
+        coords, atom_mask = to_dense_batch(data_batch.pos, data_batch.batch, fill_value=0)
+        atoms_channel, _ = to_dense_batch(data_batch.x, data_batch.batch, fill_value=PADDING_INDEX)
+        B = coords.size(0)
+        
+        # Reshape query_points to [B, n_points, 3]
+        query_points = data_batch.xs.to(fabric.device)
+        if query_points.dim() == 2:
+            n_points = config["dset"]["n_points"]
+            query_points = query_points.view(B, n_points, 3)
         
         # 获取目标矢量场
-        occs_points, occs_grid = field_maker.forward(batch)
-        coords = batch["coords"].to(fabric.device)
-        atoms_channel = batch["atoms_channel"].to(fabric.device)
-        target_field = compute_vector_field(query_points, coords, atoms_channel, n_atom_types=config["dset"]["n_channels"] // 3, device=fabric.device)
+        # occs_points, occs_grid = field_maker.forward(batch) # field_maker可能需要适配新的batch格式
+        target_field = compute_vector_field(
+            query_points, 
+            coords, 
+            atoms_channel, 
+            n_atom_types=config["dset"]["n_channels"], 
+            device=fabric.device
+        )
         
         # 前向传播
-        pred_field = dec(query_points)
+        codes = enc(data_batch)
+        pred_field = dec(query_points, codes)
         
         # 计算损失
         loss = criterion(pred_field, target_field)
@@ -599,16 +593,14 @@ def load_neural_field(nf_checkpoint: dict, fabric: object, config: dict = None) 
     if config is None:
         config = nf_checkpoint["config"]
 
-    dec = Decoder(
-        n_channels=config["dset"]["n_channels"],
-        grid_dim=config["dset"]["grid_dim"],
-        hidden_dim=config["decoder"]["hidden_dim"],
-        code_dim=config["decoder"]["code_dim"],
-        coord_dim=config["decoder"]["coord_dim"],
-        n_layers=config["decoder"]["n_layers"],
-        input_scale=config["decoder"]["input_scale"],
-        fabric=fabric
-    )
+    dec = Decoder({
+        "grid_size": config["dset"]["grid_dim"],
+        "hidden_dim": config["decoder"]["hidden_dim"],
+        "n_layers": config["decoder"]["n_layers"],
+        "k_neighbors": config["encoder"]["k_neighbors"],
+        "n_channels": config["dset"]["n_channels"],
+        "code_dim": config["decoder"]["code_dim"]
+    })
     dec = load_network(nf_checkpoint, dec, fabric, net_name="dec")
     dec = torch.compile(dec)
     dec.eval()
@@ -695,16 +687,17 @@ def compute_vector_field(
                 
                 # 使用当前原子类型特定的 sigma 参数
                 gnf_converter = GNFConverter(
-                    sigma=sigma_params[t],
+                    # sigma=sigma_params[t],
+                    sigma=0.9,
                     device=device
                 ).to(device)
                 
                 # 计算当前类型原子的梯度场
                 type_gradients = gnf_converter._compute_gnf(
                     type_coords,  # [n_type_atoms, 3]
-                    xs[b],  # [500, 3]
-                    version=1
-                )  # [500, 3]
+                    xs[b],  # [n_points, 3]
+                    version=4
+                )  # [n_points, 3]
                 
                 # 将梯度场赋值给对应的通道
                 vector_field[b, :, t, :] = type_gradients
@@ -739,3 +732,60 @@ def compute_rmsd(coords1, coords2):
     rmsd = (torch.mean(min_dist1) + torch.mean(min_dist2)) / 2
     
     return rmsd
+
+
+def create_neural_field(config: dict, fabric: object) -> tuple:
+    """
+    Creates and compiles the Encoder and Decoder neural network models based on the provided configuration.
+
+    Args:
+        config (dict): A dictionary containing the configuration parameters for the models.
+            Expected keys:
+                - "decoder": A dictionary with the following keys:
+                    - "code_dim" (int): The dimension of the bottleneck code.
+                    - "hidden_dim" (int): The hidden dimension of the decoder.
+                    - "coord_dim" (int): The coordinate dimension for the decoder.
+                    - "n_layers" (int): The number of layers in the decoder.
+                    - "input_scale" (float): The input scale for the decoder.
+                - "dset": A dictionary with the following keys:
+                    - "n_channels" (int): The number of input channels.
+                    - "grid_dim" (int): The grid dimension of the dataset.
+                - "encoder": A dictionary with the following keys:
+                    - "level_channels" (list of int): The number of channels at each level of the encoder.
+                    - "smaller" (bool, optional): A flag indicating whether to use a smaller encoder. Defaults to False.
+        fabric (object): An object that provides utility functions such as printing and model compilation.
+
+    Returns:
+        tuple: A tuple containing the compiled Encoder and Decoder models.
+    """
+    # Initialize the encoder
+    enc = CrossGraphEncoder(
+        n_atom_types=config["dset"]["n_channels"],
+        grid_size=config["dset"]["grid_dim"],
+        code_dim=config["decoder"]["code_dim"],
+        hidden_dim=config["decoder"]["hidden_dim"],
+        num_layers=config["encoder"]["num_layers"],
+        k_neighbors=config["encoder"]["k_neighbors"]
+    )
+    n_params_enc = sum(p.numel() for p in enc.parameters() if p.requires_grad)
+    fabric.print(f">> enc has {(n_params_enc/1e6):.02f}M parameters")
+
+    # Initialize the decoder
+    dec = Decoder({
+        "grid_size": config["dset"]["grid_dim"],
+        "hidden_dim": config["decoder"]["hidden_dim"],
+        "n_layers": config["decoder"]["n_layers"],
+        "k_neighbors": config["encoder"]["k_neighbors"],
+        "n_channels": config["dset"]["n_channels"],
+        "code_dim": config["decoder"]["code_dim"]
+    }, device=fabric.device)
+    n_params_dec = sum(p.numel() for p in dec.parameters() if p.requires_grad)
+    fabric.print(f">> dec has {(n_params_dec/1e6):.02f}M parameters")
+
+    # Compile the models
+    fabric.print(">> compiling models...")
+    dec = torch.compile(dec)
+    enc = torch.compile(enc)
+    fabric.print(">> models compiled")
+
+    return enc, dec

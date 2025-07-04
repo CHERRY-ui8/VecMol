@@ -2,21 +2,23 @@ import torch
 import torch.nn as nn
 from torch_geometric.nn import MessagePassing, knn_graph
 import torch.nn.functional as F
+from torch_geometric.loader import DataLoader
 
 
 class CrossGraphEncoder(nn.Module):
     def __init__(self, n_atom_types, grid_size, code_dim, hidden_dim=128, num_layers=4, k_neighbors=8):
         super().__init__()
+        self.n_atom_types = n_atom_types
         self.grid_size = grid_size
         self.code_dim = code_dim
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.k_neighbors = k_neighbors
-        self.n_atom_types = n_atom_types
 
         # learnable latent code for each grid point (G_L)
-        self.grid_codes = nn.Buffer(torch.zeros(grid_size**3, code_dim, requires_grad=True)) # 之前这里用buffer，出现报错element 0 of tensors does not require grad and does not have a grad_fn
-        # nn.init.xavier_uniform_(self.grid_codes)
+        self.grid_codes = nn.Parameter(torch.Tensor(grid_size**3, code_dim))
+        # self.grid_codes = nn.Buffer(torch.zeros(grid_size**3, code_dim, requires_grad=True)) # 之前这里用buffer，出现报错element 0 of tensors does not require grad and does not have a grad_fn
+        nn.init.xavier_uniform_(self.grid_codes) 
 
         # GNN layers
         self.layers = nn.ModuleList([
@@ -24,40 +26,34 @@ class CrossGraphEncoder(nn.Module):
             for _ in range(num_layers)
         ])
 
-    def forward(self, coords, atoms_channel):
+    def forward(self, data):
         """
-        coords: [B, N_atoms, 3] 或 [N_atoms, 3]
-        atoms_channel: [B, N_atoms] 或 [N_atoms] (int, 0~n_atom_types-1)
+        data: torch_geometric.data.Batch object
+              - data.pos: [N_total_atoms, 3], atom coordinates
+              - data.x: [N_total_atoms], atom types
+              - data.batch: [N_total_atoms], batch index for each atom
         """
-        device = coords.device
-        if coords.dim() == 2:  # 单个样本输入 [N_atoms, 3]
-            coords = coords.unsqueeze(0)  # [1, N_atoms, 3]
-            atoms_channel = atoms_channel.unsqueeze(0)  # [1, N_atoms]
-            B = 1
-        else:
-            B = coords.size(0)
+        atom_coords = data.pos
+        atoms_channel = data.x  # atom types
+        atom_batch_idx = data.batch
         
-        N_atoms = coords.size(1)
+        device = atom_coords.device
+        B = data.num_graphs # 一个batch中包含的分子数量
+        N_total_atoms = data.num_nodes
+        
         n_grid = self.grid_size ** 3
 
-        # 处理填充值并转换为 torch.long
-        PADDING_VALUE = 1000
-        valid_mask = atoms_channel != PADDING_VALUE  # [B, N_atoms]
-        atoms_channel = atoms_channel.long()  # 转换为 torch.long
-        atoms_channel[~valid_mask] = 0  # 将填充值设为 0
-
+        # 1. 原子类型 one-hot
         # 验证值范围
-        valid_atoms = atoms_channel[valid_mask]
-        if valid_atoms.numel() > 0:
-            assert valid_atoms.min() >= 0, f"Negative values in atoms_channel: {valid_atoms.min()}"
-            assert valid_atoms.max() < self.n_atom_types, f"atoms_channel max {valid_atoms.max()} >= n_atom_types {self.n_atom_types}"
+        if atoms_channel.numel() > 0:
+            assert atoms_channel.min() >= 0, f"Negative values in atoms_channel: {atoms_channel.min()}"
+            assert atoms_channel.max() < self.n_atom_types, f"atoms_channel max {atoms_channel.max()} >= n_atom_types {self.n_atom_types}"
         
-        # 1. 原子类型one-hot
-        atom_feat = F.one_hot(atoms_channel, num_classes=self.n_atom_types).float()  # [B, N_atoms, n_atom_types]
+        atom_feat = F.one_hot(atoms_channel.long(), num_classes=self.n_atom_types).float()  # [N_total_atoms, n_atom_types]
         
         # 2. 构造 grid 坐标
-        grid_coords = self._make_grid_coords(device, B)  # [B, n_grid, 3]
-        grid_coords_flat = grid_coords.reshape(-1, 3)  # [B*n_grid, 3]
+        grid_coords_single = create_grid_coords(device, 1, self.grid_size).squeeze(0)  # [n_grid, 3]
+        grid_coords_flat = grid_coords_single.repeat(B, 1)  # [B*n_grid, 3]
 
         # 3. grid latent code
         grid_codes = self.grid_codes.unsqueeze(0).expand(B, -1, -1).reshape(-1, self.code_dim)  # [B*n_grid, code_dim]
@@ -65,23 +61,17 @@ class CrossGraphEncoder(nn.Module):
         # 4. 拼接所有节点
         # 确保特征维度匹配
         if atom_feat.size(-1) != self.code_dim:
-            # 如果维度不匹配，使用线性层进行转换
             if not hasattr(self, 'atom_feat_proj'):
                 self.atom_feat_proj = nn.Linear(self.n_atom_types, self.code_dim).to(device)
-            atom_feat = self.atom_feat_proj(atom_feat)  # [B, N_atoms, code_dim]
+            atom_feat = self.atom_feat_proj(atom_feat)  # [N_total_atoms, code_dim]
 
-        # 重塑原子特征以匹配grid_codes的形状
-        atom_feat = atom_feat.reshape(-1, self.code_dim)  # [B*N_atoms, code_dim]
-        coords_flat = coords.reshape(-1, 3)  # [B*N_atoms, 3]
-
-        # 创建batch索引
-        batch_idx = torch.arange(B, device=device).repeat_interleave(N_atoms)  # [B*N_atoms]
+        # 创建 grid 的 batch 索引
         grid_batch_idx = torch.arange(B, device=device).repeat_interleave(n_grid)  # [B*n_grid]
 
         # 拼接所有节点
-        node_feats = torch.cat([atom_feat, grid_codes], dim=0)  # [(B*N_atoms + B*n_grid), code_dim]
-        node_pos = torch.cat([coords_flat, grid_coords_flat], dim=0)  # [(B*N_atoms + B*n_grid), 3]
-        node_batch = torch.cat([batch_idx, grid_batch_idx], dim=0)  # [(B*N_atoms + B*n_grid)]
+        node_feats = torch.cat([atom_feat, grid_codes], dim=0)  # [(N_total_atoms + B*n_grid), code_dim]
+        node_pos = torch.cat([atom_coords, grid_coords_flat], dim=0)  # [(N_total_atoms + B*n_grid), 3]
+        node_batch = torch.cat([atom_batch_idx, grid_batch_idx], dim=0)  # [(N_total_atoms + B*n_grid)]
 
         # 5. 建边（KNN，原子和grid点都可互连）
         edge_index = knn_graph(
@@ -94,16 +84,8 @@ class CrossGraphEncoder(nn.Module):
             h = layer(h, node_pos, edge_index)
 
         # 7. 只取 grid 部分并重塑为 [B, n_grid, code_dim]
-        grid_h = h[B*N_atoms:].reshape(B, n_grid, self.code_dim)
+        grid_h = h[N_total_atoms:].reshape(B, n_grid, self.code_dim)
         return grid_h  # [B, n_grid, code_dim]
-
-    def _make_grid_coords(self, device, batch_size):
-        # 生成 [-1,1] 区间的均匀网格
-        grid_1d = torch.linspace(-1, 1, self.grid_size, device=device)
-        mesh = torch.meshgrid(grid_1d, grid_1d, grid_1d, indexing='ij')
-        coords = torch.stack(mesh, dim=-1).reshape(-1, 3)  # [n_grid, 3]
-        coords = coords.unsqueeze(0).expand(batch_size, -1, -1)  # [B, n_grid, 3]
-        return coords
 
 
 class MessagePassingGNN(MessagePassing):
@@ -141,6 +123,14 @@ class MessagePassingGNN(MessagePassing):
         x = x + aggr  # 残差连接
         x = self.layernorm(x)
         return x
+
+def create_grid_coords(device, batch_size, grid_size):
+    """Create grid coordinates for a given grid size."""
+    grid_1d = torch.linspace(-1, 1, grid_size, device=device)
+    mesh = torch.meshgrid(grid_1d, grid_1d, grid_1d, indexing='ij')
+    coords = torch.stack(mesh, dim=-1).reshape(-1, 3)  # [n_grid, 3]
+    coords = coords.unsqueeze(0).expand(batch_size, -1, -1)  # [B, n_grid, 3]
+    return coords
 
 
 class Encoder(nn.Module):

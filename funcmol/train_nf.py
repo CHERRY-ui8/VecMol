@@ -1,3 +1,6 @@
+import sys
+sys.path.append("..")
+
 import time
 import hydra
 import os
@@ -10,13 +13,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 from funcmol.utils.utils_base import setup_fabric
 from funcmol.utils.utils_nf import (
-    create_neural_field, train_nf, eval_nf, save_checkpoint, load_network, load_optim_fabric, compute_vector_field, compute_rmsd
+    create_neural_field, train_nf, eval_nf, save_checkpoint, load_network, load_optim_fabric
 )
 from funcmol.models.encoder import CrossGraphEncoder
+from funcmol.models.decoder import Decoder
 from funcmol.dataset.dataset_field import create_field_loaders
 from funcmol.dataset.field_maker import FieldMaker
 from funcmol.utils.constants import ELEMENTS_HASH, PADDING_INDEX
-from funcmol.utils.gnf_converter import GNFConverter, MolecularStructure
 from lightning import Fabric
 torch._dynamo.config.suppress_errors = True
 
@@ -44,7 +47,6 @@ def plot_loss_curve(train_losses, val_losses, save_path, title_suffix=""):
     plt.close()
 
 
-# 使用 Hydra 装饰器，读取位于 configs/train_nf_drugs.yaml 的配置文件，并传递为 config
 @hydra.main(config_path="configs", config_name="train_nf_qm9", version_base=None)
 def main(config):
     # 设置CUDA内存分配策略
@@ -70,16 +72,7 @@ def main(config):
     # 只有主进程（global_rank == 0）加载验证集
 
     # model
-    enc = CrossGraphEncoder(
-        n_atom_types=config["dset"]["n_channels"],
-        grid_size=config["dset"]["grid_dim"],
-        code_dim=config["decoder"]["code_dim"],
-        hidden_dim=config["decoder"]["hidden_dim"],
-        num_layers=config["encoder"]["num_layers"],
-        k_neighbors=config["encoder"]["k_neighbors"]
-    )
-    dec = create_neural_field(config, fabric)[1]
-    
+    enc, dec = create_neural_field(config, fabric)
     criterion = nn.MSELoss()
 
     # optimizers
@@ -111,9 +104,13 @@ def main(config):
     # Metrics
     metrics = {
         "loss": torchmetrics.MeanMetric().to(fabric.device),
+        "field_loss": torchmetrics.MeanMetric().to(fabric.device),
+        "recon_loss": torchmetrics.MeanMetric().to(fabric.device),
     }
     metrics_val = {
         "loss": torchmetrics.MeanMetric(sync_on_compute=False).to(fabric.device),
+        "field_loss": torchmetrics.MeanMetric(sync_on_compute=False).to(fabric.device),
+        "recon_loss": torchmetrics.MeanMetric(sync_on_compute=False).to(fabric.device),
     }
     
     ##############################
@@ -128,9 +125,6 @@ def main(config):
     train_losses = []  # 新增：用于记录所有epoch的train loss
     val_losses = []    # 新增：用于记录所有epoch的val loss
     global_step = 0
-    
-    # 新增：设置绘制频率
-    plot_frequency = config.get("plot_frequency", 100)
     
     for epoch in range(start_epoch, config["n_epochs"]):
         start_time = time.time()
@@ -152,8 +146,7 @@ def main(config):
             field_maker=field_maker,
             epoch=epoch,
             batch_train_losses=batch_train_losses,  # 新增：传入batch_train_losses
-            global_step=global_step,  # 新增：传入global_step
-            plot_frequency=plot_frequency  # 新增：传入plot_frequency
+            global_step=global_step  # 新增：传入global_step
         )
         train_losses.append(loss_train)
         global_step += len(loader_train)  # 更新全局步数
@@ -183,7 +176,7 @@ def main(config):
         if fabric.global_rank == 0:
             # 绘制整个训练过程的loss曲线
             plot_loss_curve(
-                train_losses, 
+                [l["total_loss"] for l in train_losses],
                 val_losses, 
                 os.path.join(config["dirname"], f"loss_curve_epoch_{epoch}.png"),
                 f"(Epoch {epoch})"

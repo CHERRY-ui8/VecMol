@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from torch_geometric.nn import MessagePassing, knn_graph
+from funcmol.models.encoder import create_grid_coords
 
 class EGNNLayer(MessagePassing):
     def __init__(self, in_channels, hidden_channels, out_channels, k_neighbors=8):
@@ -88,7 +89,8 @@ class EGNNVectorField(nn.Module):
                  num_layers: int = 3,
                  k_neighbors: int = 8,
                  n_atom_types: int = 5,
-                 code_dim: int = 512):
+                 code_dim: int = 512,
+                 device=None):
         """
         Initialize the EGNN Vector Field model.
 
@@ -99,6 +101,7 @@ class EGNNVectorField(nn.Module):
             k_neighbors (int): Number of nearest neighbors for KNN graph
             n_atom_types (int): Number of atom types
             code_dim (int): Dimension of the latent code and node features
+            device (torch.device, optional): The device to run the model on.
         """
         super().__init__()
         self.grid_size = grid_size
@@ -109,7 +112,7 @@ class EGNNVectorField(nn.Module):
         self.code_dim = code_dim
 
         # Create learnable grid points and features for G_L
-        self.register_buffer('grid_points', self._create_grid_points())
+        self.register_buffer('grid_points', create_grid_coords(device, 1, self.grid_size).squeeze(0))
         self.grid_features = nn.Parameter(torch.randn(grid_size**3, code_dim, requires_grad=True))
 
         # Create EGNN layers
@@ -123,34 +126,12 @@ class EGNNVectorField(nn.Module):
         ])
         
         # 基准场预测层
-        self.base_field_layer = nn.Sequential(
+        self.field_layer = nn.Sequential(
             nn.Linear(code_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, n_atom_types * 3)  # 3D vector for each atom type
         )
         
-        # 差值预测层
-        self.delta_field_layer = nn.Sequential(
-            nn.Linear(code_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, n_atom_types * 3)  # 3D vector for each atom type
-        )
-
-    def _create_grid_points(self):
-        """Create grid points for G_L"""
-        grid_points = []
-        for x in range(self.grid_size):
-            for y in range(self.grid_size):
-                for z in range(self.grid_size):
-                    # Normalize coordinates to [-1, 1]
-                    point = torch.tensor([
-                        2.0 * x / (self.grid_size - 1) - 1.0,
-                        2.0 * y / (self.grid_size - 1) - 1.0,
-                        2.0 * z / (self.grid_size - 1) - 1.0
-                    ])
-                    grid_points.append(point)
-        return torch.stack(grid_points)
-
     def forward(self, query_points, codes=None):
         """
         输入：
@@ -166,38 +147,30 @@ class EGNNVectorField(nn.Module):
         n_grid = grid_points.size(0)
 
         # 1. 初始化节点特征
-        # 查询点特征初始化为0，使用与codes相同的维度
+        # 查询点特征初始化为0
         query_features = torch.zeros(batch_size, n_points, self.code_dim, device=device)
         
-        # 锚点特征为codes（latent grid），如果codes为None则用self.grid_features
-        if codes is not None:
-            # 确保codes的batch_size与query_points匹配
-            if codes.size(0) == 1:
-                grid_features = codes.expand(batch_size, -1, -1)  # [batch_size, n_grid, code_dim]
-            else:
-                assert codes.size(0) == batch_size
-                grid_features = codes
-        else:
-            grid_features = self.grid_features.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, n_grid, code_dim]
+        # 锚点特征为codes
+        assert codes is not None and codes.size(0) == batch_size, "Codes must be provided with matching batch size"
+        grid_features = codes
 
         # 2. 初始化节点坐标
-        # 查询点坐标: [batch_size, n_points, 3]
         # 锚点坐标: [1, n_grid, 3] -> [batch_size, n_grid, 3]
         grid_coords = grid_points.unsqueeze(0).expand(batch_size, -1, -1)
 
-        # 3. 合并节点特征和坐标
-        # 节点顺序：[查询点, 锚点]
-        node_features = torch.cat([query_features, grid_features], dim=1)  # [batch_size, n_points + n_grid, code_dim]
-        node_coords = torch.cat([query_points, grid_coords], dim=1)        # [batch_size, n_points + n_grid, 3]
+        # 3. 合并节点，为每个分子构建一个图
+        # [B, n_points + n_grid, C]
+        node_features = torch.cat([query_features, grid_features], dim=1)
+        # [B, n_points + n_grid, 3]
+        node_coords = torch.cat([query_points, grid_coords], dim=1)
         total_nodes = n_points + n_grid
 
-        # 4. 展平成单batch图
-        node_features = node_features.reshape(-1, self.code_dim)  # [batch_size * total_nodes, code_dim]
-        node_coords = node_coords.reshape(-1, 3)  # [batch_size * total_nodes, 3]
-        # batch索引
+        # 4. 展平成适合PyG的格式
+        node_features = node_features.reshape(-1, self.code_dim)  # [B * total_nodes, code_dim]
+        node_coords = node_coords.reshape(-1, 3)                  # [B * total_nodes, 3]
         batch_index = torch.arange(batch_size, device=device).repeat_interleave(total_nodes)
 
-        # 5. 用knn_graph建边（只连查询点到锚点）
+        # 5. 用knn_graph建边
         edge_index = knn_graph(
             x=node_coords,
             k=self.k_neighbors,
@@ -205,32 +178,22 @@ class EGNNVectorField(nn.Module):
             loop=False
         )
 
-        # 6. 逐层EGNN消息传递（每层都要同步更新特征和坐标）
+        # 6. 逐层EGNN消息传递
         h, x = node_features, node_coords
         for layer in self.layers:
             h, x = layer(x, h, edge_index)
-            # 清理不需要的中间变量
-            torch.cuda.empty_cache()
 
-        # 7. 取出查询点部分的特征
+        # 7. 从batch中恢复并提取查询点部分的结果
         h = h.view(batch_size, total_nodes, -1)
         h_query = h[:, :n_points, :]
         x = x.view(batch_size, total_nodes, 3)
         x_query = x[:, :n_points, :]
 
-        # 8. 预测基准场和差值场
-        base_field = self.base_field_layer(h_query)
-        delta_field = self.delta_field_layer(h_query)
+        # 8. 预测源点
+        predicted_sources = self.field_layer(h_query) # [B, n_points, n_atom_types * 3]
+        predicted_sources = predicted_sources.view(batch_size, n_points, self.n_atom_types, 3)
         
-        # 9. 合并基准场和差值场，并计算相对于查询点的位移
-        vector_field = base_field + delta_field
-        vector_field = vector_field.view(batch_size, n_points, self.n_atom_types, 3)
-        
-        # 10. 计算最终的向量场（相对于查询点的位移）
-        vector_field = vector_field - query_points.unsqueeze(2) # ⚠️需要保证输出的是差量
-        
-        # 清理不需要的中间变量
-        del h, x, node_features, node_coords, edge_index
-        torch.cuda.empty_cache()
+        # 9. 计算矢量场: (x_query - predicted_sources)
+        vector_field = x_query.unsqueeze(2) - predicted_sources # [B, n_points, n_atom_types, 3]
         
         return vector_field

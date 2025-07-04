@@ -9,38 +9,35 @@ from itertools import chain
 from funcmol.models.egnn import EGNNVectorField
 
 class Decoder(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, device):
         """
         Initializes the Decoder class.
 
         Args:
             config (dict): Configuration dictionary containing parameters for the decoder.
+            device (torch.device): The device to run the model on.
         """
         super().__init__()
+        self.device = device
         self.net = EGNNVectorField(
             grid_size=config["grid_size"],
             hidden_dim=config["hidden_dim"],
             num_layers=config["n_layers"],
             k_neighbors=config["k_neighbors"],
             n_atom_types=config["n_channels"],
-            code_dim=config["code_dim"]
+            code_dim=config["code_dim"],
+            device=device
         )
 
-    def forward(self, x: torch.Tensor, codes: torch.Tensor = None) -> torch.Tensor:
+    def forward(self, x, codes):
         """
-        Forward pass of the decoder.
-
-        Args:
-            x: Input tensor of shape (batch_size, n_points, 3)
-            codes: Optional tensor of codes of shape (batch_size, code_dim)
-
-        Returns:
-            Tensor: Output tensor of shape (batch_size, n_points, n_atom_types, 3)
+        x: [B, n_points, 3]
+        codes: [B, n_grid, code_dim]
         """
+        # Pass the 3D tensors directly to the EGNN, which handles batching internally.
         vector_field = self.net(x, codes)
         
-        # 注意⚠️！这里vector_field 已经是 [batch_size, n_points, n_atom_types, 3] 的形状
-        # 不需要再次重塑
+        # The output from EGNN is already in the correct shape: [B, n_points, n_atom_types, 3]
         return vector_field
 
     def render_code(

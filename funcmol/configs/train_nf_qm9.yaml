@@ -19,7 +19,9 @@ n_epochs: 1000
 eval_every: 1
 use_ema: False
 lr_decay: False
-vis_every: 100  # 每100个batch可视化一次
+vis_every: 1000  # 每100个batch可视化一次（包括loss曲线和分子结构）
+field_loss_weight: 1.0  # 神经场损失的权重
+recon_loss_weight: 1.0  # 重建损失的权重
 
 # override config 这里decoder的参数是根据NF的代码来的，添加了spatial参数
 decoder:
@@ -61,23 +63,14 @@ dset:
   n_points: 100
   subsampling_ratio: 2
   num_workers: 4
-  batch_size: 8
+  batch_size: 16
   lr_enc: 0.0001
   lr_dec: 0.0005
 
-encoder:
-  use_attention: false
-  level_channels:
-  - 64
-  - 64
-  - 128
-  smaller: true
 
 gnf_converter:
-  sigma: 1.0
-  n_query_points: 100
-  n_iter: 200
+  sigma: 0.9
+  n_query_points: 2000
+  n_iter: 1000
   step_size: 0.001
-  merge_threshold: 0.6
-
-plot_frequency: 20
+  merge_threshold: 2
