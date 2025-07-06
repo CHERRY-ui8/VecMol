@@ -67,15 +67,20 @@ def train_nf(
         vis_dir = os.path.join(config["dirname"], "visualizations", f"epoch_{epoch}")
         os.makedirs(vis_dir, exist_ok=True)
 
-    # 创建GNFConverter
+    # 创建GNF转换器（按照项目习惯从yaml配置中读取参数）
+    gnf_config = config.get("gnf_converter", {})
     gnf_converter = GNFConverter(
-        sigma=config["gnf_converter"]["sigma"],
-        n_query_points=config["gnf_converter"]["n_query_points"],
-        n_iter=config["gnf_converter"]["n_iter"],
-        step_size=config["gnf_converter"]["step_size"],
-        merge_threshold=config["gnf_converter"]["merge_threshold"],
+        sigma=gnf_config.get("sigma", 0.9),
+        n_query_points=gnf_config.get("n_query_points", 2000),
+        n_iter=gnf_config.get("n_iter", 1000),
+        step_size=gnf_config.get("step_size", 0.001),
+        merge_threshold=gnf_config.get("merge_threshold", 2),
         device=fabric.device
     )
+    
+    # 用于存储重建结果的变量
+    recon_coords = None
+    recon_types = None
     
     for i, data_batch in enumerate(loader):
         data_batch = data_batch.to(fabric.device)
@@ -98,6 +103,14 @@ def train_nf(
         # 3. Decoder: codes + query_points -> pred_field
         pred_field = dec(query_points, codes)  # [B, n_points, n_atom_types, 3]
         
+        target_field = compute_vector_field(
+            query_points, 
+            coords, 
+            atoms_channel, 
+            n_atom_types=config["dset"]["n_channels"], 
+            device=fabric.device
+        )
+        
         # 输出5个query_point的梯度场大小（每50个batch输出一次）
         if i % 500 == 0 and fabric.global_rank == 0:
             import random
@@ -111,6 +124,19 @@ def train_nf(
                 norm = torch.norm(vec, dim=-1)  # [n_atom_types]
                 norms.append(norm.detach().cpu().numpy())
             fabric.print(f"[Debug] 5个query_point的vector field范数: {norms}")
+
+            target_norms = []
+            rmsds = []
+            for idx in idxs:
+                target_vec = target_field[b_idx, idx]  # [n_atom_types, 3]
+                target_norm = torch.norm(target_vec, dim=-1)  # [n_atom_types]
+                target_norms.append(target_norm.detach().cpu().numpy())
+                # 计算RMSD
+                pred_vec = pred_field[b_idx, idx]  # [n_atom_types, 3]
+                rmsd = compute_rmsd(pred_vec, target_vec)
+                rmsds.append(rmsd.item() if hasattr(rmsd, 'item') else float(rmsd))
+            fabric.print(f"[Debug] 5个query_point的target field标准答案范数: {target_norms}")
+            fabric.print(f"[Debug] 5个query_point的vector field与target field RMSD: {rmsds}")
             
         # 4. 计算目标矢量场
         target_field = compute_vector_field(
@@ -126,15 +152,17 @@ def train_nf(
         assert pred_field.shape == target_field.shape, f"Shape mismatch: pred_field {pred_field.shape} vs target_field {target_field.shape}"
         field_loss = criterion(pred_field, target_field)
         
-        # 6. 用 GNFConverter 重建分子（每1000个batch做一次，其余batch跳过重建）
-        if i % 1000 == 0:
-            with torch.no_grad():  # 在GNF转换时不计算梯度
+        # 6. 用 GNF转换器 重建分子（每个epoch重建一次，在最后一个batch执行）
+        if i == len(loader) - 1:  # 只在每个epoch的最后一个batch执行重建
+            # 直接使用现有的gnf2mol函数
+            with torch.no_grad():
                 recon_coords, recon_types = gnf_converter.gnf2mol(
                     pred_field.detach(),  # [B, n_points, n_atom_types, 3]
                     dec,  # 传入解码器
                     codes,  # 传入编码器的输出
                     atoms_channel  # 传入原子类型
-                )  # [B, n_atoms', 3], [B, n_atoms']
+                )
+            
             # 7. 计算重建loss（RMSD）
             recon_loss = 0.0
             for b in range(B):
@@ -177,7 +205,7 @@ def train_nf(
             })
             
         # 每隔一定步数绘制loss曲线
-        if fabric.global_rank == 0 and i % config.get("vis_every", 1000) == 0:
+        if fabric.global_rank == 0 and i == len(loader) - 1:  # 只在每个epoch的最后一个batch绘制
             try:
                 from funcmol.train_nf import plot_loss_curve
                 # 绘制最近的loss曲线
@@ -185,8 +213,14 @@ def train_nf(
                 plot_loss_curve(
                     recent_losses,
                     None,
-                    os.path.join(vis_dir, f"loss_curve_step_{global_step + i}.png"),
-                    f"(Step {global_step + i})"
+                    os.path.join(vis_dir, f"loss_curve_epoch_{epoch}.png"),
+                    f"(Epoch {epoch})"
+                )
+                from funcmol.train_nf import plot_field_loss_curve
+                plot_field_loss_curve(
+                    batch_train_losses,
+                    os.path.join(vis_dir, f"field_loss_curve_epoch_{epoch}.png"), 
+                    f"(Epoch {epoch})"
                 )
             except Exception as e:
                 fabric.print(f"Error plotting loss curve: {str(e)}")
@@ -202,36 +236,18 @@ def train_nf(
             })
             pbar.refresh()  # 强制刷新进度条
 
-        # 可视化分子结构
-        if fabric.global_rank == 0 and i % config.get("vis_every", 1000) == 0:
+        # 可视化分子结构（每个epoch的最后一个batch）
+        if fabric.global_rank == 0 and i == len(loader) - 1 and recon_coords is not None:
             try:
-                for b in range(B):
-                    mask = atoms_channel[b] != PADDING_INDEX
-                    valid_coords = coords[b, mask]
-                    valid_types = atoms_channel[b, mask]
-                    save_path = os.path.join(vis_dir, f"sample{b:02d}-epoch{epoch:04d}-batch{i:04d}.png")
-                    from funcmol.utils.visualize_molecules import visualize_molecule_comparison, visualize_single_molecule
-                    visualize_molecule_comparison(
-                        valid_coords,
-                        valid_types,
-                        recon_coords[b],
-                        recon_types[b],
-                        save_path=save_path
-                    )
-                    # 新增：只画原始分子
-                    save_path_ori = os.path.join(vis_dir, f"sample{b:02d}-epoch{epoch:04d}-batch{i:04d}_ori.png")
-                    visualize_single_molecule(
-                        valid_coords,
-                        valid_types,
-                        save_path=save_path_ori
-                    )
-                    # 新增：只画重建分子
-                    save_path_recon = os.path.join(vis_dir, f"sample{b:02d}-epoch{epoch:04d}-batch{i:04d}_recon.png")
-                    visualize_single_molecule(
-                        recon_coords[b],
-                        recon_types[b],
-                        save_path=save_path_recon
-                    )
+                # 使用GNF转换器的可视化功能
+                gnf_converter.visualize_conversion_results(
+                    recon_coords,
+                    recon_types,
+                    coords,
+                    atoms_channel,
+                    save_dir=vis_dir,
+                    sample_indices=list(range(min(B, 5)))
+                )
             except Exception as e:
                 fabric.print(f"Visualization failed: {str(e)}")
 

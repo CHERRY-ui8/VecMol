@@ -3,9 +3,10 @@ import torch.nn as nn
 import numpy as np
 from scipy.spatial.distance import cdist
 from scipy.optimize import linear_sum_assignment
-from typing import Callable, Optional, Tuple, List
+from typing import Callable, Optional, Tuple, List, Dict, Any
 from scipy.spatial import cKDTree
 import torch.nn.functional as F
+from funcmol.utils.constants import PADDING_INDEX
 
 class MolecularStructure:
     """Data class to represent a molecular structure."""
@@ -347,3 +348,126 @@ class GNFConverter(nn.Module):
         
         merged = np.array(merged)
         return merged
+
+    def compute_reconstruction_metrics(
+        self,
+        recon_coords: torch.Tensor,
+        recon_types: torch.Tensor,
+        gt_coords: torch.Tensor,
+        gt_types: torch.Tensor
+    ) -> Dict[str, float]:
+        """
+        计算重建分子与真实分子之间的评估指标。
+        
+        Args:
+            recon_coords: 重建的分子坐标 [batch_size, n_atoms, 3]
+            recon_types: 重建的原子类型 [batch_size, n_atoms]
+            gt_coords: 真实的分子坐标 [batch_size, n_atoms, 3]
+            gt_types: 真实的原子类型 [batch_size, n_atoms]
+            
+        Returns:
+            Dict[str, float]: 包含各种评估指标的字典
+        """
+        from funcmol.utils.utils_nf import compute_rmsd
+        
+        batch_size = recon_coords.size(0)
+        metrics = {
+            'avg_rmsd': 0.0,
+            'min_rmsd': float('inf'),
+            'max_rmsd': 0.0,
+            'successful_reconstructions': 0
+        }
+        
+        rmsd_values = []
+        
+        for b in range(batch_size):
+            # 过滤掉填充的原子
+            gt_mask = gt_types[b] != PADDING_INDEX
+            recon_mask = recon_types[b] != -1  # 假设-1是填充值
+            
+            if gt_mask.sum() > 0 and recon_mask.sum() > 0:
+                gt_valid_coords = gt_coords[b, gt_mask]
+                recon_valid_coords = recon_coords[b, recon_mask]
+                
+                # 计算RMSD
+                rmsd = compute_rmsd(gt_valid_coords, recon_valid_coords)
+                rmsd_value = rmsd.item() if hasattr(rmsd, 'item') else float(rmsd)
+                rmsd_values.append(rmsd_value)
+                
+                metrics['avg_rmsd'] += rmsd_value
+                metrics['min_rmsd'] = min(metrics['min_rmsd'], rmsd_value)
+                metrics['max_rmsd'] = max(metrics['max_rmsd'], rmsd_value)
+                metrics['successful_reconstructions'] += 1
+        
+        if metrics['successful_reconstructions'] > 0:
+            metrics['avg_rmsd'] /= metrics['successful_reconstructions']
+            metrics['rmsd_std'] = np.std(rmsd_values) if rmsd_values else 0.0
+        else:
+            metrics['avg_rmsd'] = float('inf')
+            metrics['rmsd_std'] = 0.0
+        
+        return metrics
+    
+    def visualize_conversion_results(
+        self,
+        recon_coords: torch.Tensor,
+        recon_types: torch.Tensor,
+        gt_coords: Optional[torch.Tensor] = None,
+        gt_types: Optional[torch.Tensor] = None,
+        save_dir: Optional[str] = None,
+        sample_indices: Optional[list] = None
+    ) -> None:
+        """
+        可视化转换结果，比较重建分子与真实分子。
+        
+        Args:
+            recon_coords: 重建的分子坐标
+            recon_types: 重建的原子类型
+            gt_coords: 可选的真实分子坐标
+            gt_types: 可选的真实原子类型
+            save_dir: 保存可视化结果的目录
+            sample_indices: 要可视化的样本索引列表
+        """
+        if save_dir is None:
+            return
+        
+        import os
+        from funcmol.utils.visualize_molecules import visualize_molecule_comparison, visualize_single_molecule
+        
+        os.makedirs(save_dir, exist_ok=True)
+        
+        batch_size = recon_coords.size(0)
+        if sample_indices is None:
+            sample_indices = list(range(min(batch_size, 5)))  # 默认可视化前5个样本
+        
+        for i in sample_indices:
+            if i >= batch_size:
+                continue
+                
+            # 过滤填充的原子
+            recon_mask = recon_types[i] != -1
+            recon_valid_coords = recon_coords[i, recon_mask]
+            recon_valid_types = recon_types[i, recon_mask]
+            
+            if gt_coords is not None and gt_types is not None:
+                gt_mask = gt_types[i] != PADDING_INDEX
+                gt_valid_coords = gt_coords[i, gt_mask]
+                gt_valid_types = gt_types[i, gt_mask]
+                
+                # 比较可视化
+                save_path = os.path.join(save_dir, f"sample{i:02d}_comparison.png")
+                visualize_molecule_comparison(
+                    gt_valid_coords,
+                    gt_valid_types,
+                    recon_valid_coords,
+                    recon_valid_types,
+                    save_path=save_path
+                )
+            else:
+                # 只可视化重建分子
+                save_path = os.path.join(save_dir, f"sample{i:02d}_reconstructed.png")
+                visualize_single_molecule(
+                    recon_valid_coords,
+                    recon_valid_types,
+                    save_path=save_path
+                )

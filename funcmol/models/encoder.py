@@ -18,7 +18,7 @@ class CrossGraphEncoder(nn.Module):
         # learnable latent code for each grid point (G_L)
         self.grid_codes = nn.Parameter(torch.Tensor(grid_size**3, code_dim))
         # self.grid_codes = nn.Buffer(torch.zeros(grid_size**3, code_dim, requires_grad=True)) # 之前这里用buffer，出现报错element 0 of tensors does not require grad and does not have a grad_fn
-        nn.init.xavier_uniform_(self.grid_codes) 
+        nn.init.xavier_uniform_(self.grid_codes) #TODO: grid-coord here. grid codes zeros init
 
         # GNN layers
         self.layers = nn.ModuleList([

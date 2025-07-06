@@ -1,11 +1,14 @@
 defaults:
   - dset: qm9
+  - converter: gnf_converter
   - encoder: gnn
   - decoder: decoder_global
   - override hydra/job_logging: custom
   - _self_
 
 debug: False
+debug_one_mol: True
+debug_subset: False
 wandb: False
 seed: 1234
 exp_dir: exps/neural_field
@@ -19,7 +22,6 @@ n_epochs: 1000
 eval_every: 1
 use_ema: False
 lr_decay: False
-vis_every: 1000  # 每100个batch可视化一次（包括loss曲线和分子结构）
 field_loss_weight: 1.0  # 神经场损失的权重
 recon_loss_weight: 1.0  # 重建损失的权重
 
@@ -60,17 +62,9 @@ dset:
   - 'N'
   - F
   n_channels: 5
-  n_points: 100
+  n_points: 500
   subsampling_ratio: 2
   num_workers: 4
-  batch_size: 16
+  batch_size: 1
   lr_enc: 0.0001
   lr_dec: 0.0005
-
-
-gnf_converter:
-  sigma: 0.9
-  n_query_points: 2000
-  n_iter: 1000
-  step_size: 0.001
-  merge_threshold: 2

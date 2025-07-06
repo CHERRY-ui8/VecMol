@@ -32,6 +32,8 @@ class FieldDataset(Dataset):
         sample_full_grid (bool): Whether to sample the full grid. Default is False.
         targeted_sampling_ratio (int): Ratio for targeted sampling. Default is 2.
         cubes_around (int): Number of cubes around to consider. Default is 3.
+        debug_one_mol (bool): Whether to keep only the first molecule for debugging. Default is False.
+        debug_subset (bool): Whether to use only the first 128 molecules for debugging. Default is False.
     """
     def __init__(
         self,
@@ -47,6 +49,8 @@ class FieldDataset(Dataset):
         sample_full_grid: bool = False,
         targeted_sampling_ratio: int = 2,
         cubes_around: int = 3,
+        debug_one_mol: bool = False,
+        debug_subset: bool = False,
     ):
         if elements is None:
             elements = ELEMENTS_HASH
@@ -65,6 +69,12 @@ class FieldDataset(Dataset):
 
         self._read_data()
         self._filter_by_elements(elements)
+
+        # 只保留第一个分子用于单分子overfit实验或选择前128个分子用于调试
+        if debug_one_mol or os.environ.get("DEBUG_ONE_MOL", "0") == "1":
+            self.data = [self.data[0]]*len(self.data)
+        elif debug_subset:
+            self.data = self.data[:128]  # 选择前128个分子
 
         self.increments = torch.tensor(
             list(itertools.product(list(range(-cubes_around, cubes_around+1)), repeat=3))
@@ -387,7 +397,9 @@ def create_field_loaders(
         resolution=config["dset"]["resolution"],
         grid_dim=config["dset"]["grid_dim"],
         radius=config["dset"]["atomic_radius"],
-        sample_full_grid=sample_full_grid
+        sample_full_grid=sample_full_grid,
+        debug_one_mol=config.get("debug_one_mol", False),
+        debug_subset=config.get("debug_subset", False),
     )
 
     # reduce the dataset size for ["val", "test"] or debugging mode

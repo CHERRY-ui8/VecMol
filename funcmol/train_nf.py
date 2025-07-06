@@ -15,8 +15,6 @@ from funcmol.utils.utils_base import setup_fabric
 from funcmol.utils.utils_nf import (
     create_neural_field, train_nf, eval_nf, save_checkpoint, load_network, load_optim_fabric
 )
-from funcmol.models.encoder import CrossGraphEncoder
-from funcmol.models.decoder import Decoder
 from funcmol.dataset.dataset_field import create_field_loaders
 from funcmol.dataset.field_maker import FieldMaker
 from funcmol.utils.constants import ELEMENTS_HASH, PADDING_INDEX
@@ -41,6 +39,27 @@ def plot_loss_curve(train_losses, val_losses, save_path, title_suffix=""):
     plt.xlabel('Steps')
     plt.ylabel('Loss')
     plt.title(f'Training and Validation Loss {title_suffix}')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(save_path)
+    plt.close()
+
+def plot_field_loss_curve(batch_train_losses, save_path, title_suffix=""):
+    """
+    只绘制 field loss 曲线。
+    Args:
+        batch_train_losses (list): 每个元素是 {"field_loss": ...} 的字典
+        save_path (str): 图片保存路径
+        title_suffix (str): 图标题后缀
+    """
+    # 提取 field_loss 列表
+    field_losses = [l["field_loss"] for l in batch_train_losses]
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(field_losses, label='Field Loss', color='orange')
+    plt.xlabel('Steps')
+    plt.ylabel('Field Loss')
+    plt.title(f'Field Loss Curve {title_suffix}')
     plt.legend()
     plt.grid(True)
     plt.savefig(save_path)
@@ -176,18 +195,15 @@ def main(config):
         if fabric.global_rank == 0:
             # 绘制整个训练过程的loss曲线
             plot_loss_curve(
-                [l["total_loss"] for l in train_losses],
-                val_losses, 
-                os.path.join(config["dirname"], f"loss_curve_epoch_{epoch}.png"),
-                f"(Epoch {epoch})"
-            )
-            
-            # 绘制当前epoch的详细loss曲线
-            plot_loss_curve(
-                batch_train_losses[-len(loader_train):],  # 只取当前epoch的batch losses
+                [l["total_loss"] for l in batch_train_losses],
                 None,
-                os.path.join(config["dirname"], f"loss_curve_epoch_{epoch}_detailed.png"),
-                f"(Epoch {epoch} - Detailed)"
+                os.path.join(config["dirname"], f"loss_curve_all_batches.png"),
+                "(All Batches)"
+            )
+            plot_field_loss_curve(
+                batch_train_losses,
+                os.path.join(config["dirname"], f"field_loss_curve_all_batches.png"),
+                "(All Batches)"
             )
             
         # log

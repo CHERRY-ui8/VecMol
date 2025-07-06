@@ -47,6 +47,16 @@ align reconstructed, original
 hide all
 show spheres, original
 show spheres, reconstructed
+color gray, original and name C
+color white, original and name H
+color red, original and name O
+color blue, original and name N
+color green, original and name F
+color gray, reconstructed and name C
+color white, reconstructed and name H
+color red, reconstructed and name O
+color blue, reconstructed and name N
+color green, reconstructed and name F
 set sphere_scale, 0.1, reconstructed  # 增大重建分子的球体大小
 set sphere_scale, 0.1, original
 
@@ -292,6 +302,11 @@ def visualize_single_molecule(
 load {pdb_file}, mol
 hide all
 show spheres, mol
+color gray, mol and name C
+color white, mol and name H
+color red, mol and name O
+color blue, mol and name N
+color green, mol and name F
 set sphere_scale, 0.1, mol
 set transparency, 0, mol
 orient
