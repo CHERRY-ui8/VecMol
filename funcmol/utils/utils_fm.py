@@ -1,8 +1,6 @@
-
 import os
 import torch
 
-from funcmol.dataset.field_maker import FieldMaker
 from funcmol.utils.utils_nf import load_network, infer_codes, normalize_code
 
 
@@ -90,7 +88,6 @@ def compute_codes(
     split: str,
     fabric: object,
     normalize_codes: bool,
-    field_maker: FieldMaker=None,
     code_stats: dict=None,
 ) -> tuple:
     """
@@ -103,7 +100,6 @@ def compute_codes(
         split (str): Data split identifier (e.g., 'train', 'val', 'test').
         fabric (object): Fabric object for distributed training.
         normalize_codes (bool): Whether to normalize the codes.
-        field_maker (FieldMaker, optional): Optional FieldMaker object. Defaults to None.
         code_stats (dict, optional): Optional dictionary to store code statistics. Defaults to None.
     Returns:
         tuple: A tuple containing the generated codes and the code statistics.
@@ -114,7 +110,6 @@ def compute_codes(
         config_nf,
         fabric=fabric,
         to_cpu=True,
-        field_maker=field_maker,
         code_stats=code_stats,
         n_samples=100_000,
     )

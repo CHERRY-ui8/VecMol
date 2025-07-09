@@ -1,5 +1,11 @@
-sigma: 0.9
-n_query_points: 2000
-n_iter: 1000
-step_size: 0.001
-merge_threshold: 2
+sigma: 1
+n_query_points: 500
+n_iter: 2000
+step_size: 0.01
+merge_threshold: 5
+sigma_ratios:
+  C: 0.9    # 碳原子，较小的 sigma 使梯度场更集中
+  H: 1.3    # 氢原子，较大的 sigma 使梯度场更分散
+  O: 1.1    # 氧原子，中等 sigma
+  'N': 1.0    # 氮原子，略小于氧原子
+  F: 1.2    # 氟原子，略大于氧原子

@@ -15,10 +15,9 @@ class CrossGraphEncoder(nn.Module):
         self.num_layers = num_layers
         self.k_neighbors = k_neighbors
 
-        # learnable latent code for each grid point (G_L)
-        self.grid_codes = nn.Parameter(torch.Tensor(grid_size**3, code_dim))
-        # self.grid_codes = nn.Buffer(torch.zeros(grid_size**3, code_dim, requires_grad=True)) # 之前这里用buffer，出现报错element 0 of tensors does not require grad and does not have a grad_fn
-        nn.init.xavier_uniform_(self.grid_codes) #TODO: grid-coord here. grid codes zeros init
+        # 注册grid坐标作为buffer（不需要训练）
+        grid_coords = create_grid_coords(1, self.grid_size).squeeze(0)  # [n_grid, 3]
+        self.register_buffer('grid_coords', grid_coords)
 
         # GNN layers
         self.layers = nn.ModuleList([
@@ -43,28 +42,29 @@ class CrossGraphEncoder(nn.Module):
         
         n_grid = self.grid_size ** 3
 
-        # 1. 原子类型 one-hot
+        # 1. 原子类型 one-hot，并填充到code_dim维度
         # 验证值范围
         if atoms_channel.numel() > 0:
             assert atoms_channel.min() >= 0, f"Negative values in atoms_channel: {atoms_channel.min()}"
             assert atoms_channel.max() < self.n_atom_types, f"atoms_channel max {atoms_channel.max()} >= n_atom_types {self.n_atom_types}"
         
+        # 创建one-hot编码并填充到code_dim维度
         atom_feat = F.one_hot(atoms_channel.long(), num_classes=self.n_atom_types).float()  # [N_total_atoms, n_atom_types]
-        
-        # 2. 构造 grid 坐标
-        grid_coords_single = create_grid_coords(device, 1, self.grid_size).squeeze(0)  # [n_grid, 3]
-        grid_coords_flat = grid_coords_single.repeat(B, 1)  # [B*n_grid, 3]
+        if self.n_atom_types < self.code_dim:
+            # 如果code_dim更大，用0填充剩余维度
+            padding = torch.zeros(N_total_atoms, self.code_dim - self.n_atom_types, device=device)
+            atom_feat = torch.cat([atom_feat, padding], dim=1)  # [N_total_atoms, code_dim]
+        else:
+            # 如果code_dim更小，截断多余维度（不建议，最好保证code_dim >= n_atom_types）
+            atom_feat = atom_feat[:, :self.code_dim]
 
-        # 3. grid latent code
-        grid_codes = self.grid_codes.unsqueeze(0).expand(B, -1, -1).reshape(-1, self.code_dim)  # [B*n_grid, code_dim]
+        # 2. 构造 grid 坐标
+        grid_coords_flat = self.grid_coords.to(device).repeat(B, 1)  # [B*n_grid, 3]
+
+        # 3. 初始化 grid codes 为0
+        grid_codes = torch.zeros(B * n_grid, self.code_dim, device=device)  # [B*n_grid, code_dim]
 
         # 4. 拼接所有节点
-        # 确保特征维度匹配
-        if atom_feat.size(-1) != self.code_dim:
-            if not hasattr(self, 'atom_feat_proj'):
-                self.atom_feat_proj = nn.Linear(self.n_atom_types, self.code_dim).to(device)
-            atom_feat = self.atom_feat_proj(atom_feat)  # [N_total_atoms, code_dim]
-
         # 创建 grid 的 batch 索引
         grid_batch_idx = torch.arange(B, device=device).repeat_interleave(n_grid)  # [B*n_grid]
 
@@ -78,6 +78,7 @@ class CrossGraphEncoder(nn.Module):
             x=node_pos, k=self.k_neighbors, batch=node_batch, loop=False
         )
 
+
         # 6. GNN消息传递
         h = node_feats
         for layer in self.layers:
@@ -86,6 +87,11 @@ class CrossGraphEncoder(nn.Module):
         # 7. 只取 grid 部分并重塑为 [B, n_grid, code_dim]
         grid_h = h[N_total_atoms:].reshape(B, n_grid, self.code_dim)
         return grid_h  # [B, n_grid, code_dim]
+    
+    # 禁用PyTorch Dynamo编译以避免torch_cluster兼容性问题
+    @torch._dynamo.disable
+    def build_knn_graph(node_pos, k, node_batch):
+        return knn_graph(x=node_pos, k=k, batch=node_batch, loop=False)
 
 
 class MessagePassingGNN(MessagePassing):
@@ -124,8 +130,22 @@ class MessagePassingGNN(MessagePassing):
         x = self.layernorm(x)
         return x
 
-def create_grid_coords(device, batch_size, grid_size):
-    """Create grid coordinates for a given grid size."""
+def create_grid_coords(batch_size, grid_size, device=None):
+    """Create grid coordinates for a given grid size.
+    
+    Args:
+        batch_size: Number of batches
+        grid_size: Size of the grid (will create grid_size^3 points)
+        device: Optional device to place the tensor on. If None, uses the default device.
+    """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    elif not isinstance(device, torch.device):
+        device = torch.device(device)
+        
+    if device.type == "cuda" and not torch.cuda.is_available():
+        device = torch.device("cpu")
+        
     grid_1d = torch.linspace(-1, 1, grid_size, device=device)
     mesh = torch.meshgrid(grid_1d, grid_1d, grid_1d, indexing='ij')
     coords = torch.stack(mesh, dim=-1).reshape(-1, 3)  # [n_grid, 3]

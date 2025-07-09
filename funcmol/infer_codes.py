@@ -4,7 +4,6 @@ import hydra
 import os
 from funcmol.utils.utils_nf import load_neural_field
 from funcmol.utils.utils_base import setup_fabric
-from funcmol.dataset.field_maker import FieldMaker
 from funcmol.dataset.dataset_field import create_field_loaders
 import omegaconf
 import torch
@@ -26,10 +25,6 @@ def main(config):
             config_model[key] = config[key]
     config = config_model  # update config with checkpoint config
     enc, _ = load_neural_field(checkpoint, fabric, config)
-
-    # field_maker
-    field_maker = FieldMaker(config, sample_points=False)
-    field_maker = field_maker.to(fabric.device)
 
     # data loader
     loader = create_field_loaders(config, split=config["split"], fabric=fabric)
@@ -62,8 +57,7 @@ def main(config):
             fabric.print(f">> dataset iteration {dataset_iter}")
             t0 = time.time()
             for batch in tqdm(loader):
-                _, grids = field_maker.forward(batch)
-                codes_batch = enc(grids)
+                codes_batch = enc(batch)
                 codes.append(codes_batch.detach().cpu())
             fabric.print(f">> saving chunk {iter_counter}")
             codes = torch.cat(codes, dim=0)

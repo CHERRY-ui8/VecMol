@@ -179,7 +179,7 @@ class Decoder(nn.Module):
         grouped_codes: dict,
         maxiter: int = 10,
         grid_dim: int = 32,
-        resolution: int = 0.25,
+        resolution: float = 0.25,
         fabric=None,
     ) -> list:
         """

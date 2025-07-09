@@ -3,6 +3,13 @@ import torch.nn as nn
 from torch_geometric.nn import MessagePassing, knn_graph, knn
 from funcmol.models.encoder import create_grid_coords
 
+# 添加torch.compile兼容性处理
+try:
+    from torch._dynamo import disable
+except ImportError:
+    def disable(fn):
+        return fn
+
 class EGNNLayer(MessagePassing):
     def __init__(self, in_channels, hidden_channels, out_channels, k_neighbors=8, out_x_dim=1):
         """
@@ -36,13 +43,11 @@ class EGNNLayer(MessagePassing):
             nn.Linear(hidden_channels, out_channels)
         )
 
-    def forward(self, x, h, edge_index, is_fixed=None, use_knn_graph=True): #TODO: 添加is_fixed参数
+    def forward(self, x, h, edge_index):
         """
             x: [N, 3] 坐标
             h: [N, in_channels] 节点特征
             edge_index: [2, E]
-            is_fixed: [N] 布尔张量，True表示该节点不更新
-            use_knn_graph: bool，是否使用knn_graph构建的完整图
             返回: h_new, x_new
         """
         row, col = edge_index
@@ -60,39 +65,21 @@ class EGNNLayer(MessagePassing):
         # 聚合到每个节点
         if self.out_x_dim == 1:
             coord_message = coord_coef * direction  # [E, 3]
-            # 根据是否使用knn_graph决定是否添加size参数
-            if not use_knn_graph:
-                delta_x = self.propagate(edge_index, x=x, message=coord_message, size=(x.size(0), x.size(0)))  # [N, 3]
-            else:
-                delta_x = self.propagate(edge_index, x=x, message=coord_message)  # [N, 3]
-            # 如果节点被固定，则不更新坐标
-            if is_fixed is not None:
-                delta_x = delta_x * (~is_fixed).float().unsqueeze(-1)
+            # 添加size参数确保输出维度正确，size应该是元组
+            delta_x = self.propagate(edge_index, x=x, message=coord_message, size=(x.size(0), x.size(0)))  # [N, 3]
             x_new = x + delta_x  # 残差连接
         else:
             coord_message = coord_coef[..., None] * direction[:, None, :]  # [E, out_x_dim, 3]
             x = x[:, None, :]  # [N, 1, 3]
-            # 根据是否使用knn_graph决定是否添加size参数
-            if not use_knn_graph:
-                delta_x = self.propagate(edge_index, x=None, message=coord_message.view(len(row), -1), size=(x.size(0), x.size(0)))  # [N, out_x_dim * 3]
-            else:
-                delta_x = self.propagate(edge_index, x=None, message=coord_message.view(len(row), -1))  # [N, out_x_dim * 3]
+            # 添加size参数确保输出维度正确，size应该是元组
+            delta_x = self.propagate(edge_index, x=None, message=coord_message.view(len(row), -1), size=(x.size(0), x.size(0)))  # [N, out_x_dim * 3]
             delta_x = delta_x.view(x.size(0), self.out_x_dim, 3)  # [N, out_x_dim, 3]
-            # 如果节点被固定，则不更新坐标
-            if is_fixed is not None:
-                delta_x = delta_x * (~is_fixed).float().unsqueeze(-1).unsqueeze(-1)
             x_new = x + delta_x  # 残差连接, [N, out_x_dim, 3]
         
         # 节点特征更新
-        # 根据是否使用knn_graph决定是否添加size参数
-        if not use_knn_graph:
-            m_aggr = self.propagate(edge_index, x=x, message=m_ij, size=(x.size(0), x.size(0)))  # [N, hidden_channels]
-        else:
-            m_aggr = self.propagate(edge_index, x=x, message=m_ij)  # [N, hidden_channels]
+        # 添加size参数确保输出维度正确，size应该是元组
+        m_aggr = self.propagate(edge_index, x=x, message=m_ij, size=(x.size(0), x.size(0)))  # [N, hidden_channels]
         h_delta = self.node_mlp(torch.cat([h, m_aggr], dim=-1))
-        # 如果节点被固定，则不更新特征
-        if is_fixed is not None:
-            h_delta = h_delta * (~is_fixed).float().unsqueeze(-1)
         h_new = h + h_delta  # 残差连接
         return h_new, x_new
 
@@ -107,8 +94,7 @@ class EGNNVectorField(nn.Module):
                  k_neighbors: int = 8,
                  n_atom_types: int = 5,
                  code_dim: int = 512,
-                 device=None,
-                 use_knn_graph: bool = True):  # 添加配置选项，可以选择使用knn_graph或knn
+                 device=None):
         """
         Initialize the EGNN Vector Field model.
 
@@ -120,7 +106,6 @@ class EGNNVectorField(nn.Module):
             n_atom_types (int): Number of atom types
             code_dim (int): Dimension of the latent code and node features
             device (torch.device, optional): The device to run the model on.
-            use_knn_graph (bool): Whether to use knn_graph (slower but more stable) or knn (faster)
         """
         super().__init__()
         self.grid_size = grid_size
@@ -129,10 +114,9 @@ class EGNNVectorField(nn.Module):
         self.k_neighbors = k_neighbors
         self.n_atom_types = n_atom_types
         self.code_dim = code_dim
-        self.use_knn_graph = use_knn_graph
 
         # Create learnable grid points and features for G_L
-        self.register_buffer('grid_points', create_grid_coords(device, 1, self.grid_size).squeeze(0))
+        self.register_buffer('grid_points', create_grid_coords(batch_size=1, grid_size=self.grid_size, device=device).squeeze(0))
         self.grid_features = nn.Parameter(torch.randn(grid_size**3, code_dim, requires_grad=True))
 
         # Create EGNN layers
@@ -146,11 +130,6 @@ class EGNNVectorField(nn.Module):
         ])
         
         # 基准场预测层
-        # self.field_layer = nn.Sequential(
-        #     nn.Linear(code_dim, hidden_dim),
-        #     nn.ReLU(),
-        #     nn.Linear(hidden_dim, n_atom_types)  # 3D vector for each atom type
-        # )
         self.field_layer = EGNNLayer(
             in_channels=code_dim,
             hidden_channels=hidden_dim,
@@ -159,6 +138,7 @@ class EGNNVectorField(nn.Module):
             out_x_dim=n_atom_types
         )
         
+    @disable
     def forward(self, query_points, codes=None):
         """
         输入：
@@ -175,19 +155,21 @@ class EGNNVectorField(nn.Module):
 
         # 1. 初始化节点特征
         # 查询点特征初始化为0
+        # [B, n_points, code_dim]
         query_features = torch.zeros(batch_size, n_points, self.code_dim, device=device)
         
         # 锚点特征为codes
         # assert codes is not None and codes.size(0) == batch_size, "Codes must be provided with matching batch size"
+        # [B, n_grid, code_dim]
         grid_features = codes
 
         # 2. 初始化节点坐标
         # 锚点坐标: [1, n_grid, 3] -> [batch_size, n_grid, 3]
         grid_coords = grid_points.unsqueeze(0).expand(batch_size, -1, -1)
 
-        # 3. 合并节点，为每个分子构建一个图
-        # [B, n_points + n_grid, C]
-        node_features = torch.cat([query_features, grid_features], dim=1) # TODO：在这里，要注意拼接之后的编号问题，因为拼接前的编号是0-n_points-1，拼接后的编号是0-n_points+n_grid-1，会有一个bias
+        # 3. 合并节点，为每个分子构建一个图 TODO:
+        # [B, n_points + n_grid, code_dim]
+        node_features = torch.cat([query_features, grid_features], dim=1)
         # [B, n_points + n_grid, 3]
         node_coords = torch.cat([query_points, grid_coords], dim=1)
         total_nodes = n_points + n_grid
@@ -197,51 +179,32 @@ class EGNNVectorField(nn.Module):
         node_coords = node_coords.reshape(-1, 3)                  # [B * total_nodes, 3]
         batch_index = torch.arange(batch_size, device=device).repeat_interleave(total_nodes)
 
-        # 5. 构建边
-        if self.use_knn_graph:
-            # 使用 knn_graph 构建完整的图（更稳定但较慢）
-            edge_index = knn_graph(
-                x=node_coords,
-                k=self.k_neighbors,
-                batch=batch_index,
-                loop=False
-            )
-        else:
-            # 使用 knn 构建部分图
+        # 5. 构建边 - 修改逻辑：query_points之间不连边，grid_points之间可以连边
+            # 使用 knn 构建部分图，只保留 grid -> query 的连边
             # 分别构造 batch index
-            query_coords = query_points.reshape(-1, 3).float()       # [B * n_query, 3]
-            grid_coords_all = grid_coords.reshape(-1, 3).float()     # [B * n_grid, 3]
-            query_batch = torch.arange(batch_size, device=device).repeat_interleave(n_points)
-            grid_batch = torch.arange(batch_size, device=device).repeat_interleave(n_grid)
+        query_coords = query_points.reshape(-1, 3).float()       # [B * n_query, 3]
+        grid_coords_all = grid_coords.reshape(-1, 3).float()     # [B * n_grid, 3]
+        query_batch = torch.arange(batch_size, device=device).repeat_interleave(n_points)
+        grid_batch = torch.arange(batch_size, device=device).repeat_interleave(n_grid)
 
-            # query <-> query edges (双向)
-            edge_query_query = knn(x=query_coords, y=query_coords, k=self.k_neighbors, batch_x=query_batch, batch_y=query_batch)
-            # 添加反向边
-            edge_query_query_rev = edge_query_query.flip(0)
-            edge_query_query = torch.cat([edge_query_query, edge_query_query_rev], dim=1)
+        # 只构建 grid -> query edges (查询点从网格点获取信息)
+        edge_grid_query = knn(
+            x=query_coords,
+            y=grid_coords_all,
+            k=self.k_neighbors, 
+            batch_x=query_batch,
+            batch_y=grid_batch
+        )
 
-            # query -> grid edges (查询点从网格点获取信息)
-            edge_query_grid = knn(x=grid_coords_all, y=query_coords, k=self.k_neighbors, batch_x=grid_batch, batch_y=query_batch)
-            edge_query_grid = edge_query_grid.flip(0)  # 保证方向是 query -> grid
-
-            # 合并边
-            edge_index = torch.cat([edge_query_query, edge_query_grid], dim=1)
-        
-        # 6. 构造is_fixed参数，标记网格点为固定节点
-        is_fixed = torch.zeros(batch_size * total_nodes, dtype=torch.bool, device=device)
-        # 网格点（后半部分）标记为固定
-        for b in range(batch_size):
-            start_idx = b * total_nodes + n_points
-            end_idx = (b + 1) * total_nodes
-            is_fixed[start_idx:end_idx] = True
-
+        edge_grid_query[1] += len(query_points)
+                    
         # 7. 逐层EGNN消息传递
         h, x = node_features, node_coords
         for layer in self.layers:
-            h, x = layer(x, h, edge_index, is_fixed, self.use_knn_graph) # h: [B * total_nodes, code_dim], x: [B * total_nodes, 3]
+            h, x = layer(x, h, edge_grid_query) # h: [B * total_nodes, code_dim], x: [B * total_nodes, 3]
 
         # 8. 预测矢量场
-        _, predicted_sources = self.field_layer(x, h, edge_index, is_fixed, self.use_knn_graph)  # [B * total_nodes, n_atom_types, 3]
+        _, predicted_sources = self.field_layer(x, h, edge_grid_query)  # [B * total_nodes, n_atom_types, 3]
         predicted_sources = predicted_sources.view(batch_size, total_nodes, self.n_atom_types, 3)
         predicted_sources = predicted_sources[:, :n_points, :, :]  # 只取查询点部分
         vector_field = predicted_sources - query_points[:,:,None,:]  # (B, n_points, n_atom_types, 3）

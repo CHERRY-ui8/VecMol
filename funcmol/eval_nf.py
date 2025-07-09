@@ -10,7 +10,6 @@ from torch import nn
 from funcmol.utils.utils_nf import eval_nf, infer_codes, load_neural_field
 from funcmol.utils.utils_base import convert_xyzs_to_sdf, save_xyz, setup_fabric
 from funcmol.dataset.dataset_field import create_field_loaders
-from funcmol.dataset.field_maker import FieldMaker
 
 
 @hydra.main(config_path="configs", config_name="eval_nf", version_base=None)
@@ -34,10 +33,6 @@ def main(config):
 
     # n samples
     n_samples = config["n_samples"]
-
-    # field_maker
-    field_maker = FieldMaker(config)
-    field_maker = field_maker.to(fabric.device)
 
     # Print config
     fabric.print(f">> config: {config}")
@@ -77,19 +72,17 @@ def main(config):
             metrics=metrics,
             save_plot_png=config["save_grids_png"],
             fabric=fabric,
-            field_maker=field_maker,
             sample_full_grid=True
         )
         fabric.print(f">> split {config['split']}, Loss: {loss_val}, MIoU: {miou_val}")
 
     # Midi metrics
     elif config["eval_metric"] == "sampling":
-        field_maker.set_sample_points(False) # do not sample points
         config["dset"]["batch_size"] = min(config["dset"]["batch_size"], n_samples)
 
         loader = create_field_loaders(config, split=config["split"], n_samples=n_samples, fabric=fabric)
         with torch.no_grad():
-            codes_all = infer_codes(loader, enc, config, fabric, field_maker=field_maker)
+            codes_all = infer_codes(loader, enc, config, fabric)
             mols = dec_module.codes_to_molecules(codes_all, unnormalize=False, config=config, fabric=fabric)
         save_xyz(mols, config["dirname"], fabric, atom_elements=config["dset"]["elements"])
         convert_xyzs_to_sdf(config["dirname"], fabric=fabric)

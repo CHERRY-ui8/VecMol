@@ -22,6 +22,7 @@ funcmol/dataset/field_maker.py
 funcmol/models/__init__.py
 funcmol/models/adamw.py
 funcmol/models/decoder.py
+funcmol/models/egnn.py
 funcmol/models/ema.py
 funcmol/models/encoder.py
 funcmol/models/funcmol.py
@@ -29,7 +30,10 @@ funcmol/models/mfn.py
 funcmol/models/unet1d.py
 funcmol/utils/__init__.py
 funcmol/utils/constants.py
+funcmol/utils/gnf_converter.py
+funcmol/utils/gnf_visualizer.py
 funcmol/utils/utils_base.py
 funcmol/utils/utils_fm.py
 funcmol/utils/utils_nf.py
 funcmol/utils/utils_vis.py
+funcmol/utils/visualize_molecules.py

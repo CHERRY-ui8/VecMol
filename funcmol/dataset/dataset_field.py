@@ -2,14 +2,13 @@ import itertools
 import math
 import os
 import random
+from typing import Optional
 
 from lightning import Fabric
 import numpy as np
 import torch
-from torch.utils.data import Dataset
-from torch.utils.data import Subset
-from torch_geometric.data import Data
-from torch_geometric.loader import DataLoader as PyGDataLoader
+from torch_geometric.data import Data, Dataset
+from torch_geometric.loader import DataLoader
 
 from funcmol.models.decoder import get_grid
 from funcmol.utils.constants import ELEMENTS_HASH, PADDING_INDEX
@@ -39,7 +38,7 @@ class FieldDataset(Dataset):
         self,
         dset_name: str = "qm9",
         data_dir: str = "dataset/data",
-        elements: list = None,
+        elements: Optional[dict] = None,
         split: str = "train",
         rotate: bool = False,
         radius: float = 0.5,
@@ -69,12 +68,6 @@ class FieldDataset(Dataset):
 
         self._read_data()
         self._filter_by_elements(elements)
-
-        # 只保留第一个分子用于单分子overfit实验或选择前128个分子用于调试
-        if debug_one_mol or os.environ.get("DEBUG_ONE_MOL", "0") == "1":
-            self.data = [self.data[0]]*len(self.data)
-        elif debug_subset:
-            self.data = self.data[:128]  # 选择前128个分子
 
         self.increments = torch.tensor(
             list(itertools.product(list(range(-cubes_around, cubes_around+1)), repeat=3))
@@ -236,7 +229,7 @@ class FieldDataset(Dataset):
                 indices = torch.randperm(unique_points.size(0))[:self.n_points]
                 xs = unique_points[indices]
         
-        return xs
+        return xs # 形状为[n_points, 3]
 
     def _center_molecule(self, coords) -> torch.Tensor:
         """
@@ -402,18 +395,12 @@ def create_field_loaders(
         debug_subset=config.get("debug_subset", False),
     )
 
-    # reduce the dataset size for ["val", "test"] or debugging mode
-    if config["debug"] or split in ["val", "test"]:
-        indexes = list(range(len(dset)))
-        random.Random(0).shuffle(indexes)
-        if n_samples is not None:
-            indexes = indexes[:n_samples]
-        else:
-            indexes = indexes[:5000]
-        if len(dset) > len(indexes):
-            dset = Subset(dset, indexes)  # Smaller training set for debugging
+    if config.get("debug_one_mol", False):
+        dset.data = [dset.data[0]] * len(dset.data)
+    elif config.get("debug_subset", False):
+        dset.data = dset.data[:128]
 
-    loader = PyGDataLoader(
+    loader = DataLoader(
         dset,
         batch_size=min(config["dset"]["batch_size"], len(dset)),
         num_workers=config["dset"]["num_workers"],

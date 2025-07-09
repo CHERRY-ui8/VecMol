@@ -16,10 +16,8 @@ from funcmol.utils.utils_nf import (
     create_neural_field, train_nf, eval_nf, save_checkpoint, load_network, load_optim_fabric
 )
 from funcmol.dataset.dataset_field import create_field_loaders
-from funcmol.dataset.field_maker import FieldMaker
-from funcmol.utils.constants import ELEMENTS_HASH, PADDING_INDEX
 from lightning import Fabric
-torch._dynamo.config.suppress_errors = True
+from omegaconf import OmegaConf
 
 
 def plot_loss_curve(train_losses, val_losses, save_path, title_suffix=""):
@@ -81,13 +79,14 @@ def main(config):
     
     fabric.print(">> start training the neural field", config["exp_name"])
     
-    field_maker = FieldMaker(config)
-    field_maker = field_maker.to(fabric.device)
-
     ##############################
     # data loaders
     loader_train = create_field_loaders(config, split="train", fabric=fabric)
+    if isinstance(loader_train, list):
+        loader_train = loader_train[0]
     loader_val = create_field_loaders(config, split="val", fabric=fabric) if fabric.global_rank == 0 else None
+    if isinstance(loader_val, list):
+        loader_val = loader_val[0]
     # 只有主进程（global_rank == 0）加载验证集
 
     # model
@@ -102,10 +101,6 @@ def main(config):
     dec, optim_dec = fabric.setup(dec, optim_dec)
     enc, optim_enc = fabric.setup(enc, optim_enc)
     
-    # 设置 DDP 策略
-    if hasattr(fabric.strategy, "ddp_kwargs"):
-        fabric.strategy.ddp_kwargs["find_unused_parameters"] = True
-
     # reload
     if config["reload_model_path"] is not None:
         try:
@@ -139,15 +134,22 @@ def main(config):
     
     # 新增：用于记录每个batch的loss
     batch_train_losses = []
-    epoch_train_losses = []
-    epoch_val_losses = []
     train_losses = []  # 新增：用于记录所有epoch的train loss
     val_losses = []    # 新增：用于记录所有epoch的val loss
     global_step = 0
     
+    # 实例化gnf_converter
+    gnf_config = config.get("converter")
+    from funcmol.utils.gnf_converter import GNFConverter
+    if gnf_config is not None and not isinstance(gnf_config, dict):
+        gnf_config = OmegaConf.to_container(gnf_config, resolve=True)
+    if isinstance(gnf_config, list):
+        gnf_config = gnf_config[0]
+    assert isinstance(gnf_config, dict), f"gnf_config should be dict, got {type(gnf_config)}"
+    gnf_converter = GNFConverter(**gnf_config)
+    
     for epoch in range(start_epoch, config["n_epochs"]):
         start_time = time.time()
-        epoch_train_losses = []  # 清空当前epoch的loss列表
 
         adjust_learning_rate(optim_enc, optim_dec, epoch, config)
 
@@ -161,8 +163,8 @@ def main(config):
             optim_enc,
             criterion,
             fabric,
+            gnf_converter,
             metrics=metrics,
-            field_maker=field_maker,
             epoch=epoch,
             batch_train_losses=batch_train_losses,  # 新增：传入batch_train_losses
             global_step=global_step  # 新增：传入global_step
@@ -174,16 +176,16 @@ def main(config):
         loss_val = None
         if (epoch % config["eval_every"] == 0 or epoch == config["n_epochs"] - 1):
             # Master rank performs evaluation and checkpointing
-            if fabric.global_rank == 0:
+            if fabric.global_rank == 0 and loader_val is not None:
                 loss_val = eval_nf(
                     loader_val,
                     dec,
                     enc,
                     criterion,
                     config,
+                    gnf_converter,
                     metrics=metrics_val,
-                    fabric=fabric,
-                    field_maker=field_maker
+                    fabric=fabric
                 )
                 val_losses.append(loss_val)
                 save_checkpoint(
@@ -208,7 +210,7 @@ def main(config):
             
         # log
         elapsed_time = time.time() - start_time
-        log_epoch(config, epoch, loss_train, loss_val, elapsed_time, fabric)
+        log_epoch(config, epoch, loss_train, loss_val if loss_val is not None else 0.0, elapsed_time, fabric)
 
 
 def adjust_learning_rate(optim_enc, optim_dec, epoch, config):

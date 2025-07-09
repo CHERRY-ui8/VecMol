@@ -1,6 +1,5 @@
 import os
 import time
-from funcmol.dataset.field_maker import FieldMaker
 import hydra
 from omegaconf import OmegaConf
 import torch
@@ -22,10 +21,6 @@ from funcmol.dataset.dataset_field import create_field_loaders
 @hydra.main(config_path="configs", config_name="train_fm_qm9", version_base=None)
 def main(config):
     fabric = setup_fabric(config)
-
-    # field_maker
-    field_maker = FieldMaker(config, sample_points=False)
-    field_maker = field_maker.to(fabric.device)
 
     exp_name, dirname = config["exp_name"], config["dirname"]
     if not config["on_the_fly"]:
@@ -53,7 +48,7 @@ def main(config):
         loader_val = create_field_loaders(config, split="val", fabric=fabric) if fabric.global_rank == 0 else None
         _, code_stats = compute_codes(
             loader_train, enc, config_nf, "train", fabric, config["normalize_codes"],
-            field_maker=field_maker, code_stats=None
+            code_stats=None
         )
     else:
         loader_train = create_code_loaders(config, split="train", fabric=fabric)
@@ -109,8 +104,7 @@ def main(config):
             config,
             funcmol_ema,
             acc_iter,
-            fabric,
-            field_maker=field_maker
+            fabric
         )
 
         # eval
@@ -125,8 +119,7 @@ def main(config):
                         funcmol_ema,
                         criterion,
                         metrics_val,
-                        config,
-                        field_maker=field_maker
+                        config
                     )
                     if val_loss < best_res:
                         best_res = val_loss
@@ -181,7 +174,6 @@ def train_denoiser(
     model_ema: ModelEma=None,
     acc_iter: int = 0,
     fabric: object = None,
-    field_maker: FieldMaker=None
 ) -> tuple:
     """
     Train a denoising model using the provided data loader, model, and training configuration.
@@ -198,7 +190,6 @@ def train_denoiser(
         model_ema (ModelEma, optional): Exponential moving average model. Defaults to None.
         acc_iter (int, optional): Accumulated iteration count. Defaults to 0.
         fabric (object, optional): Fabric object for distributed training. Defaults to None.
-        field_maker (FieldMaker, optional): FieldMaker object for generating fields. Defaults to None.
 
     Returns:
         tuple: A tuple containing the computed metric value and the updated accumulated iteration count.
@@ -206,22 +197,11 @@ def train_denoiser(
     metrics.reset()
     model.train()
 
-    if not config["on_the_fly"]:  # and fabric.global_rank == 0:
-        index = torch.randint(0, loader.dataset.num_augmentations, [1])[0].item()  # random.randint(0, self.num_augmentations)
-        loader.dataset.load_codes(index)
-
     for batch in loader:
         adjust_learning_rate(optimizer, acc_iter, config)
         acc_iter += 1
 
-        if config["on_the_fly"]:
-            with torch.no_grad():
-                codes, _ = infer_codes_occs_batch(
-                    batch, enc, config, to_cpu=False, field_maker=field_maker,
-                    code_stats=dec_module.code_stats if config["normalize_codes"] else None
-                )
-        else:
-            codes = normalize_code(batch, dec_module.code_stats)
+        codes = normalize_code(batch, dec_module.code_stats)
 
         smooth_codes = add_noise_to_code(codes, smooth_sigma=config["smooth_sigma"])
         loss = compute_loss(codes, smooth_codes, model, criterion)
@@ -245,7 +225,6 @@ def val_denoiser(
     criterion: torch.nn.Module,
     metrics: torchmetrics.MeanMetric,
     config: dict,
-    field_maker: FieldMaker=None
 ) -> float:
     """
     Validate the denoising model on the given data loader.
@@ -258,7 +237,6 @@ def val_denoiser(
         criterion (torch.nn.Module): Loss function.
         metrics (torchmetrics.MeanMetric): Metric to compute the mean loss.
         config (dict): Configuration dictionary containing various settings.
-        field_maker (FieldMaker, optional): Optional FieldMaker instance for on-the-fly code generation.
 
     Returns:
         float: Computed mean loss over the validation dataset.
@@ -268,13 +246,7 @@ def val_denoiser(
     model.eval()
     metrics.reset()
     for batch in loader:
-        if config["on_the_fly"]:
-            codes, _ = infer_codes_occs_batch(
-                batch, enc, config, to_cpu=False, field_maker=field_maker,
-                code_stats=dec_module.code_stats if config["normalize_codes"] else None
-            )
-        else:
-            codes = normalize_code(batch, dec_module.code_stats)
+        codes = normalize_code(batch, dec_module.code_stats)
         smooth_codes = add_noise_to_code(codes, smooth_sigma=config["smooth_sigma"])
         loss = compute_loss(codes, smooth_codes, model, criterion)
         metrics.update(loss)

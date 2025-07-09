@@ -18,14 +18,6 @@ def visualize_molecule_comparison(
     original_pdb = 'original.pdb'
     reconstructed_pdb = 'reconstructed.pdb'
     pml_script = 'visualize.pml'
-    
-    # 确定会话文件路径
-    # session_path = None
-    # if save_path:
-    #     session_dir = os.path.join(os.path.dirname(save_path).replace('visualizations', 'pymol_sessions'))
-    #     os.makedirs(session_dir, exist_ok=True)
-    #     session_name = os.path.basename(save_path).replace('.png', '.pse')
-    #     session_path = os.path.join(session_dir, session_name)
 
     try:
         # 保存分子结构
@@ -202,11 +194,8 @@ def visualize_reconstruction_process(
         save_path: 保存图片的路径
         n_steps: 要可视化的中间步骤数
     """
-    try:
-        import pymol
-        pymol.finish_launching(['pymol', '-qc'])
-    except ImportError:
-        raise ImportError("请先安装PyMOL: pip install pymol")
+    import pymol
+    pymol.finish_launching(['pymol', '-qc'])
 
     # 计算梯度场
     vector_field = gnf_converter.mol2gnf(original_coords, query_points)
