@@ -75,9 +75,11 @@ class CrossGraphEncoder(nn.Module):
 
         # 5. 建边（KNN，原子和grid点都可互连）
         edge_index = knn_graph(
-            x=node_pos, k=self.k_neighbors, batch=node_batch, loop=False
+            x=node_pos, 
+            k=self.k_neighbors, 
+            batch=node_batch, 
+            loop=False
         )
-
 
         # 6. GNN消息传递
         h = node_feats
@@ -88,11 +90,6 @@ class CrossGraphEncoder(nn.Module):
         grid_h = h[N_total_atoms:].reshape(B, n_grid, self.code_dim)
         return grid_h  # [B, n_grid, code_dim]
     
-    # 禁用PyTorch Dynamo编译以避免torch_cluster兼容性问题
-    @torch._dynamo.disable
-    def build_knn_graph(node_pos, k, node_batch):
-        return knn_graph(x=node_pos, k=k, batch=node_batch, loop=False)
-
 
 class MessagePassingGNN(MessagePassing):
     def __init__(self, atom_feat_dim, code_dim, hidden_dim):

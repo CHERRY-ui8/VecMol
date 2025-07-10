@@ -103,7 +103,11 @@ def train_nf(
     total_loss = 0.0
     max_grad_norm = 1.0
     
-    for i, data_batch in enumerate(loader):
+    # 创建进度条
+    pbar = tqdm(enumerate(loader), total=len(loader), desc=f'Epoch {epoch}')
+    running_loss = 0.0
+    
+    for i, data_batch in pbar:
         # 数据预处理
         data_batch = data_batch.to(fabric.device)
         coords, atom_mask = to_dense_batch(data_batch.pos, data_batch.batch, fill_value=0)
@@ -117,7 +121,7 @@ def train_nf(
         # 前向传播
         codes = enc(data_batch)
         pred_field = dec(query_points, codes)
-        # 计算损失
+        # 计算目标梯度场（标准答案）
         target_field = gnf_converter.mol2gnf(coords, atoms_channel, query_points)
         
         # 调试：输出5个query_point的梯度场大小（每500个batch输出一次）
@@ -146,10 +150,9 @@ def train_nf(
             fabric.print(f"[Debug] 5个query_point的target field标准答案范数: {target_norms}")
             fabric.print(f"[Debug] 5个query_point的vector field与target field RMSD: {rmsds}")
 
-        assert pred_field.shape == target_field.shape, f"Shape mismatch: pred_field {pred_field.shape} vs target_field {target_field.shape}"
-        field_loss = criterion(pred_field, target_field)
-        field_weight = config.get("field_loss_weight", 1.0)
-        loss = field_weight * field_loss
+        # 计算损失
+        loss = criterion(pred_field, target_field)
+        # 反向传播
         optim_dec.zero_grad()
         optim_enc.zero_grad()
         fabric.backward(loss)
@@ -158,14 +161,26 @@ def train_nf(
         optim_dec.step()
         optim_enc.step()
         total_loss += loss.item()
+        
+        # 更新运行中的loss平均值
+        running_loss = (running_loss * i + loss.item()) / (i + 1)
+        
+        # 更新进度条
+        pbar.set_postfix({
+            'loss': f'{running_loss:.4f}',
+            'batch': f'{i}/{len(loader)}'
+        })
+        
+        # 更新指标
         if metrics is not None:
             metrics["loss"].update(loss)
-            metrics["field_loss"].update(field_loss)
         if batch_train_losses is not None:
             batch_train_losses.append({
                 "total_loss": loss.item(),
-                "field_loss": field_loss.item(),
             })
+    
+    # 关闭进度条
+    pbar.close()
     return metrics["loss"].compute().item() if metrics is not None else total_loss / len(loader)
 
 

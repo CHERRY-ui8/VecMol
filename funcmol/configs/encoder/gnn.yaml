@@ -1,7 +1,7 @@
 _target_: funcmol.models.encoder.CrossGraphEncoder
 n_atom_types: 5 
 grid_size: 8 
-code_dim: 64 
+code_dim: 128
 hidden_dim: 128
 num_layers: 4
-k_neighbors: 8
+k_neighbors: 32

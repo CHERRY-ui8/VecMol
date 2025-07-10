@@ -61,9 +61,10 @@ class Decoder(nn.Module):
         """
         # PS: code need to be unnormealized before rendering
         with torch.no_grad():
-            fabric.print(f">> Rendering molecules - batches of {batch_size_render}")
-            if codes.device != self.fabric.device:
-                codes = codes.to(self.fabric.device)
+            if fabric:
+                fabric.print(f">> Rendering molecules - batches of {batch_size_render}")
+            if codes.device != self.device:
+                codes = codes.to(self.device)
             xs = self.coords.reshape(1, -1, 3)
             pred = self.forward_batched(xs, codes, batch_size_render=batch_size_render, threshold=0.2)
             grid = pred.permute(0, 2, 1).reshape(-1, self.n_channels, self.grid_dim, self.grid_dim, self.grid_dim)

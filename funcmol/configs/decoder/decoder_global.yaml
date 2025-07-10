@@ -1,10 +1,9 @@
 name: decoder_global
-spatial: False
-hidden_dim: 2048
-code_dim: 2048
+code_dim: 256
+spatial: false
+hidden_dim: 256
 coord_dim: 3
-n_layers: 6
-input_scale: 64
-grid_size: 8  # L
-feature_dim: 64  # f
+n_layers: 3
+input_scale: 32
+grid_size: 8
 k_neighbors: 8

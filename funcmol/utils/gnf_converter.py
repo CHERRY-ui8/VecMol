@@ -5,6 +5,7 @@ from scipy.spatial.distance import cdist
 from scipy.optimize import linear_sum_assignment
 from typing import Callable, Optional, Tuple, List, Dict, Any
 from scipy.spatial import cKDTree
+from sklearn.cluster import DBSCAN
 import torch.nn.functional as F
 from funcmol.utils.constants import PADDING_INDEX
 
@@ -23,7 +24,8 @@ class GNFConverter(nn.Module):
                 n_query_points: int,
                 n_iter: int,
                 step_size: float,
-                merge_threshold: float, # Distance threshold for merging points
+                eps: float,  # DBSCAN的邻域半径参数
+                min_samples: int,  # DBSCAN的最小样本数参数
                 sigma_ratios: Dict[str, float],
                 version: int = 2,  # 添加version参数，默认为1（高斯定义）
                 device: str = "cuda" if torch.cuda.is_available() else "cpu"):  # 原子类型比例系数
@@ -32,7 +34,8 @@ class GNFConverter(nn.Module):
         self.n_query_points = n_query_points
         self.n_iter = n_iter
         self.step_size = step_size
-        self.merge_threshold = merge_threshold
+        self.eps = eps
+        self.min_samples = min_samples
         self.device = device
         self.sigma_ratios = sigma_ratios
         self.version = version  # 保存version参数
@@ -77,8 +80,8 @@ class GNFConverter(nn.Module):
         for b in range(batch_size):
             # 创建一维掩码
             mask = (atom_types[b] != PADDING_INDEX)  # [n_atoms]
-            valid_coords = coords[b, mask]  # [n_valid_atoms, 3]
-            valid_types = atom_types[b, mask].long()  # [n_valid_atoms]
+            valid_coords = coords[b][mask]  # [n_valid_atoms, 3]
+            valid_types = atom_types[b][mask].long()  # [n_valid_atoms]
             
             if valid_coords.size(0) == 0:
                 continue
@@ -100,7 +103,7 @@ class GNFConverter(nn.Module):
                         individual_gradients = diff * torch.exp(-dist_sq / (2 * sigma ** 2)) / (sigma ** 2)
                         type_gradients = torch.sum(individual_gradients, dim=0)  # (n_points, 3)
                     elif self.version == 2:  # 新的基于softmax的定义
-                        temperature = 0.01
+                        temperature = 1
                         distances = torch.sqrt(dist_sq.squeeze(-1))  # (n_type_atoms, n_points)
                         weights = torch.softmax(-distances / temperature, dim=0)  # (n_type_atoms, n_points)
                         weights = weights.unsqueeze(-1)  # (n_type_atoms, n_points, 1)
@@ -174,98 +177,35 @@ class GNFConverter(nn.Module):
         final_types = torch.stack([F.pad(t, (0,max_atoms-t.size(0)), value=-1) if t.size(0)<max_atoms else t for t in all_types], dim=0)
         return final_coords, final_types # [batch, n_atoms, 3]
 
+
+
     def _merge_points(self, points: np.ndarray) -> np.ndarray:
-        """Merge close points and automatically determine the number of atoms.
-        
-        This implementation uses a more robust density-based clustering approach:
-        1. Compute local density using Gaussian kernel
-        2. Find density peaks that are well-separated
-        3. Only keep points that form stable clusters
-        """
-        # 确保输入数据形状正确
-        if len(points.shape) == 3:  # [batch_size, n_points, 3]
-            points = points.reshape(-1, 3)  # 展平为 [n_points, 3]
+        """Use DBSCAN to merge close points and determine atom centers."""
+        if len(points.shape) == 3:
+            points = points.reshape(-1, 3)
         elif len(points.shape) != 2 or points.shape[1] != 3:
-            raise ValueError(f"Expected points to be of shape (n, 3) or (batch_size, n, 3), got {points.shape}")
-        
+            raise ValueError(f"Expected points shape (n, 3), got {points.shape}")
+
         if len(points) == 0:
-            return np.array([])
-            
-        # 1. 计算点的局部密度（使用高斯核）
-        tree = cKDTree(points)
-        # 使用更大的k值来获得更稳定的密度估计
-        k = min(20, len(points))
-        distances, indices = tree.query(points, k=k)
-        
-        # 使用高斯核计算密度
-        sigma = self.merge_threshold / 2.0  # 使用合并阈值的一半作为核宽度
-        densities = np.zeros(len(points))
-        for i in range(len(points)):
-            # 计算周围点对当前点的密度贡献
-            dist = distances[i, 1:]  # 排除自身
-            densities[i] = np.sum(np.exp(-0.5 * (dist / sigma) ** 2))
-        
-        # 2. 找到密度峰值
-        is_peak = np.ones(len(points), dtype=bool)
-        min_peak_distance = self.merge_threshold * 1.5  # 峰值之间的最小距离
-        
-        for i in range(len(points)):
-            # 找到当前点的邻域内的所有点
-            neighbors = tree.query_ball_point(points[i], min_peak_distance, p=2.0)  # 使用欧几里得距离
-            # 如果邻域内有密度更高的点，则当前点不是峰值
-            for j in neighbors:
-                if i != j and densities[j] > densities[i]:
-                    is_peak[i] = False
-                    break
-        
-        # 3. 应用密度阈值
-        # 计算全局密度统计
-        density_mean = np.mean(densities)
-        density_std = np.std(densities)
-        # 使用更严格的阈值：均值 + 2个标准差
-        density_threshold = density_mean + 2 * density_std
-        
-        # 4. 合并条件：必须同时满足
-        # - 是密度峰值
-        # - 密度超过阈值
-        # - 与其他峰值距离足够远
-        valid_peaks = is_peak & (densities > density_threshold)
-        
-        if not np.any(valid_peaks):
-            # 如果没有找到有效的峰值，返回空数组
-            return np.array([])
-        
-        # 5. 对每个有效的峰值，计算其代表的原子位置
-        merged_points = []
-        peak_points = points[valid_peaks]
-        peak_densities = densities[valid_peaks]
-        
-        # 按密度降序处理峰值点
-        sort_idx = np.argsort(-peak_densities)
-        peak_points = peak_points[sort_idx]
-        
-        # 记录已使用的区域
-        used_regions = set()
-        
-        for peak_point in peak_points:
-            # 检查这个峰值是否在已使用的区域内
-            is_new_region = True
-            for used_point in used_regions:
-                if np.linalg.norm(peak_point - used_point) < min_peak_distance:
-                    is_new_region = False
-                    break
-            
-            if is_new_region:
-                # 找到这个峰值附近的所有点
-                nearby_points = points[tree.query_ball_point(peak_point, self.merge_threshold, p=2.0)]  # 使用欧几里得距离
-                if len(nearby_points) > 0:
-                    # 使用局部加权平均计算精确的原子位置
-                    weights = np.exp(-0.5 * (np.linalg.norm(nearby_points - peak_point, axis=1) / sigma) ** 2)
-                    atom_position = np.average(nearby_points, weights=weights, axis=0)
-                    merged_points.append(atom_position)
-                    used_regions.add(tuple(peak_point))
-        
-        return np.array(merged_points)
+            return points
+
+        # 使用类的DBSCAN参数
+        clustering = DBSCAN(eps=self.eps, min_samples=self.min_samples).fit(points)
+        labels = clustering.labels_  # -1表示噪声点
+
+        n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
+        print(f"[DBSCAN] Total points: {len(points)}, Clusters found: {n_clusters}, Noise points: {(labels == -1).sum()}")
+
+        # 计算每个簇的中心
+        merged = []
+        for label in set(labels):
+            if label == -1:
+                continue  # 跳过噪声点
+            cluster_points = points[labels == label]
+            center = np.mean(cluster_points, axis=0)
+            merged.append(center)
+
+        return np.array(merged)
 
     def compute_reconstruction_metrics(
         self,

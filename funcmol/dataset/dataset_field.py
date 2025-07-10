@@ -163,73 +163,73 @@ class FieldDataset(Dataset):
     def _get_xs(self, sample) -> torch.Tensor:
         mask = sample["atoms_channel"] != PADDING_INDEX
         coords = sample["coords"][mask]
+        device = coords.device
         
         if self.sample_full_grid:
-            xs = self.full_grid_high_res
-        else:
-            grid_size = len(self.full_grid_high_res)
-            # print(f"Grid size: {grid_size}")  # 调试
-            if grid_size < self.n_points:
-                raise ValueError(f"Grid size {grid_size} < n_points {self.n_points}")
-            
-            if self.targeted_sampling_ratio >= 1:
-                rand_points = coords / self.resolution
-                # 添加随机噪声
-                noise = torch.randn_like(rand_points) * (self.resolution / 4)
-                rand_points = (rand_points + noise).round().long()
-                num_random_elements = max(1, (self.n_points // rand_points.size(0)) // self.targeted_sampling_ratio)
-                random_indices = torch.randperm(self.increments.size(0))[:num_random_elements]
-                rand_points = (rand_points.unsqueeze(1) + self.increments[random_indices]).view(-1, 3)
-                rand_points = torch.clamp(rand_points, -self.grid_dim // 2, self.grid_dim // 2) / (self.grid_dim // 2)
-                # print(f"rand_points unique: {torch.unique(rand_points, dim=0).size(0)}")  # 调试
-                
-                # 无放回采样网格点
-                grid_indices = np.random.choice(grid_size, self.n_points, replace=False)
-                grid_points = self.full_grid_high_res[grid_indices]
-                
-                # 合并并去重
-                all_points = torch.cat([rand_points, grid_points], dim=0)
-                unique_points = torch.unique(all_points, dim=0)
-                # print(f"unique_points after merge: {unique_points.size(0)}")  # 调试
-                
-                # 补充点
-                if unique_points.size(0) < self.n_points:
-                    remaining = self.n_points - unique_points.size(0)
-                    used_indices = set(grid_indices)
-                    available_indices = [i for i in range(grid_size) if i not in used_indices]
-                    if len(available_indices) >= remaining:
-                        additional_indices = np.random.choice(available_indices, remaining, replace=False)
-                    else:
-                        additional_indices = np.random.choice(grid_size, remaining, replace=True)
-                        print(f"Warning: Used replace=True for {remaining} points")
-                    additional_points = self.full_grid_high_res[additional_indices]
-                    unique_points = torch.cat([unique_points, additional_points], dim=0)
-                
-                indices = torch.randperm(unique_points.size(0))[:self.n_points]
-                xs = unique_points[indices]
-            else:
-                sample_size = min(self.n_points * 2, grid_size)
-                grid_indices = np.random.choice(grid_size, sample_size, replace=False)
-                grid_points = self.full_grid_high_res[grid_indices]
-                unique_points = torch.unique(grid_points, dim=0)
-                # print(f"Unique grid points: {unique_points.size(0)}")  # 调试
-                
-                if unique_points.size(0) < self.n_points:
-                    remaining = self.n_points - unique_points.size(0)
-                    used_indices = set(grid_indices)
-                    available_indices = [i for i in range(grid_size) if i not in used_indices]
-                    if len(available_indices) >= remaining:
-                        additional_indices = np.random.choice(available_indices, remaining, replace=False)
-                    else:
-                        additional_indices = np.random.choice(grid_size, remaining, replace=True)
-                        # print(f"Warning: Used replace=True for {remaining} points")
-                    additional_points = self.full_grid_high_res[additional_indices]
-                    unique_points = torch.cat([unique_points, additional_points], dim=0)
-                
-                indices = torch.randperm(unique_points.size(0))[:self.n_points]
-                xs = unique_points[indices]
+            return self.full_grid_high_res.to(device)
         
-        return xs # 形状为[n_points, 3]
+        grid_size = len(self.full_grid_high_res)
+        if grid_size < self.n_points:
+            raise ValueError(f"Grid size {grid_size} < n_points {self.n_points}")
+        
+        if self.targeted_sampling_ratio >= 1:
+            # 1. 目标采样：原子周围的点
+            rand_points = coords / self.resolution
+            noise = torch.randn_like(rand_points, device=device) * (self.resolution / 4)
+            rand_points = (rand_points + noise).floor().long()
+            
+            # 计算每个原子周围需要采样的点数
+            points_per_atom = max(1, (self.n_points // coords.size(0)) // self.targeted_sampling_ratio)
+            random_indices = torch.randperm(self.increments.size(0), device=device)[:points_per_atom]
+            
+            # 在原子周围采样
+            rand_points = (rand_points.unsqueeze(1) + self.increments[random_indices].to(device)).view(-1, 3)
+            min_bound = -(self.grid_dim // 2)
+            max_bound = (self.grid_dim - 1) // 2
+            rand_points = torch.clamp(rand_points, min_bound, max_bound).float() / (self.grid_dim // 2)
+            
+            # 2. 随机采样网格点
+            grid_indices = torch.randperm(grid_size, device=device)[:self.n_points]
+            grid_points = self.full_grid_high_res[grid_indices].to(device)
+            
+            # 3. 合并并去重
+            all_points = torch.cat([rand_points, grid_points], dim=0)
+            unique_points = torch.unique(all_points, dim=0)
+            
+            # 4. 如果点数不足，补充随机网格点
+            if unique_points.size(0) < self.n_points:
+                remaining = self.n_points - unique_points.size(0)
+                used_mask = torch.zeros(grid_size, dtype=torch.bool, device=device)
+                used_mask[grid_indices] = True
+                available_indices = torch.nonzero(~used_mask).squeeze(-1)
+                
+                if len(available_indices) >= remaining:
+                    additional_indices = available_indices[torch.randperm(len(available_indices))[:remaining]]
+                else:
+                    additional_indices = torch.randint(grid_size, (remaining,), device=device)
+                
+                additional_points = self.full_grid_high_res[additional_indices].to(device)
+                unique_points = torch.cat([unique_points, additional_points], dim=0)
+            
+            # 5. 随机选择所需数量的点
+            indices = torch.randperm(unique_points.size(0), device=device)[:self.n_points]
+            return unique_points[indices]
+        
+        else:
+            # 简单随机采样
+            sample_size = min(self.n_points * 2, grid_size)
+            grid_indices = torch.randperm(grid_size, device=device)[:sample_size]
+            grid_points = self.full_grid_high_res[grid_indices].to(device)
+            unique_points = torch.unique(grid_points, dim=0)
+            
+            if unique_points.size(0) < self.n_points:
+                remaining = self.n_points - unique_points.size(0)
+                additional_indices = torch.randint(grid_size, (remaining,), device=device)
+                additional_points = self.full_grid_high_res[additional_indices].to(device)
+                unique_points = torch.cat([unique_points, additional_points], dim=0)
+            
+            indices = torch.randperm(unique_points.size(0), device=device)[:self.n_points]
+            return unique_points[indices]
 
     def _center_molecule(self, coords) -> torch.Tensor:
         """
@@ -397,8 +397,10 @@ def create_field_loaders(
 
     if config.get("debug_one_mol", False):
         dset.data = [dset.data[0]] * len(dset.data)
+        dset.field_idxs = torch.arange(len(dset.data))
     elif config.get("debug_subset", False):
-        dset.data = dset.data[:128]
+        dset.data = dset.data[:16]
+        dset.field_idxs = torch.arange(len(dset.data))
 
     loader = DataLoader(
         dset,

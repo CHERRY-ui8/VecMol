@@ -1,8 +1,10 @@
 sigma: 1
 n_query_points: 500
-n_iter: 2000
+n_iter: 500
 step_size: 0.01
-merge_threshold: 5
+# DBSCAN聚类参数
+eps: 0.01      # 邻域半径，单位为Å。越小越严格（原子密集度高就设小），目前调得很小，但是如果使用预测的梯度场，需要适当放大
+min_samples: 10 # 至少多少个点才能形成一个"原子簇"
 sigma_ratios:
   C: 0.9    # 碳原子，较小的 sigma 使梯度场更集中
   H: 1.3    # 氢原子，较大的 sigma 使梯度场更分散

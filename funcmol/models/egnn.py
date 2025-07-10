@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from torch_geometric.nn import MessagePassing, knn_graph, knn
 from funcmol.models.encoder import create_grid_coords
+import math
 
 # 添加torch.compile兼容性处理
 try:
@@ -117,7 +118,7 @@ class EGNNVectorField(nn.Module):
 
         # Create learnable grid points and features for G_L
         self.register_buffer('grid_points', create_grid_coords(batch_size=1, grid_size=self.grid_size, device=device).squeeze(0))
-        self.grid_features = nn.Parameter(torch.randn(grid_size**3, code_dim, requires_grad=True))
+        self.grid_features = nn.Parameter(torch.randn(grid_size**3, code_dim, requires_grad=True) / math.sqrt(code_dim))
 
         # Create EGNN layers
         self.layers = nn.ModuleList([
@@ -138,8 +139,7 @@ class EGNNVectorField(nn.Module):
             out_x_dim=n_atom_types
         )
         
-    @disable
-    def forward(self, query_points, codes=None):
+    def forward(self, query_points, codes):
         """
         输入：
             query_points: [batch_size, n_points, 3]，空间中采样的查询点
@@ -159,7 +159,6 @@ class EGNNVectorField(nn.Module):
         query_features = torch.zeros(batch_size, n_points, self.code_dim, device=device)
         
         # 锚点特征为codes
-        # assert codes is not None and codes.size(0) == batch_size, "Codes must be provided with matching batch size"
         # [B, n_grid, code_dim]
         grid_features = codes
 
@@ -196,7 +195,7 @@ class EGNNVectorField(nn.Module):
             batch_y=grid_batch
         )
 
-        edge_grid_query[1] += len(query_points)
+        edge_grid_query[1] += len(query_points) # 添加bias，匹配knn的输出
                     
         # 7. 逐层EGNN消息传递
         h, x = node_features, node_coords

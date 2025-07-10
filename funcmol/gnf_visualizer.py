@@ -209,20 +209,7 @@ class GNFVisualizer(MoleculeVisualizer):
                                      animation_name: str = "reconstruction",
                                      field_option: int = 1,
                                      sample_idx: int = 1) -> Dict[str, Any]:
-        """创建重建过程动画
-        Args:
-            gt_coords: 真实分子坐标
-            gt_types: 真实原子类型
-            converter: GNF转换器
-            decoder: 解码器模型
-            codes: 编码
-            save_interval: 保存关键帧的间隔
-            animation_name: 动画文件名
-            field_option: 使用哪种场
-                1: 使用标准答案梯度场 (ground truth)
-                2: 使用神经网络预测的梯度场 (predicted)
-            sample_idx: 要可视化的分子样本索引
-        """
+        """创建重建过程动画"""
         device = gt_coords.device
         
         # 准备真实数据
@@ -230,13 +217,17 @@ class GNFVisualizer(MoleculeVisualizer):
         gt_valid_coords = gt_coords[sample_idx][gt_mask]  # [n_valid_atoms, 3]
         gt_valid_types = gt_types[sample_idx][gt_mask]  # [n_valid_atoms]
         
+        print(f"\nStarting reconstruction for molecule {sample_idx}")
+        print(f"Ground truth atoms: {len(gt_valid_coords)}")
+        print(f"Atom types: {gt_valid_types.tolist()}")
+        
         # QM9数据集中所有可能的原子类型
         all_atom_types = list(range(5))  # [0, 1, 2, 3, 4] 对应 [C, H, O, N, F]
         
         # 为每种可能的原子类型初始化采样点
         z_dict = {}  # 存储每种原子类型的采样点
         for atom_type in all_atom_types:
-            z_dict[atom_type] = torch.rand(converter.n_query_points, 3, device=device) * 2 - 1
+            z_dict[atom_type] = torch.rand(converter.n_query_points, 3, device=device) * 4 - 2
         
         # 记录重建过程
         frame_paths = []
@@ -270,43 +261,51 @@ class GNFVisualizer(MoleculeVisualizer):
                                 z_batch  # [1, n_query_points, 3]
                             )
                             field = gt_field[0]  # [n_query_points, n_atom_types, 3]
-                            # 只使用当前类型的梯度场
                             grad = field[:, atom_type]  # [n_query_points, 3]
-                            z_dict[atom_type] = z + converter.step_size * grad
-                        # 如果不存在这种类型的原子,采样点保持不动
+                        else:  # 如果不存在这种类型的原子，梯度为0
+                            grad = torch.zeros_like(z_batch[0])
+                            
+                        # 调试信息
+                        if i % 1000 == 0:
+                            grad_norm = torch.norm(grad, dim=1).mean().item()
+                            print(f"Iteration {i}, Atom type {atom_type}: grad norm = {grad_norm:.6f}")
+                        
+                        # 更新采样点位置
+                        z_dict[atom_type] = z + converter.step_size * grad
                     else:  # 使用神经网络预测的梯度场
                         field = decoder(z_batch, codes[sample_idx:sample_idx+1])[0]
-                        # 只使用当前类型的梯度场
                         grad = field[:, atom_type]  # [n_query_points, 3]
+                        
+                        # 调试信息
+                        if i % 1000 == 0:
+                            grad_norm = torch.norm(grad, dim=1).mean().item()
+                            print(f"Iteration {i}, Atom type {atom_type}: grad norm = {grad_norm:.6f}")
+                        
                         z_dict[atom_type] = z + converter.step_size * grad
             
             # 保存关键帧
             if i % save_interval == 0 or i == converter.n_iter - 1:
                 frame_path = os.path.join(self.output_dir, f"frame_{i:04d}.png")
                 
-                # 合并所有类型的点
+                # 合并所有类型的点（不执行merge_points）
                 all_points = []
                 all_types = []
                 for atom_type in all_atom_types:
                     points = z_dict[atom_type]
-                    # 使用converter的点合并逻辑
-                    merged_points = torch.from_numpy(
-                        converter._merge_points(points.detach().cpu().numpy())
-                    ).to(device)
-                    if len(merged_points) > 0:  # 只添加密度足够大的点
-                        all_points.append(merged_points)
-                        all_types.extend([atom_type] * len(merged_points))
-                
-                if all_points:  # 如果有点被保留
+                    if len(points) > 0:
+                        all_points.append(points)
+                        all_types.extend([atom_type] * len(points))
+                    
+                if all_points:  # 如果有点
                     current_points = torch.cat(all_points, dim=0)
                     current_types = torch.tensor(all_types, device=device)
-                else:  # 如果没有点被保留
+                else:  # 如果没有点
                     current_points = torch.empty((0, 3), device=device)
                     current_types = torch.empty((0,), device=device)
                 
                 self.visualize_reconstruction_step(
                     gt_valid_coords, current_points, i, frame_path, 
-                    gt_valid_types, current_types  # 添加类型信息用于可视化
+                    gt_valid_types, current_types
                 )
                 frame_paths.append(frame_path)
                 
@@ -332,17 +331,17 @@ class GNFVisualizer(MoleculeVisualizer):
                 writer.append_data(imageio.imread(frame_path))
                 os.remove(frame_path)
         
-        # 合并最终结果
+        # 在最后执行一次merge_points来得到最终的原子位置
         final_points = []
         final_types = []
         for atom_type in all_atom_types:
-            points = z_dict[atom_type]
-            merged_points = torch.from_numpy(
-                converter._merge_points(points.detach().cpu().numpy())
-            ).to(device)
-            if len(merged_points) > 0:
-                final_points.append(merged_points)
-                final_types.extend([atom_type] * len(merged_points))
+            points = z_dict[atom_type].detach().cpu().numpy()
+            if len(points) > 0:
+                # 对每种原子类型分别执行merge_points
+                merged_points = converter._merge_points(points)
+                if len(merged_points) > 0:
+                    final_points.append(torch.from_numpy(merged_points).to(device))
+                    final_types.extend([atom_type] * len(merged_points))
         
         if final_points:
             final_points = torch.cat(final_points, dim=0)
@@ -484,7 +483,8 @@ def main():
             n_query_points=gnf_config.get("n_query_points", config["dset"]["n_points"]),
             n_iter=gnf_config.get("n_iter", 5000),
             step_size=gnf_config.get("step_size", 0.01),
-            merge_threshold=gnf_config.get("merge_threshold", 5),
+            eps=gnf_config.get("eps", 0.1),  # DBSCAN的邻域半径参数
+            min_samples=gnf_config.get("min_samples", 3),  # DBSCAN的最小样本数参数
             device=device,
             sigma_ratios=sigma_ratios
         )

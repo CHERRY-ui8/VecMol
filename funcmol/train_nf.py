@@ -42,27 +42,6 @@ def plot_loss_curve(train_losses, val_losses, save_path, title_suffix=""):
     plt.savefig(save_path)
     plt.close()
 
-def plot_field_loss_curve(batch_train_losses, save_path, title_suffix=""):
-    """
-    只绘制 field loss 曲线。
-    Args:
-        batch_train_losses (list): 每个元素是 {"field_loss": ...} 的字典
-        save_path (str): 图片保存路径
-        title_suffix (str): 图标题后缀
-    """
-    # 提取 field_loss 列表
-    field_losses = [l["field_loss"] for l in batch_train_losses]
-
-    plt.figure(figsize=(10, 6))
-    plt.plot(field_losses, label='Field Loss', color='orange')
-    plt.xlabel('Steps')
-    plt.ylabel('Field Loss')
-    plt.title(f'Field Loss Curve {title_suffix}')
-    plt.legend()
-    plt.grid(True)
-    plt.savefig(save_path)
-    plt.close()
-
 
 @hydra.main(config_path="configs", config_name="train_nf_qm9", version_base=None)
 def main(config):
@@ -118,12 +97,10 @@ def main(config):
     # Metrics
     metrics = {
         "loss": torchmetrics.MeanMetric().to(fabric.device),
-        "field_loss": torchmetrics.MeanMetric().to(fabric.device),
         "recon_loss": torchmetrics.MeanMetric().to(fabric.device),
     }
     metrics_val = {
-        "loss": torchmetrics.MeanMetric(sync_on_compute=False).to(fabric.device),
-        "field_loss": torchmetrics.MeanMetric(sync_on_compute=False).to(fabric.device),
+        "loss": torchmetrics.MeanMetric(sync_on_compute=False).to(fabric.device), 
         "recon_loss": torchmetrics.MeanMetric(sync_on_compute=False).to(fabric.device),
     }
     
@@ -132,10 +109,9 @@ def main(config):
     best_loss = float("inf")
     start_epoch = 0
     
-    # 新增：用于记录每个batch的loss
-    batch_train_losses = []
-    train_losses = []  # 新增：用于记录所有epoch的train loss
-    val_losses = []    # 新增：用于记录所有epoch的val loss
+    train_losses = []  # 记录每个epoch的训练loss
+    val_losses = []    # 记录每个epoch的验证loss
+    batch_losses = []  # 记录每个batch的训练loss
     global_step = 0
     
     # 实例化gnf_converter
@@ -166,16 +142,14 @@ def main(config):
             gnf_converter,
             metrics=metrics,
             epoch=epoch,
-            batch_train_losses=batch_train_losses,  # 新增：传入batch_train_losses
-            global_step=global_step  # 新增：传入global_step
+            batch_train_losses=batch_losses,  # 记录每个batch的loss
+            global_step=global_step
         )
         train_losses.append(loss_train)
-        global_step += len(loader_train)  # 更新全局步数
+        global_step += len(loader_train)
 
         # val
-        loss_val = None
         if (epoch % config["eval_every"] == 0 or epoch == config["n_epochs"] - 1):
-            # Master rank performs evaluation and checkpointing
             if fabric.global_rank == 0 and loader_val is not None:
                 loss_val = eval_nf(
                     loader_val,
@@ -188,26 +162,37 @@ def main(config):
                     fabric=fabric
                 )
                 val_losses.append(loss_val)
+                # 保存checkpoint
                 save_checkpoint(
-                    epoch, config, loss_val, best_loss, enc, dec, optim_enc, optim_dec, fabric)
+                    epoch, config, loss_val, best_loss, enc, dec, optim_enc, optim_dec, fabric
+                )
+                # 绘制loss曲线
+                if len(batch_losses) > 0:
+                    # 绘制每个batch的loss曲线
+                    plot_loss_curve(
+                        [l["total_loss"] for l in batch_losses],
+                        None,
+                        os.path.join(config["dirname"], f"loss_curve_batches.png"),
+                        "(Batch Level)"
+                    )
+                # 绘制每个epoch的loss曲线
+                plot_loss_curve(
+                    train_losses,
+                    val_losses,
+                    os.path.join(config["dirname"], f"loss_curve_epochs.png"),
+                    "(Epoch Level)"
+                )
+                # 保存loss数据
+                np.save(os.path.join(config["dirname"], "train_losses.npy"), np.array(train_losses))
+                np.save(os.path.join(config["dirname"], "val_losses.npy"), np.array(val_losses))
+                if len(batch_losses) > 0:
+                    np.save(
+                        os.path.join(config["dirname"], "batch_losses.npy"),
+                        np.array([l["total_loss"] for l in batch_losses])
+                    )
             else:
                 fabric.barrier()
         
-        # 在每个epoch结束时绘制loss曲线
-        if fabric.global_rank == 0:
-            # 绘制整个训练过程的loss曲线
-            plot_loss_curve(
-                [l["total_loss"] for l in batch_train_losses],
-                None,
-                os.path.join(config["dirname"], f"loss_curve_all_batches.png"),
-                "(All Batches)"
-            )
-            plot_field_loss_curve(
-                batch_train_losses,
-                os.path.join(config["dirname"], f"field_loss_curve_all_batches.png"),
-                "(All Batches)"
-            )
-            
         # log
         elapsed_time = time.time() - start_time
         log_epoch(config, epoch, loss_train, loss_val if loss_val is not None else 0.0, elapsed_time, fabric)
