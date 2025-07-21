@@ -90,14 +90,15 @@ class EGNNLayer(MessagePassing):
 class EGNNVectorField(nn.Module):
     def __init__(self, 
                  grid_size: int = 8,
-                 hidden_dim: int = 512,
+                 hidden_dim: int = 128,
                  num_layers: int = 3,
                  k_neighbors: int = 8,
                  n_atom_types: int = 5,
-                 code_dim: int = 512,
+                 code_dim: int = 128,
                  device=None):
         """
         Initialize the EGNN Vector Field model.
+        Each query point predicts a 3D vector for every atom type.
 
         Args:
             grid_size (int): Size of the grid for G_L (L in the paper)
@@ -118,7 +119,10 @@ class EGNNVectorField(nn.Module):
 
         # Create learnable grid points and features for G_L
         self.register_buffer('grid_points', create_grid_coords(batch_size=1, grid_size=self.grid_size, device=device).squeeze(0))
-        self.grid_features = nn.Parameter(torch.randn(grid_size**3, code_dim, requires_grad=True) / math.sqrt(code_dim))
+        self.grid_features = nn.Parameter(torch.randn(self.grid_size**3, self.code_dim, requires_grad=True) / math.sqrt(self.code_dim)) # TODO: 是否需要初始化？
+
+        # type embedding
+        self.type_embed = nn.Embedding(self.n_atom_types, self.code_dim)
 
         # Create EGNN layers
         self.layers = nn.ModuleList([
@@ -141,11 +145,12 @@ class EGNNVectorField(nn.Module):
         
     def forward(self, query_points, codes):
         """
-        输入：
-            query_points: [batch_size, n_points, 3]，空间中采样的查询点
-            codes: [batch_size, grid_size**3, feature_dim]，每个分子的latent grid特征
-        输出：
-            vector_field: [batch_size, n_points, n_atom_types, 3]，每个查询点的矢量场
+        Args:
+            query_points: [B, N, 3] sampled query positions
+            codes: [B, G, C] latent features for each anchor grid (G = grid_size³)
+
+        Returns:
+            vector_field: [B, N, T, 3] vector field at each query point for each atom type
         """
         batch_size = query_points.size(0)
         n_points = query_points.size(1)
@@ -168,44 +173,58 @@ class EGNNVectorField(nn.Module):
 
         # 3. 合并节点，为每个分子构建一个图 TODO:
         # [B, n_points + n_grid, code_dim]
-        node_features = torch.cat([query_features, grid_features], dim=1)
+        combined_features = torch.cat([query_features, grid_features], dim=1)
         # [B, n_points + n_grid, 3]
-        node_coords = torch.cat([query_points, grid_coords], dim=1)
+        combined_coords = torch.cat([query_points, grid_coords], dim=1)
         total_nodes = n_points + n_grid
 
         # 4. 展平成适合PyG的格式
-        node_features = node_features.reshape(-1, self.code_dim)  # [B * total_nodes, code_dim]
-        node_coords = node_coords.reshape(-1, 3)                  # [B * total_nodes, 3]
-        batch_index = torch.arange(batch_size, device=device).repeat_interleave(total_nodes)
+        h = combined_features.reshape(-1, self.code_dim)  # [B * total_nodes, code_dim]
+        x = combined_coords.reshape(-1, 3)                  # [B * total_nodes, 3]
 
         # 5. 构建边 - 修改逻辑：query_points之间不连边，grid_points之间可以连边
             # 使用 knn 构建部分图，只保留 grid -> query 的连边
             # 分别构造 batch index
-        query_coords = query_points.reshape(-1, 3).float()       # [B * n_query, 3]
-        grid_coords_all = grid_coords.reshape(-1, 3).float()     # [B * n_grid, 3]
+        query_coords_flat = query_points.reshape(-1, 3).float()       # [B * n_query, 3]
+        grid_coords_flat = grid_coords.reshape(-1, 3).float()     # [B * n_grid, 3]
         query_batch = torch.arange(batch_size, device=device).repeat_interleave(n_points)
         grid_batch = torch.arange(batch_size, device=device).repeat_interleave(n_grid)
 
         # 只构建 grid -> query edges (查询点从网格点获取信息)
         edge_grid_query = knn(
-            x=query_coords,
-            y=grid_coords_all,
+            x=query_coords_flat,
+            y=grid_coords_flat,
             k=self.k_neighbors, 
             batch_x=query_batch,
             batch_y=grid_batch
-        )
+        ) # [2, E=k_neighbors*n_points]
 
-        edge_grid_query[1] += len(query_points) # 添加bias，匹配knn的输出
+        edge_grid_query[0] += len(query_points) # 添加bias，匹配knn的输出
                     
         # 7. 逐层EGNN消息传递
-        h, x = node_features, node_coords
         for layer in self.layers:
             h, x = layer(x, h, edge_grid_query) # h: [B * total_nodes, code_dim], x: [B * total_nodes, 3]
-
-        # 8. 预测矢量场
-        _, predicted_sources = self.field_layer(x, h, edge_grid_query)  # [B * total_nodes, n_atom_types, 3]
-        predicted_sources = predicted_sources.view(batch_size, total_nodes, self.n_atom_types, 3)
-        predicted_sources = predicted_sources[:, :n_points, :, :]  # 只取查询点部分
-        vector_field = predicted_sources - query_points[:,:,None,:]  # (B, n_points, n_atom_types, 3）
         
+        # TODO: x-->node_coords
+        # Use original coordinates for final field prediction
+        node_coords = torch.cat([query_points, grid_coords], dim=1).reshape(-1, 3)
+
+
+        # 8. 预测矢量场 
+        # _, predicted_sources = self.field_layer(x, h, edge_grid_query)  # [B * total_nodes, n_atom_types, 3]
+        # predicted_sources = predicted_sources.view(batch_size, total_nodes, self.n_atom_types, 3)
+        # predicted_sources = predicted_sources[:, :n_points, :, :]  # 只取查询点部分
+        # vector_field = predicted_sources - query_points[:,:,None,:]  # (B, n_points, n_atom_types, 3）
+        # Predict vector field separately for each atom type
+        # 如果没有 early type-awareness 的模型，容易出现折中解（所有类型都预测个平均场）。
+        # 如果一个 query point 对不同 atom type 的向量场是完全不同的（方向、长度、聚集），
+        # 而模型前几层是共享的，那么它容易出现折中解（所有类型都预测个平均场）。
+        # 模型在训练时会更难对多样化结构建模。
+        _, predicted_sources = self.field_layer(node_coords, h, edge_grid_query)  # [B*(N+G), T, 3]
+        predicted_sources = predicted_sources.view(batch_size, total_nodes, self.n_atom_types, 3)
+        predicted_sources = predicted_sources[:, :n_points, :, :]  # keep only query points
+
+        # Compute residual vectors relative to query points
+        vector_field = predicted_sources - query_points[:, :, None, :]  # [B, N, T, 3]
+
         return vector_field

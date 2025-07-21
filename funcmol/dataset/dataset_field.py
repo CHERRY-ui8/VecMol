@@ -156,7 +156,10 @@ class FieldDataset(Dataset):
 
         if self.rotate:
             sample["coords"] = self._rotate_coords(sample)
+
         sample["coords"] = self._center_molecule(sample["coords"])
+
+        sample["coords"] = self._scale_molecule(sample["coords"])
 
         return sample
 
@@ -396,7 +399,7 @@ def create_field_loaders(
     )
 
     if config.get("debug_one_mol", False):
-        dset.data = [dset.data[0]] * len(dset.data)
+        dset.data = [dset.data[0]]  # 只保留第一个分子，不复制
         dset.field_idxs = torch.arange(len(dset.data))
     elif config.get("debug_subset", False):
         dset.data = dset.data[:16]

@@ -216,7 +216,7 @@ def adjust_learning_rate(optim_enc, optim_dec, epoch, config):
         return
     lr_enc = config["dset"]["lr_enc"]
     lr_dec = config["dset"]["lr_dec"]
-    for milestone in [80]:
+    for milestone in [500]: # TODO：这里的80是hardcoded的，可以改进
         lr_enc *= 0.1 if epoch >= milestone else 1.0
         lr_dec *= 0.1 if epoch >= milestone else 1.0
 

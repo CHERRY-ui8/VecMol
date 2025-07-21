@@ -74,7 +74,7 @@ class CrossGraphEncoder(nn.Module):
         node_batch = torch.cat([atom_batch_idx, grid_batch_idx], dim=0)  # [(N_total_atoms + B*n_grid)]
 
         # 5. 建边（KNN，原子和grid点都可互连）
-        edge_index = knn_graph(
+        edge_index = knn_graph( # TODO: 连边方式可以改进。现在是拼接所有节点之后连边，但是有可能出现atom和grid之间连边不足的情况。为了避免，可以考虑分别连边之后合并
             x=node_pos, 
             k=self.k_neighbors, 
             batch=node_batch, 

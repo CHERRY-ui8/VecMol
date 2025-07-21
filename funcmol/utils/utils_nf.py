@@ -43,18 +43,18 @@ def create_neural_field(config: dict, fabric: object) -> tuple:
     # Initialize the encoder
     enc = CrossGraphEncoder(
         n_atom_types=config["dset"]["n_channels"],
-        grid_size=config["dset"]["grid_dim"],
-        code_dim=config["decoder"]["code_dim"],
-        hidden_dim=config["decoder"]["hidden_dim"],
+        grid_size=config["encoder"]["grid_size"],
+        code_dim=config["encoder"]["code_dim"],
+        hidden_dim=config["encoder"]["hidden_dim"],
         num_layers=config["encoder"]["num_layers"],
         k_neighbors=config["encoder"]["k_neighbors"]
     )
     # Initialize the decoder
     dec = Decoder({
-        "grid_size": config["dset"]["grid_dim"],
+        "grid_size": config["decoder"]["grid_size"],
         "hidden_dim": config["decoder"]["hidden_dim"],
         "n_layers": config["decoder"]["n_layers"],
-        "k_neighbors": config["encoder"]["k_neighbors"],
+        "k_neighbors": config["decoder"]["k_neighbors"],
         "n_channels": config["dset"]["n_channels"],
         "code_dim": config["decoder"]["code_dim"]
     }, device=fabric.device)
@@ -124,8 +124,8 @@ def train_nf(
         # 计算目标梯度场（标准答案）
         target_field = gnf_converter.mol2gnf(coords, atoms_channel, query_points)
         
-        # 调试：输出5个query_point的梯度场大小（每500个batch输出一次）
-        if i % 500 == 0 and fabric.global_rank == 0:
+        # 调试：输出5个query_point的梯度场大小（每2000个batch输出一次）
+        if i % 2000 == 0 and fabric.global_rank == 0:
             b_idx = 0  # 只看第一个样本
             n_points = pred_field.shape[1]
             idxs = random.sample(range(n_points), 5)
@@ -465,7 +465,7 @@ def load_neural_field(nf_checkpoint: dict, fabric: object, config: dict = None) 
         config = nf_checkpoint["config"]
 
     dec = Decoder({
-        "grid_size": config["dset"]["grid_dim"],
+        "grid_size": config["decoder"]["grid_size"],
         "hidden_dim": config["decoder"]["hidden_dim"],
         "n_layers": config["decoder"]["n_layers"],
         "k_neighbors": config["encoder"]["k_neighbors"],
@@ -478,7 +478,7 @@ def load_neural_field(nf_checkpoint: dict, fabric: object, config: dict = None) 
 
     enc = CrossGraphEncoder(
         n_atom_types=config["dset"]["n_channels"],
-        grid_size=config["dset"]["grid_dim"],
+        grid_size=config["encoder"]["grid_size"],
         code_dim=config["decoder"]["code_dim"],
         hidden_dim=config["decoder"]["hidden_dim"],
         num_layers=config["encoder"]["num_layers"],
