@@ -199,7 +199,7 @@ class EGNNVectorField(nn.Module):
             batch_y=grid_batch
         ) # [2, E=k_neighbors*n_points]
 
-        edge_grid_query[0] += len(query_points) # 添加bias，匹配knn的输出
+        edge_grid_query[0] += len(query_coords_flat) # 添加bias，匹配knn的输出
                     
         # 7. 逐层EGNN消息传递
         for layer in self.layers:

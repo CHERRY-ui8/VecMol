@@ -392,6 +392,7 @@ def _unnormalize_coords(mol, grid_dim, resolution=0.25):
 
 def get_grid(grid_dim):
     discrete_grid = (np.arange(grid_dim) - (grid_dim // 2)) / (grid_dim // 2)
+    # 例如：当 grid_dim=8 时，discrete_grid 值为 [-1, -0.75, -0.5, -0.25, 0, 0.25, 0.5, 0.75]
     full_grid = torch.Tensor(
         [[a, b, c] for a in discrete_grid for b in discrete_grid for c in discrete_grid]
     )

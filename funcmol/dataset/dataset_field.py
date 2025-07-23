@@ -65,6 +65,7 @@ class FieldDataset(Dataset):
         self.n_points = n_points
         self.sample_full_grid = sample_full_grid
         self.grid_dim = grid_dim
+        self.scale_factor = 1 / (self.resolution * self.grid_dim / 2)
 
         self._read_data()
         self._filter_by_elements(elements)
@@ -159,7 +160,7 @@ class FieldDataset(Dataset):
 
         sample["coords"] = self._center_molecule(sample["coords"])
 
-        sample["coords"] = self._scale_molecule(sample["coords"])
+        sample["coords"] = self._scale_molecule(sample["coords"]) # 原来的 funcmol 根本就没有用 _scale_molecule
 
         return sample
 
@@ -171,14 +172,15 @@ class FieldDataset(Dataset):
         if self.sample_full_grid:
             return self.full_grid_high_res.to(device)
         
-        grid_size = len(self.full_grid_high_res)
-        if grid_size < self.n_points:
-            raise ValueError(f"Grid size {grid_size} < n_points {self.n_points}")
-        
+        grid_size = len(self.full_grid_high_res) # grid_dim**3
+
         if self.targeted_sampling_ratio >= 1:
             # 1. 目标采样：原子周围的点
-            rand_points = coords / self.resolution
-            noise = torch.randn_like(rand_points, device=device) * (self.resolution / 4)
+            # 注意：coords 已经通过 _scale_molecule 进行了缩放
+            # 现在 coords 的范围应该在 [-1, 1] 附近
+            rand_points = coords
+            # 添加小的噪声，噪声大小应该与网格分辨率相关
+            noise = torch.randn_like(rand_points, device=device) * 0.05  # 之前是resolution/4，现在是0.05,使用固定的小噪声（感觉区别应该不大）
             rand_points = (rand_points + noise).floor().long()
             
             # 计算每个原子周围需要采样的点数
@@ -187,9 +189,9 @@ class FieldDataset(Dataset):
             
             # 在原子周围采样
             rand_points = (rand_points.unsqueeze(1) + self.increments[random_indices].to(device)).view(-1, 3)
-            min_bound = -(self.grid_dim // 2)
-            max_bound = (self.grid_dim - 1) // 2
-            rand_points = torch.clamp(rand_points, min_bound, max_bound).float() / (self.grid_dim // 2)
+            min_bound = -1 # -(self.grid_dim // 2)
+            max_bound = 1 # (self.grid_dim - 1) // 2
+            rand_points = torch.clamp(rand_points, min_bound, max_bound).float() # / (self.grid_dim // 2)
             
             # 2. 随机采样网格点
             grid_indices = torch.randperm(grid_size, device=device)[:self.n_points]
@@ -199,26 +201,13 @@ class FieldDataset(Dataset):
             all_points = torch.cat([rand_points, grid_points], dim=0)
             unique_points = torch.unique(all_points, dim=0)
             
-            # 4. 如果点数不足，补充随机网格点
-            if unique_points.size(0) < self.n_points:
-                remaining = self.n_points - unique_points.size(0)
-                used_mask = torch.zeros(grid_size, dtype=torch.bool, device=device)
-                used_mask[grid_indices] = True
-                available_indices = torch.nonzero(~used_mask).squeeze(-1)
-                
-                if len(available_indices) >= remaining:
-                    additional_indices = available_indices[torch.randperm(len(available_indices))[:remaining]]
-                else:
-                    additional_indices = torch.randint(grid_size, (remaining,), device=device)
-                
-                additional_points = self.full_grid_high_res[additional_indices].to(device)
-                unique_points = torch.cat([unique_points, additional_points], dim=0)
-            
-            # 5. 随机选择所需数量的点
+            # 4. 随机选择所需数量的点
             indices = torch.randperm(unique_points.size(0), device=device)[:self.n_points]
             return unique_points[indices]
         
         else:
+            # raise NotImplementedError("Targeted sampling ratio < 1 is not implemented") 
+            # （在init里有写，如果split是val，则targeted_sampling_ratio=0，所以这个else是有用的，是用来处理val的）
             # 简单随机采样
             sample_size = min(self.n_points * 2, grid_size)
             grid_indices = torch.randperm(grid_size, device=device)[:sample_size]
@@ -258,8 +247,8 @@ class FieldDataset(Dataset):
         """
         Scales the coordinates of a molecule.
 
-        This method scales the input coordinates by dividing the masked coordinates
-        by the product of the resolution and half of the grid dimension. The scaling
+        This method scales the input coordinates by multiplying the masked coordinates
+        by the scale factor (1 / (resolution * grid_dim / 2)). The scaling
         is applied only to the coordinates that are not equal to the PADDING_INDEX.
 
         Args:
@@ -272,7 +261,7 @@ class FieldDataset(Dataset):
         """
         mask = coords[:, 0] != PADDING_INDEX
         masked_coords = coords[mask]
-        masked_coords = masked_coords / (self.resolution * self.grid_dim / 2)
+        masked_coords = masked_coords * self.scale_factor
         coords[mask] = masked_coords
         return coords
 
@@ -289,7 +278,7 @@ class FieldDataset(Dataset):
         """
         coords = batch["coords"]
         mask = coords[:, :, 0] != PADDING_INDEX
-        coords[mask] = coords[mask] / (self.resolution * self.grid_dim / 2)
+        coords[mask] = coords[mask] * self.scale_factor
         return coords
 
     def _rotate_coords(self, sample, rot_matrix=None) -> torch.Tensor:
@@ -313,7 +302,7 @@ class FieldDataset(Dataset):
         coords_masked = torch.reshape(coords_masked, (-1, 3))
 
         # go to center of mass
-        center_coords = torch.mean(coords_masked, dim=0)[0]
+        center_coords = torch.mean(coords_masked, dim=0)[0] # TODO 
         center_coords = center_coords.unsqueeze(0).tile((coords_masked.shape[0], 1))
         coords_masked = coords_masked - center_coords
 
@@ -402,7 +391,7 @@ def create_field_loaders(
         dset.data = [dset.data[0]]  # 只保留第一个分子，不复制
         dset.field_idxs = torch.arange(len(dset.data))
     elif config.get("debug_subset", False):
-        dset.data = dset.data[:16]
+        dset.data = dset.data[:128]
         dset.field_idxs = torch.arange(len(dset.data))
 
     loader = DataLoader(

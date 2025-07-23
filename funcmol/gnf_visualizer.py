@@ -85,7 +85,7 @@ class MoleculeVisualizer:
         """根据原子类型获取颜色列表"""
         return [self.atom_colors.get(int(atom_type), 'gray') for atom_type in atom_types]
     
-    def _setup_3d_axis(self, ax: plt.Axes, coords_list: List[np.ndarray], margin: float = 2.0):
+    def _setup_3d_axis(self, ax: plt.Axes, coords_list: List[np.ndarray], margin: float = 0.5):
         """设置3D坐标轴的共同属性"""
         ax.set_xlabel('X (Å)')
         ax.set_ylabel('Y (Å)')
@@ -227,7 +227,7 @@ class GNFVisualizer(MoleculeVisualizer):
         # 为每种可能的原子类型初始化采样点
         z_dict = {}  # 存储每种原子类型的采样点
         for atom_type in all_atom_types:
-            z_dict[atom_type] = torch.rand(converter.n_query_points, 3, device=device) * 4 - 2
+            z_dict[atom_type] = torch.rand(converter.n_query_points, 3, device=device) * 2 - 1
         
         # 记录重建过程
         frame_paths = []

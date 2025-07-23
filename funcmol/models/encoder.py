@@ -1,19 +1,20 @@
 import torch
 import torch.nn as nn
-from torch_geometric.nn import MessagePassing, knn_graph
+from torch_geometric.nn import MessagePassing, knn_graph, knn
 import torch.nn.functional as F
 from torch_geometric.loader import DataLoader
 
 
 class CrossGraphEncoder(nn.Module):
-    def __init__(self, n_atom_types, grid_size, code_dim, hidden_dim=128, num_layers=4, k_neighbors=8):
+    def __init__(self, n_atom_types, grid_size, code_dim, hidden_dim=128, num_layers=4, k_neighbors=8, atom_k_neighbors=6):
         super().__init__()
         self.n_atom_types = n_atom_types
         self.grid_size = grid_size
         self.code_dim = code_dim
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
-        self.k_neighbors = k_neighbors
+        self.k_neighbors = k_neighbors  # 原子 atom 和网格 grid 之间的连接数
+        self.atom_k_neighbors = atom_k_neighbors  # 原子 atom 内部的连接数
 
         # 注册grid坐标作为buffer（不需要训练）
         grid_coords = create_grid_coords(1, self.grid_size).squeeze(0)  # [n_grid, 3]
@@ -71,18 +72,43 @@ class CrossGraphEncoder(nn.Module):
         # 拼接所有节点
         node_feats = torch.cat([atom_feat, grid_codes], dim=0)  # [(N_total_atoms + B*n_grid), code_dim]
         node_pos = torch.cat([atom_coords, grid_coords_flat], dim=0)  # [(N_total_atoms + B*n_grid), 3]
-        node_batch = torch.cat([atom_batch_idx, grid_batch_idx], dim=0)  # [(N_total_atoms + B*n_grid)]
 
-        # 5. 建边（KNN，原子和grid点都可互连）
-        edge_index = knn_graph( # TODO: 连边方式可以改进。现在是拼接所有节点之后连边，但是有可能出现atom和grid之间连边不足的情况。为了避免，可以考虑分别连边之后合并
-            x=node_pos, 
-            k=self.k_neighbors, 
-            batch=node_batch, 
+        # 5. 构建两个分离的图
+        # 5.1 原子内部连接图（只连接原子之间）
+        atom_edge_index = knn_graph(
+            x=atom_coords,
+            k=self.atom_k_neighbors,
+            batch=atom_batch_idx,
             loop=False
         )
-
+        
+        # 5.2 原子-网格连接图
+        # 使用knn构建原子到网格的连接
+        atom_to_grid_edges = knn(
+            x=grid_coords_flat,  # source points (grid)
+            y=atom_coords,       # target points (atom)
+            k=self.k_neighbors,
+            batch_x=grid_batch_idx,
+            batch_y=atom_batch_idx
+        )  # [2, E] 其中 E = k_neighbors * N_total_atoms (22240 = 32 * 695)
+        
+        # 修正边索引：网格节点索引需要加上N_total_atoms的偏移量
+        # atom_to_grid_edges[0] 是原子索引，保持不变
+        # atom_to_grid_edges[1] 是网格索引，需要加上偏移量
+        atom_to_grid_edges[1] += N_total_atoms
+        
+        # 5.3 添加网格自环边，确保所有网格点都有入边
+        grid_self_loops = torch.stack([
+            torch.arange(N_total_atoms, N_total_atoms + B * n_grid, device=device),
+            torch.arange(N_total_atoms, N_total_atoms + B * n_grid, device=device)
+        ], dim=0)
+        
+        # 合并所有边
+        edge_index = torch.cat([atom_edge_index, atom_to_grid_edges, grid_self_loops], dim=1)
+        
         # 6. GNN消息传递
         h = node_feats
+        
         for layer in self.layers:
             h = layer(h, node_pos, edge_index)
 
@@ -126,6 +152,10 @@ class MessagePassingGNN(MessagePassing):
         x = x + aggr  # 残差连接
         x = self.layernorm(x)
         return x
+    
+    def message(self, message):
+        """Message function for MessagePassing"""
+        return message
 
 def create_grid_coords(batch_size, grid_size, device=None):
     """Create grid coordinates for a given grid size.
@@ -192,117 +222,3 @@ class Encoder(nn.Module):
         out = self.fc(out)
 
         return out
-
-
-class SingleConv3D(nn.Module):
-    def __init__(self, in_channels, out_channels, use_bn=True, non_linearity=True):
-        super(SingleConv3D, self).__init__()
-
-        self.use_bn = use_bn
-        self.non_linearity = non_linearity
-
-        self.conv = nn.Conv3d(
-            in_channels=in_channels,
-            out_channels=out_channels,
-            kernel_size=(3, 3, 3),
-            padding=1,
-        )
-
-        if use_bn:
-            self.bn = nn.BatchNorm3d(num_features=out_channels)
-
-        if non_linearity:
-            self.nl = nn.ReLU()
-
-    def forward(self, input):
-        x = self.conv(input)
-        if self.use_bn:
-            x = self.bn(x)
-        if self.non_linearity:
-            x = self.nl(x)
-        return x
-
-
-class Conv3DBlock(nn.Module):
-    def __init__(
-        self,
-        in_channels,
-        out_channels,
-        bottleneck=False,
-        use_bn=True,
-        res_block=True,
-        smaller=False,
-    ):
-        super(Conv3DBlock, self).__init__()
-        self.res_block = res_block
-
-        # first conv
-        if smaller:
-            level_channels_in = [
-                in_channels,
-                out_channels,
-                out_channels // 2,
-            ]
-            level_channels_out = [
-                out_channels,
-                out_channels // 2,
-                out_channels,
-            ]
-        else:
-            level_channels_in = [
-                out_channels,
-                out_channels // 2,
-                out_channels // 2,
-                out_channels // 2,
-                out_channels,
-            ]
-        self.conv_layers = nn.ModuleList()
-        for i in range(len(level_channels_in)):
-            if smaller:
-                self.conv_layers.append(
-                    SingleConv3D(
-                        in_channels=level_channels_in[i],
-                        out_channels=level_channels_out[i],
-                        use_bn=use_bn,
-                        non_linearity=(i != len(level_channels_out) - 1),
-                    )
-                )
-            else:
-                in_ch = in_channels if i == 0 else level_channels_in[i - 1]
-                out_ch = level_channels_in[i]
-                self.conv_layers.append(
-                    SingleConv3D(
-                        in_channels=in_ch,
-                        out_channels=out_ch,
-                        use_bn=use_bn,
-                        non_linearity=(i != len(level_channels_in) - 1),
-                    )
-                )
-
-        # non linearity
-        self.nl = nn.ReLU()
-
-        self.bottleneck = bottleneck
-        if not bottleneck:
-            self.pooling = nn.MaxPool3d(kernel_size=(2, 2, 2), stride=2)
-
-    def forward(self, input):
-        res = input
-        for i, conv in enumerate(self.conv_layers):
-            if i == 0:
-                x = conv(res)
-                res = x.clone()
-            else:
-                res = conv(res)
-
-        if self.res_block:
-            res += x
-
-        res = self.nl(res)
-
-        if not self.bottleneck:
-            out = self.pooling(res)
-        else:
-            out = res
-
-        return out, res

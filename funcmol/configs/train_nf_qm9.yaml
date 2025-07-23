@@ -8,7 +8,7 @@ defaults:
 
 debug: False
 debug_one_mol: False
-debug_subset: False
+debug_subset: True
 wandb: False
 seed: 1234
 exp_dir: exps/neural_field

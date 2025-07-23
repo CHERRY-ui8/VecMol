@@ -15,6 +15,12 @@ from funcmol.utils.utils_vis import visualize_voxel_grid
 import time
 from omegaconf import OmegaConf
 import random
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    TENSORBOARD_AVAILABLE = True
+except ImportError:
+    TENSORBOARD_AVAILABLE = False
+    SummaryWriter = None
 
 def create_neural_field(config: dict, fabric: object) -> tuple:
     """
@@ -75,7 +81,8 @@ def train_nf(
     metrics=None,
     epoch: int = 0,
     batch_train_losses=None, 
-    global_step=0, 
+    global_step=0,
+    tensorboard_writer=None,
 ) -> float:
     """
     Trains the neural field model for one epoch.
@@ -94,6 +101,7 @@ def train_nf(
         epoch (int, optional): Current epoch number. Defaults to 0.
         batch_train_losses (list, optional): List to store batch-wise losses. Defaults to None.
         global_step (int, optional): Global training step. Defaults to 0.
+        tensorboard_writer (SummaryWriter, optional): TensorBoard writer for logging. Defaults to None.
 
     Returns:
         float: The computed loss value.
@@ -152,10 +160,53 @@ def train_nf(
 
         # 计算损失
         loss = criterion(pred_field, target_field)
+        
+        # TensorBoard 日志记录
+        if tensorboard_writer is not None and TENSORBOARD_AVAILABLE and fabric.global_rank == 0:
+            current_step = global_step + i
+            tensorboard_writer.add_scalar('Loss/Batch', loss.item(), current_step)
+            tensorboard_writer.add_scalar('Loss/Running_Average', running_loss, current_step)
+            
+            # 记录学习率
+            if hasattr(optim_dec, 'param_groups') and len(optim_dec.param_groups) > 0:
+                tensorboard_writer.add_scalar('Learning_Rate/Decoder', optim_dec.param_groups[0]['lr'], current_step)
+            if hasattr(optim_enc, 'param_groups') and len(optim_enc.param_groups) > 0:
+                tensorboard_writer.add_scalar('Learning_Rate/Encoder', optim_enc.param_groups[0]['lr'], current_step)
+            
+            # 每100步记录一次更详细的指标
+            if current_step % 100 == 0:
+                # 记录预测场和目标场的统计信息
+                pred_field_norm = torch.norm(pred_field, dim=-1).mean().item()
+                target_field_norm = torch.norm(target_field, dim=-1).mean().item()
+                tensorboard_writer.add_scalar('Field_Stats/Pred_Field_Norm', pred_field_norm, current_step)
+                tensorboard_writer.add_scalar('Field_Stats/Target_Field_Norm', target_field_norm, current_step)
+                
+                # 记录模型参数统计信息
+                for name, param in dec.named_parameters():
+                    if param.grad is not None:
+                        tensorboard_writer.add_histogram(f'Decoder_Params/{name}', param.data, current_step)
+                        tensorboard_writer.add_histogram(f'Decoder_Grads/{name}', param.grad.data, current_step)
+                
+                for name, param in enc.named_parameters():
+                    if param.grad is not None:
+                        tensorboard_writer.add_histogram(f'Encoder_Params/{name}', param.data, current_step)
+                        tensorboard_writer.add_histogram(f'Encoder_Grads/{name}', param.grad.data, current_step)
+        
         # 反向传播
         optim_dec.zero_grad()
         optim_enc.zero_grad()
         fabric.backward(loss)
+        
+        # TensorBoard 记录梯度范数（在梯度裁剪前）
+        if tensorboard_writer is not None and TENSORBOARD_AVAILABLE and fabric.global_rank == 0:
+            current_step = global_step + i
+            if current_step % 100 == 0:
+                dec_grad_norm = torch.nn.utils.clip_grad_norm_(dec.parameters(), float('inf'), norm_type=2)
+                enc_grad_norm = torch.nn.utils.clip_grad_norm_(enc.parameters(), float('inf'), norm_type=2)
+                tensorboard_writer.add_scalar('Gradients/Decoder_Norm', dec_grad_norm, current_step)
+                tensorboard_writer.add_scalar('Gradients/Encoder_Norm', enc_grad_norm, current_step)
+        
+        # 梯度裁剪
         torch.nn.utils.clip_grad_norm_(dec.parameters(), max_grad_norm)
         torch.nn.utils.clip_grad_norm_(enc.parameters(), max_grad_norm)
         optim_dec.step()
@@ -193,9 +244,7 @@ def eval_nf(
     config: dict,
     gnf_converter: GNFConverter,
     metrics=None,
-    save_plot_png=False,
     fabric=None,
-    sample_full_grid=False,
 ) -> float:
     """
     Evaluates the neural field model.
@@ -208,9 +257,7 @@ def eval_nf(
         config (dict): Configuration dictionary.
         gnf_converter (GNFConverter): Instance of GNFConverter for field computation.
         metrics (dict, optional): Dictionary of metrics to track. Defaults to None.
-        save_plot_png (bool, optional): Whether to save plots. Defaults to False.
         fabric (object, optional): Fabric object for distributed training. Defaults to None.
-        sample_full_grid (bool, optional): Whether to sample the full grid. Defaults to False.
 
     Returns:
         float: The computed loss value.
@@ -248,73 +295,7 @@ def eval_nf(
         # 更新指标
         metrics["loss"].update(loss)
         
-        # 保存可视化结果
-        if save_plot_png and i == 0:
-            save_voxel_eval_nf(config, fabric, pred_field, target_field)
-
     return metrics["loss"].compute().item()
-
-
-def save_voxel_eval_nf(config, fabric, occs_pred, occs_gt=None, refine=True, i=0, mols_pred=[], mols_gt=[], mols_pred_dict=defaultdict(list), codes=None, codes_dict=defaultdict(list)):
-    dirname_voxels = os.path.join(config["dirname"], "res")
-    if os.path.exists(dirname_voxels):
-        shutil.rmtree(dirname_voxels)
-    os.makedirs(dirname_voxels, exist_ok=False)
-    fabric.print(f">> saving images in {dirname_voxels}")
-
-    occs_pred = occs_pred.permute(0, 2, 1).reshape(-1, occs_gt.size(2), config["dset"]["grid_dim"], config["dset"]["grid_dim"], config["dset"]["grid_dim"])
-    if occs_gt is not None:
-        occs_gt = occs_gt.permute(0, 2, 1).reshape(-1, occs_gt.size(2), config["dset"]["grid_dim"], config["dset"]["grid_dim"], config["dset"]["grid_dim"])
-
-    for b in range(occs_pred.size(0)):
-        # Predictions
-        visualize_voxel_grid(occs_pred[b], os.path.join(dirname_voxels, f"./iter{i}_batch{b}_pred.png"), threshold=0.2, sparse=False)
-        mol_init_pred = get_atom_coords(occs_pred[b].cpu(), rad=config["dset"]["atomic_radius"])
-        if not refine:
-            mol_init_pred["coords"] *= config["dset"]["resolution"]
-        if mol_init_pred is not None:
-            fabric.print("pred", mol_init_pred["coords"].size())
-            if refine:
-                mol_init_pred = _normalize_coords(mol_init_pred, config["dset"]["grid_dim"])
-                num_coords = int(mol_init_pred["coords"].size(1))
-                mols_pred_dict[num_coords].append(mol_init_pred)
-                codes_dict[num_coords].append(codes[b])
-            else:
-                mols_pred.append(mol_init_pred)
-
-        # Ground truth
-        if occs_gt is not None:
-            visualize_voxel_grid(occs_gt[b], os.path.join(dirname_voxels, f"./iter{i}_batch{b}_gt.png"), threshold=0.2, sparse=False)
-            mol_init_gt = get_atom_coords(occs_gt[b].cpu(), rad=config["dset"]["atomic_radius"])
-            mol_init_gt["coords"] *= config["dset"]["resolution"]
-            if mol_init_gt is not None:
-                fabric.print("gt", mol_init_gt["coords"].size())
-                mols_gt.append(mol_init_gt)
-
-
-def save_sdf_eval_nf(config, fabric, mols_pred, mols_gt=None, dec=None, mols_pred_dict=None, codes_dict=None, refine=True):
-    dirname_voxels = os.path.join(config["dirname"], "res")
-
-    # prediction
-    if refine:
-        mols_pred = dec._refine_coords(
-            grouped_mol_inits=mols_pred_dict,
-            grouped_codes=codes_dict,
-            maxiter=200,
-            grid_dim=config["dset"]["grid_dim"],
-            resolution=config["dset"]["resolution"],
-            fabric=fabric,
-        )
-    save_xyz(mols_pred, dirname_voxels, fabric, atom_elements=config["dset"]["elements"])
-    convert_xyzs_to_sdf(dirname_voxels, fabric=fabric, delete=True, fname=f"molecules_obabel_pred_refine_{refine}.sdf")
-
-    # ground truth
-    if mols_gt is not None:
-        save_xyz(mols_gt, dirname_voxels, fabric, atom_elements=config["dset"]["elements"])
-        convert_xyzs_to_sdf(dirname_voxels, fabric=fabric, delete=True, fname="molecules_obabel_gt_refine_False.sdf")
-
-
-
 
 
 def set_requires_grad(module: nn.Module, tf: bool = False) -> None:
@@ -536,3 +517,32 @@ def compute_rmsd(coords1, coords2):
     rmsd = (torch.mean(min_dist1) + torch.mean(min_dist2)) / 2
     
     return rmsd
+
+
+def create_tensorboard_writer(log_dir: str, experiment_name: str = None) -> SummaryWriter:
+    """
+    Create a TensorBoard SummaryWriter for logging training metrics.
+    
+    Args:
+        log_dir (str): Directory to save TensorBoard logs
+        experiment_name (str, optional): Name of the experiment. If None, uses timestamp.
+        
+    Returns:
+        SummaryWriter: TensorBoard writer instance, or None if TensorBoard is not available
+    """
+    if not TENSORBOARD_AVAILABLE:
+        print("Warning: TensorBoard is not available. Install with: pip install tensorboard")
+        return None
+    
+    if experiment_name is None:
+        import datetime
+        experiment_name = f"experiment_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    
+    log_path = os.path.join(log_dir, experiment_name)
+    os.makedirs(log_path, exist_ok=True)
+    
+    writer = SummaryWriter(log_path)
+    print(f"TensorBoard logs will be saved to: {log_path}")
+    print(f"To view logs, run: tensorboard --logdir {log_path}")
+    
+    return writer
