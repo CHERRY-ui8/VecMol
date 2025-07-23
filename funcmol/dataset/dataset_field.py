@@ -70,9 +70,12 @@ class FieldDataset(Dataset):
         self._read_data()
         self._filter_by_elements(elements)
 
+        # TODO: normalize the increments
         self.increments = torch.tensor(
-            list(itertools.product(list(range(-cubes_around, cubes_around+1)), repeat=3))
-        )
+            list(itertools.product(list(range(-cubes_around, cubes_around+1)), repeat=3)),
+            dtype=torch.float32
+        ) * self.scale_factor  # 标准化increments以匹配分子坐标的缩放
+        
         self.targeted_sampling_ratio = targeted_sampling_ratio if split == "train" else 0
         self.field_idxs = torch.arange(len(self.data))
         self.discrete_grid, self.full_grid_high_res = get_grid(self.grid_dim)
@@ -180,8 +183,8 @@ class FieldDataset(Dataset):
             # 现在 coords 的范围应该在 [-1, 1] 附近
             rand_points = coords
             # 添加小的噪声，噪声大小应该与网格分辨率相关
-            noise = torch.randn_like(rand_points, device=device) * 0.05  # 之前是resolution/4，现在是0.05,使用固定的小噪声（感觉区别应该不大）
-            rand_points = (rand_points + noise).floor().long()
+            noise = torch.randn_like(rand_points, device=device) / self.grid_dim / 4  # 或者这里乘scale_factor，总之要找一点真实物理世界的解释
+            rand_points = (rand_points + noise)  # .floor().long() TODO：如果这里floor()再long()，会全部变成-1,0,1
             
             # 计算每个原子周围需要采样的点数
             points_per_atom = max(1, (self.n_points // coords.size(0)) // self.targeted_sampling_ratio)
@@ -302,7 +305,7 @@ class FieldDataset(Dataset):
         coords_masked = torch.reshape(coords_masked, (-1, 3))
 
         # go to center of mass
-        center_coords = torch.mean(coords_masked, dim=0)[0] # TODO 
+        center_coords = torch.mean(coords_masked, dim=0)  # 计算x,y,z三个轴的平均值（之前有索引[0]，也就是只取x轴的平均值）
         center_coords = center_coords.unsqueeze(0).tile((coords_masked.shape[0], 1))
         coords_masked = coords_masked - center_coords
 

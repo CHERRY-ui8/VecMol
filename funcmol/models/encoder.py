@@ -73,7 +73,7 @@ class CrossGraphEncoder(nn.Module):
         node_feats = torch.cat([atom_feat, grid_codes], dim=0)  # [(N_total_atoms + B*n_grid), code_dim]
         node_pos = torch.cat([atom_coords, grid_coords_flat], dim=0)  # [(N_total_atoms + B*n_grid), 3]
 
-        # 5. 构建两个分离的图
+        # 5. 构建两个分离的图 TODO
         # 5.1 原子内部连接图（只连接原子之间）
         atom_edge_index = knn_graph(
             x=atom_coords,
@@ -84,27 +84,27 @@ class CrossGraphEncoder(nn.Module):
         
         # 5.2 原子-网格连接图
         # 使用knn构建原子到网格的连接
-        atom_to_grid_edges = knn(
-            x=grid_coords_flat,  # source points (grid)
-            y=atom_coords,       # target points (atom)
+        # 在这里找的是 grid 的邻居，因为要更新的是 grid 的特征，而且这样每个 grid 都一定会有连边（不需要给所有grid加自环边了）
+        grid_to_atom_edges = knn(
+            x=atom_coords,            # source points  (atom)
+            y=grid_coords_flat,       # target points (grid)
             k=self.k_neighbors,
-            batch_x=grid_batch_idx,
-            batch_y=atom_batch_idx
+            batch_x=atom_batch_idx,
+            batch_y=grid_batch_idx
         )  # [2, E] 其中 E = k_neighbors * N_total_atoms (22240 = 32 * 695)
         
         # 修正边索引：网格节点索引需要加上N_total_atoms的偏移量
-        # atom_to_grid_edges[0] 是原子索引，保持不变
-        # atom_to_grid_edges[1] 是网格索引，需要加上偏移量
-        atom_to_grid_edges[1] += N_total_atoms
-        
-        # 5.3 添加网格自环边，确保所有网格点都有入边
-        grid_self_loops = torch.stack([
-            torch.arange(N_total_atoms, N_total_atoms + B * n_grid, device=device),
-            torch.arange(N_total_atoms, N_total_atoms + B * n_grid, device=device)
+        # grid_to_atom_edges[0] 是网格索引，需要加上偏移量
+        # grid_to_atom_edges[1] 是原子索引，保持不变
+        grid_to_atom_edges[0] += N_total_atoms
+        # 交换边的方向
+        grid_to_atom_edges = torch.stack([
+            grid_to_atom_edges[1],
+            grid_to_atom_edges[0]
         ], dim=0)
-        
+                
         # 合并所有边
-        edge_index = torch.cat([atom_edge_index, atom_to_grid_edges, grid_self_loops], dim=1)
+        edge_index = torch.cat([atom_edge_index, grid_to_atom_edges], dim=1)
         
         # 6. GNN消息传递
         h = node_feats

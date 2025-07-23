@@ -70,6 +70,8 @@ def main(config):
 
     # model
     enc, dec = create_neural_field(config, fabric)
+    print('Num of params in encoder:', sum(p.numel() for p in enc.parameters()))
+    print('Num of params in decoder:', sum(p.numel() for p in dec.parameters()))
     criterion = nn.MSELoss()
 
     # optimizers
