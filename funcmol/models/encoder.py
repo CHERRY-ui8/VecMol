@@ -6,7 +6,7 @@ from torch_geometric.loader import DataLoader
 
 
 class CrossGraphEncoder(nn.Module):
-    def __init__(self, n_atom_types, grid_size, code_dim, hidden_dim=128, num_layers=4, k_neighbors=8, atom_k_neighbors=6):
+    def __init__(self, n_atom_types, grid_size, code_dim, hidden_dim=128, num_layers=4, k_neighbors=32, atom_k_neighbors=8):
         super().__init__()
         self.n_atom_types = n_atom_types
         self.grid_size = grid_size

@@ -5,3 +5,4 @@ code_dim: 128
 hidden_dim: 128
 num_layers: 4
 k_neighbors: 32
+atom_k_neighbors: 8

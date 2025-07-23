@@ -53,7 +53,8 @@ def create_neural_field(config: dict, fabric: object) -> tuple:
         code_dim=config["encoder"]["code_dim"],
         hidden_dim=config["encoder"]["hidden_dim"],
         num_layers=config["encoder"]["num_layers"],
-        k_neighbors=config["encoder"]["k_neighbors"]
+        k_neighbors=config["encoder"]["k_neighbors"],
+        atom_k_neighbors=config["encoder"]["atom_k_neighbors"]
     )
     # Initialize the decoder
     dec = Decoder({
@@ -463,7 +464,8 @@ def load_neural_field(nf_checkpoint: dict, fabric: object, config: dict = None) 
         code_dim=config["decoder"]["code_dim"],
         hidden_dim=config["decoder"]["hidden_dim"],
         num_layers=config["encoder"]["num_layers"],
-        k_neighbors=config["encoder"]["k_neighbors"]
+        k_neighbors=config["encoder"]["k_neighbors"],
+        atom_k_neighbors=config["encoder"]["atom_k_neighbors"]
     )
     enc = load_network(nf_checkpoint, enc, fabric, net_name="enc")
     enc = torch.compile(enc)
