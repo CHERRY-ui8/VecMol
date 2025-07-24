@@ -12,6 +12,7 @@ from torch_geometric.loader import DataLoader
 
 from funcmol.models.decoder import get_grid
 from funcmol.utils.constants import ELEMENTS_HASH, PADDING_INDEX
+from funcmol.utils.gnf_converter import GNFConverter
 
 
 class FieldDataset(Dataset):
@@ -50,6 +51,15 @@ class FieldDataset(Dataset):
         cubes_around: int = 3,
         debug_one_mol: bool = False,
         debug_subset: bool = False,
+        # GNFConverter parameters
+        sigma: float = 1.0,
+        n_iter: int = 500,
+        step_size: float = 0.01,
+        eps: float = 0.1,
+        min_samples: int = 5,
+        sigma_ratios: Optional[dict] = None,
+        version: int = 2,
+        temperature: float = 1.0,
     ):
         if elements is None:
             elements = ELEMENTS_HASH
@@ -79,6 +89,29 @@ class FieldDataset(Dataset):
         self.targeted_sampling_ratio = targeted_sampling_ratio if split == "train" else 0
         self.field_idxs = torch.arange(len(self.data))
         self.discrete_grid, self.full_grid_high_res = get_grid(self.grid_dim)
+        
+        # Initialize GNFConverter for computing target fields
+        if sigma_ratios is None:
+            sigma_ratios = {
+                'C': 0.9,
+                'H': 1.3,
+                'O': 1.1,
+                'N': 1.0,
+                'F': 1.2
+            }
+        
+        self.gnf_converter = GNFConverter(
+            sigma=sigma,
+            n_query_points=n_points,  # 使用相同的点数
+            n_iter=n_iter,
+            step_size=step_size,
+            eps=eps,
+            min_samples=min_samples,
+            sigma_ratios=sigma_ratios,
+            version=version,
+            temperature=temperature,
+            device="cpu"  # 在数据预处理阶段使用CPU
+        )
 
     def _read_data(self):
         fname = f"{self.split}_data"
@@ -130,11 +163,22 @@ class FieldDataset(Dataset):
         coords = coords[valid_mask]
         atoms_channel = atoms_channel[valid_mask]
 
+        # compute target gradient field (ground truth)
+        # Reshape xs to [1, n_points, 3] for batch processing
+        xs_batch = xs.unsqueeze(0)  # [1, n_points, 3]
+        coords_batch = coords.unsqueeze(0)  # [1, n_atoms, 3]
+        atoms_channel_batch = atoms_channel.unsqueeze(0)  # [1, n_atoms]
+        
+        with torch.no_grad():
+            target_field = self.gnf_converter.mol2gnf(coords_batch, atoms_channel_batch, xs_batch)
+            target_field = target_field.squeeze(0)  # [n_points, n_atom_types, 3]
+
         # create torch_geometric data object
         data = Data(
             pos=coords.float(),
             x=atoms_channel.long(),
             xs=xs.float(),
+            target_field=target_field.float(),  # 新增：添加目标梯度场
             idx=torch.tensor([index], dtype=torch.long)
         )
         return data
@@ -388,6 +432,15 @@ def create_field_loaders(
         sample_full_grid=sample_full_grid,
         debug_one_mol=config.get("debug_one_mol", False),
         debug_subset=config.get("debug_subset", False),
+        # GNFConverter parameters
+        sigma=config.get("gnf_converter", {}).get("sigma", 1.0),
+        n_iter=config.get("gnf_converter", {}).get("n_iter", 500),
+        step_size=config.get("gnf_converter", {}).get("step_size", 0.01),
+        eps=config.get("gnf_converter", {}).get("eps", 0.1),
+        min_samples=config.get("gnf_converter", {}).get("min_samples", 5),
+        sigma_ratios=config.get("gnf_converter", {}).get("sigma_ratios", None),
+        version=config.get("gnf_converter", {}).get("version", 2),
+        temperature=config.get("gnf_converter", {}).get("temperature", 1.0),
     )
 
     if config.get("debug_one_mol", False):

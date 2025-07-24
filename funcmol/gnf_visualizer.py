@@ -16,52 +16,81 @@ from torch_geometric.utils import to_dense_batch
 from funcmol.dataset.dataset_field import create_field_loaders
 import hydra
 
-# 添加项目根目录到Python路径
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-# 禁用PyTorch Dynamo编译以避免torch_cluster兼容性问题
 import torch._dynamo
 torch._dynamo.config.suppress_errors = True
 
-# 全局变量控制使用哪种场
-# FIELD_OPTION = 1: 使用标准答案梯度场 (ground truth)
-# FIELD_OPTION = 2: 使用神经网络预测的梯度场 (predicted)
 FIELD_OPTION = 1
 
 class MoleculeMetrics:
     """分子重建指标计算类"""
     
     @staticmethod
-    def compute_rmsd(coords1: torch.Tensor, coords2: torch.Tensor) -> float:
-        """计算两个坐标集之间的对称RMSD"""
+    def compute_rmsd(coords1: torch.Tensor, coords2: torch.Tensor) -> torch.Tensor:
+        """计算两个坐标集之间的对称RMSD - 优化版本，保持梯度"""
+        coords1 = coords1.detach().requires_grad_(True)
+        coords2 = coords2.detach().requires_grad_(True)
+        
         dist1 = torch.sqrt(torch.sum((coords1.unsqueeze(1) - coords2.unsqueeze(0))**2, dim=2) + 1e-8)
         dist2 = torch.sqrt(torch.sum((coords2.unsqueeze(1) - coords1.unsqueeze(0))**2, dim=2) + 1e-8)
+        
         min_dist1 = torch.min(dist1, dim=1)[0]
         min_dist2 = torch.min(dist2, dim=1)[0]
+        
         rmsd = (torch.mean(min_dist1) + torch.mean(min_dist2)) / 2
+        
+        return rmsd
+    
+    @staticmethod
+    def compute_rmsd_scalar(coords1: torch.Tensor, coords2: torch.Tensor) -> float:
+        """计算两个坐标集之间的对称RMSD - 返回标量版本（用于评估）"""
+        rmsd = MoleculeMetrics.compute_rmsd(coords1, coords2)
         return rmsd.item()
     
     @staticmethod
-    def compute_reconstruction_loss(coords: torch.Tensor, points: torch.Tensor) -> float:
-        """计算重建损失"""
+    def compute_reconstruction_loss(coords: torch.Tensor, points: torch.Tensor) -> torch.Tensor:
+        """计算重建损失 - 优化版本，保持梯度"""
         dist1 = torch.sum((coords.unsqueeze(1) - points.unsqueeze(0))**2, dim=2)
-        min_dist_to_samples = torch.min(dist1 + 1e-8, dim=1)[0]
-        min_dist_to_atoms = torch.min(dist1 + 1e-8, dim=0)[0]
+        
+        eps = 1e-8
+        
+        min_dist_to_samples = torch.min(dist1 + eps, dim=1)[0]
+        min_dist_to_atoms = torch.min(dist1 + eps, dim=0)[0]
+        
         coverage_loss = torch.mean(min_dist_to_samples)
         clustering_loss = torch.mean(min_dist_to_atoms)
+        
         total_loss = coverage_loss + 0.1 * clustering_loss
-        return torch.sqrt(total_loss).item()
+        
+        return torch.sqrt(total_loss)
     
     @staticmethod
-    def compute_kl_divergences(coords1: torch.Tensor, coords2: torch.Tensor, temperature: float = 0.1) -> Tuple[float, float]:
-        """计算两个坐标集之间的双向KL散度"""
+    def compute_reconstruction_loss_scalar(coords: torch.Tensor, points: torch.Tensor) -> float:
+        """计算重建损失 - 返回标量版本（用于评估）"""
+        loss = MoleculeMetrics.compute_reconstruction_loss(coords, points)
+        return loss.item()
+    
+    @staticmethod
+    def compute_kl_divergences(coords1: torch.Tensor, coords2: torch.Tensor, temperature: float = 0.1) -> Tuple[torch.Tensor, torch.Tensor]:
+        """计算两个坐标集之间的双向KL散度 - 优化版本，保持梯度"""
         dist_matrix = torch.sum((coords1.unsqueeze(1) - coords2.unsqueeze(0))**2, dim=2)
+        
         p1_given_2 = torch.softmax(-dist_matrix / temperature, dim=0)
         p2_given_1 = torch.softmax(-dist_matrix / temperature, dim=1)
+        
         eps = 1e-8
+        
         kl_1to2 = torch.mean(torch.sum(p1_given_2 * torch.log(p1_given_2 / (1.0/coords2.shape[0] + eps) + eps), dim=0))
         kl_2to1 = torch.mean(torch.sum(p2_given_1 * torch.log(p2_given_1 / (1.0/coords1.shape[0] + eps) + eps), dim=1))
+        
+        return kl_1to2, kl_2to1
+    
+    @staticmethod
+    def compute_kl_divergences_scalar(coords1: torch.Tensor, coords2: torch.Tensor, temperature: float = 0.1) -> Tuple[float, float]:
+        """计算两个坐标集之间的双向KL散度 - 返回标量版本（用于评估）"""
+        kl_1to2, kl_2to1 = MoleculeMetrics.compute_kl_divergences(coords1, coords2, temperature)
         return kl_1to2.item(), kl_2to1.item()
 
 class MoleculeVisualizer:
@@ -76,7 +105,6 @@ class MoleculeVisualizer:
             4: 'green',   # F
         }
         
-        # 设置matplotlib样式
         plt.style.use('default')
         plt.rcParams['figure.dpi'] = 150
         plt.rcParams['savefig.dpi'] = 300
@@ -92,7 +120,6 @@ class MoleculeVisualizer:
         ax.set_zlabel('Z (Å)')
         ax.grid(True, alpha=0.3)
         
-        # 设置统一的坐标范围
         all_coords = np.vstack(coords_list)
         x_min, x_max = all_coords[:, 0].min() - margin, all_coords[:, 0].max() + margin
         y_min, y_max = all_coords[:, 1].min() - margin, all_coords[:, 1].max() + margin
@@ -118,36 +145,74 @@ class GNFVisualizer(MoleculeVisualizer):
                                     recon_types: Optional[torch.Tensor] = None,
                                     save_path: Optional[str] = None,
                                     title: str = "Molecule Comparison"):
-        """可视化原始分子和重建分子的对比"""
-        fig = plt.figure(figsize=(12, 6))
+        """可视化原始分子和重建分子的对比 - 优化版本"""
+        fig = plt.figure(figsize=(15, 7))
         
-        # 原始分子
-        ax1 = fig.add_subplot(121, projection='3d')
+        ax1 = fig.add_subplot(131, projection='3d')
         orig_coords_np = orig_coords.detach().cpu().numpy()
+        
         if orig_types is not None:
-            colors = self._get_atom_colors(orig_types)
-            for coord, color in zip(orig_coords_np, colors):
-                ax1.scatter(coord[0], coord[1], coord[2], c=[color], marker='o', s=100, alpha=0.8)
+            orig_types_np = orig_types.detach().cpu().numpy()
+            for atom_type in range(5):
+                mask = (orig_types_np == atom_type)
+                if mask.sum() > 0:
+                    ax1.scatter(orig_coords_np[mask, 0], orig_coords_np[mask, 1], orig_coords_np[mask, 2], 
+                               c=self.atom_colors[atom_type], marker='o', s=100, 
+                               label=f'Original {["C", "H", "O", "N", "F"][atom_type]}')
         else:
             ax1.scatter(orig_coords_np[:, 0], orig_coords_np[:, 1], orig_coords_np[:, 2], 
                        c='blue', marker='o', s=100, label='Original', alpha=0.8)
         ax1.set_title("Original Molecule")
+        ax1.legend(loc='upper right', bbox_to_anchor=(1.0, 1.0))
         
-        # 重建分子
-        ax2 = fig.add_subplot(122, projection='3d')
+        ax2 = fig.add_subplot(132, projection='3d')
         recon_coords_np = recon_coords.detach().cpu().numpy()
+        
         if recon_types is not None:
-            colors = self._get_atom_colors(recon_types)
-            for coord, color in zip(recon_coords_np, colors):
-                ax2.scatter(coord[0], coord[1], coord[2], c=[color], marker='o', s=100, alpha=0.8)
+            recon_types_np = recon_types.detach().cpu().numpy()
+            for atom_type in range(5):
+                mask = (recon_types_np == atom_type)
+                if mask.sum() > 0:
+                    ax2.scatter(recon_coords_np[mask, 0], recon_coords_np[mask, 1], recon_coords_np[mask, 2], 
+                               c=self.atom_colors[atom_type], marker='o', s=100, 
+                               label=f'Reconstructed {["C", "H", "O", "N", "F"][atom_type]}')
         else:
             ax2.scatter(recon_coords_np[:, 0], recon_coords_np[:, 1], recon_coords_np[:, 2], 
                        c='red', marker='o', s=100, label='Reconstructed', alpha=0.8)
         ax2.set_title("Reconstructed Molecule")
+        ax2.legend(loc='upper right', bbox_to_anchor=(1.0, 1.0))
         
-        # 设置坐标轴
-        for ax in [ax1, ax2]:
-            self._setup_3d_axis(ax, [orig_coords_np, recon_coords_np])
+        ax3 = fig.add_subplot(133, projection='3d')
+        
+        if orig_types is not None:
+            for atom_type in range(5):
+                mask = (orig_types_np == atom_type)
+                if mask.sum() > 0:
+                    ax3.scatter(orig_coords_np[mask, 0], orig_coords_np[mask, 1], orig_coords_np[mask, 2], 
+                               c=self.atom_colors[atom_type], marker='o', s=100, alpha=0.5, 
+                               label=f'Original {["C", "H", "O", "N", "F"][atom_type]}')
+        
+        if recon_types is not None:
+            for atom_type in range(5):
+                mask = (recon_types_np == atom_type)
+                if mask.sum() > 0:
+                    ax3.scatter(recon_coords_np[mask, 0], recon_coords_np[mask, 1], recon_coords_np[mask, 2], 
+                               c=self.atom_colors[atom_type], marker='s', s=100, alpha=0.5, 
+                               label=f'Reconstructed {["C", "H", "O", "N", "F"][atom_type]}')
+        else:
+            ax3.scatter(recon_coords_np[:, 0], recon_coords_np[:, 1], recon_coords_np[:, 2], 
+                       c='red', marker='s', s=100, alpha=0.5, label='Reconstructed')
+        ax3.set_title("Comparison")
+        ax3.legend(loc='upper right', bbox_to_anchor=(1.0, 1.0))
+        
+        for ax in [ax1, ax2, ax3]:
+            ax.set_xlabel('X')
+            ax.set_ylabel('Y')
+            ax.set_zlabel('Z')
+            ax.grid(True)
+            ax.set_xlim([-1, 1])
+            ax.set_ylim([-1, 1])
+            ax.set_zlim([-1, 1])
         
         plt.suptitle(title, fontsize=16)
         plt.tight_layout()
@@ -165,71 +230,89 @@ class GNFVisualizer(MoleculeVisualizer):
                                     save_path: str,
                                     coords_types: Optional[torch.Tensor] = None,
                                     points_types: Optional[torch.Tensor] = None):
-        """可视化重建过程的单个步骤"""
+        """可视化重建过程的单个步骤 - 优化版本"""
         fig = plt.figure(figsize=(8, 8))
         ax = fig.add_subplot(111, projection='3d')
         
-        # 绘制原始分子
         coords_np = coords.detach().cpu().numpy()
         if coords_types is not None:
-            colors = self._get_atom_colors(coords_types)
-            for i, (coord, color) in enumerate(zip(coords_np, colors)):
-                ax.scatter(coord[0], coord[1], coord[2], 
-                          c=[color], marker='o', s=100, alpha=0.8,
-                          label='Original' if i == 0 else "")
+            coords_types_np = coords_types.detach().cpu().numpy()
+            for atom_type in range(5):
+                mask = (coords_types_np == atom_type)
+                if mask.sum() > 0:
+                    ax.scatter(coords_np[mask, 0], coords_np[mask, 1], coords_np[mask, 2], 
+                              c=self.atom_colors[atom_type], marker='o', s=100, 
+                              label=f'Original {["C", "H", "O", "N", "F"][atom_type]}', alpha=0.7)
         else:
             ax.scatter(coords_np[:, 0], coords_np[:, 1], coords_np[:, 2], 
                       c='blue', marker='o', s=100, label='Original', alpha=0.8)
         
-        # 绘制当前重建点
         points_np = current_points.detach().cpu().numpy()
         if points_types is not None:
-            colors = self._get_atom_colors(points_types)
-            for point, color in zip(points_np, colors):
-                ax.scatter(point[0], point[1], point[2],
-                          c=[color], marker='.', s=5, alpha=0.4)
+            points_types_np = points_types.detach().cpu().numpy()
+            for atom_type in range(5):
+                mask = (points_types_np == atom_type)
+                if mask.sum() > 0:
+                    ax.scatter(points_np[mask, 0], points_np[mask, 1], points_np[mask, 2],
+                              c=self.atom_colors[atom_type], marker='.', s=10, 
+                              label=f'Current {["C", "H", "O", "N", "F"][atom_type]}', alpha=0.3)
         else:
             ax.scatter(points_np[:, 0], points_np[:, 1], points_np[:, 2], 
                       c='red', marker='.', s=5, label='Current Points', alpha=0.4)
         
-        self._setup_3d_axis(ax, [coords_np, points_np])
-        ax.set_title(f"Reconstruction Step {iteration}")
-        ax.legend()
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.set_zlabel('Z')
+        ax.grid(True)
+        ax.set_xlim([-1, 1])
+        ax.set_ylim([-1, 1])
+        ax.set_zlim([-1, 1])
+        ax.set_title(f"Iteration {iteration}")
+        ax.legend(loc='upper right', bbox_to_anchor=(1.0, 1.0))
         
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()
     
     def create_reconstruction_animation(self,
-                                     gt_coords: torch.Tensor,
-                                     gt_types: torch.Tensor,
-                                     converter: GNFConverter,
-                                     decoder: torch.nn.Module,
-                                     codes: torch.Tensor,
-                                     save_interval: int = 50,
-                                     animation_name: str = "reconstruction",
-                                     field_option: int = 1,
-                                     sample_idx: int = 1) -> Dict[str, Any]:
+                                    gt_coords: torch.Tensor,
+                                    gt_types: torch.Tensor,
+                                    converter: GNFConverter,
+                                    decoder: torch.nn.Module,
+                                    codes: torch.Tensor,
+                                    save_interval: int = 50,
+                                    animation_name: str = "reconstruction",
+                                    field_option: int = 1,
+                                    sample_idx: int = 1) -> Dict[str, Any]:
         """创建重建过程动画"""
         device = gt_coords.device
         
-        # 准备真实数据
-        gt_mask = (gt_types[sample_idx] != PADDING_INDEX)  # [n_atoms]
-        gt_valid_coords = gt_coords[sample_idx][gt_mask]  # [n_valid_atoms, 3]
-        gt_valid_types = gt_types[sample_idx][gt_mask]  # [n_valid_atoms]
+        gt_mask = (gt_types[sample_idx] != PADDING_INDEX)
+        gt_valid_coords = gt_coords[sample_idx][gt_mask]
+        gt_valid_types = gt_types[sample_idx][gt_mask]
         
         print(f"\nStarting reconstruction for molecule {sample_idx}")
         print(f"Ground truth atoms: {len(gt_valid_coords)}")
         print(f"Atom types: {gt_valid_types.tolist()}")
         
-        # QM9数据集中所有可能的原子类型
-        all_atom_types = list(range(5))  # [0, 1, 2, 3, 4] 对应 [C, H, O, N, F]
+        all_atom_types = list(range(5))
         
-        # 为每种可能的原子类型初始化采样点
-        z_dict = {}  # 存储每种原子类型的采样点
+        z_dict = {}
         for atom_type in all_atom_types:
             z_dict[atom_type] = torch.rand(converter.n_query_points, 3, device=device) * 2 - 1
         
-        # 记录重建过程
+        def gnf_func(points):
+            """一次性计算所有原子类型的梯度场"""
+            if field_option == 1:
+                vector_field = converter.mol2gnf(
+                    gt_valid_coords.unsqueeze(0),
+                    gt_valid_types.unsqueeze(0),
+                    points.unsqueeze(0)
+                )
+                return vector_field[0]
+            else:
+                field = decoder(points.unsqueeze(0), codes[sample_idx:sample_idx+1])[0]
+                return field
+        
         frame_paths = []
         metrics_history = {
             'iterations': [],
@@ -239,55 +322,23 @@ class GNFVisualizer(MoleculeVisualizer):
             'kl_2to1': []
         }
         
-        # 重建迭代
         for i in range(converter.n_iter):
-            # 计算梯度场并更新点位置
             with torch.no_grad():
-                # 对每种可能的原子类型分别处理
                 for atom_type in all_atom_types:
                     z = z_dict[atom_type]
-                    z_batch = z.unsqueeze(0)  # [1, n_query_points, 3]
                     
-                    if field_option == 1:  # 使用标准答案梯度场
-                        # 只选择当前类型的原子
-                        type_mask = gt_valid_types == atom_type
-                        type_coords = gt_valid_coords[type_mask]
-                        type_types = gt_valid_types[type_mask]
-                        
-                        if len(type_coords) > 0:  # 如果存在这种类型的原子
-                            gt_field = converter.mol2gnf(
-                                type_coords.unsqueeze(0),  # [1, n_type_atoms, 3]
-                                type_types.unsqueeze(0),  # [1, n_type_atoms]
-                                z_batch  # [1, n_query_points, 3]
-                            )
-                            field = gt_field[0]  # [n_query_points, n_atom_types, 3]
-                            grad = field[:, atom_type]  # [n_query_points, 3]
-                        else:  # 如果不存在这种类型的原子，梯度为0
-                            grad = torch.zeros_like(z_batch[0])
-                            
-                        # 调试信息
-                        if i % 1000 == 0:
-                            grad_norm = torch.norm(grad, dim=1).mean().item()
-                            print(f"Iteration {i}, Atom type {atom_type}: grad norm = {grad_norm:.6f}")
-                        
-                        # 更新采样点位置
-                        z_dict[atom_type] = z + converter.step_size * grad
-                    else:  # 使用神经网络预测的梯度场
-                        field = decoder(z_batch, codes[sample_idx:sample_idx+1])[0]
-                        grad = field[:, atom_type]  # [n_query_points, 3]
-                        
-                        # 调试信息
-                        if i % 1000 == 0:
-                            grad_norm = torch.norm(grad, dim=1).mean().item()
-                            print(f"Iteration {i}, Atom type {atom_type}: grad norm = {grad_norm:.6f}")
-                        
-                        z_dict[atom_type] = z + converter.step_size * grad
+                    gradients = gnf_func(z)
+                    type_gradients = gradients[:, atom_type, :]
+                    
+                    if i % 1000 == 0:
+                        grad_norm = torch.norm(type_gradients, dim=1).mean().item()
+                        print(f"Iteration {i}, Atom type {atom_type}: grad norm = {grad_norm:.6f}")
+                    
+                    z_dict[atom_type] = z + converter.step_size * type_gradients
             
-            # 保存关键帧
             if i % save_interval == 0 or i == converter.n_iter - 1:
                 frame_path = os.path.join(self.output_dir, f"frame_{i:04d}.png")
                 
-                # 合并所有类型的点（不执行merge_points）
                 all_points = []
                 all_types = []
                 for atom_type in all_atom_types:
@@ -296,10 +347,10 @@ class GNFVisualizer(MoleculeVisualizer):
                         all_points.append(points)
                         all_types.extend([atom_type] * len(points))
                     
-                if all_points:  # 如果有点
+                if all_points:
                     current_points = torch.cat(all_points, dim=0)
                     current_types = torch.tensor(all_types, device=device)
-                else:  # 如果没有点
+                else:
                     current_points = torch.empty((0, 3), device=device)
                     current_types = torch.empty((0,), device=device)
                 
@@ -309,35 +360,31 @@ class GNFVisualizer(MoleculeVisualizer):
                 )
                 frame_paths.append(frame_path)
                 
-                # 计算指标
                 if len(current_points) > 0:
                     metrics_history['iterations'].append(i)
                     metrics_history['loss'].append(
-                        self.metrics.compute_reconstruction_loss(gt_valid_coords, current_points)
+                        self.metrics.compute_reconstruction_loss_scalar(gt_valid_coords, current_points)
                     )
                     metrics_history['rmsd'].append(
-                        self.metrics.compute_rmsd(gt_valid_coords, current_points)
+                        self.metrics.compute_rmsd_scalar(gt_valid_coords, current_points)
                     )
-                    kl_1to2, kl_2to1 = self.metrics.compute_kl_divergences(
+                    kl_1to2, kl_2to1 = self.metrics.compute_kl_divergences_scalar(
                         gt_valid_coords, current_points
                     )
                     metrics_history['kl_1to2'].append(kl_1to2)
                     metrics_history['kl_2to1'].append(kl_2to1)
         
-        # 生成GIF
         gif_path = os.path.join(self.output_dir, f"{animation_name}.gif")
         with imageio.get_writer(gif_path, mode='I', duration=0.3) as writer:
             for frame_path in frame_paths:
                 writer.append_data(imageio.imread(frame_path))
                 os.remove(frame_path)
         
-        # 在最后执行一次merge_points来得到最终的原子位置
         final_points = []
         final_types = []
         for atom_type in all_atom_types:
             points = z_dict[atom_type].detach().cpu().numpy()
             if len(points) > 0:
-                # 对每种原子类型分别执行merge_points
                 merged_points = converter._merge_points(points)
                 if len(merged_points) > 0:
                     final_points.append(torch.from_numpy(merged_points).to(device))
@@ -350,7 +397,6 @@ class GNFVisualizer(MoleculeVisualizer):
             final_points = torch.empty((0, 3), device=device)
             final_types = torch.empty((0,), device=device)
         
-        # 保存最终对比图
         comparison_path = os.path.join(self.output_dir, f"{animation_name}_final.png")
         self.visualize_molecule_comparison(
             gt_valid_coords,
@@ -372,6 +418,7 @@ class GNFVisualizer(MoleculeVisualizer):
             'final_kl_2to1': metrics_history['kl_2to1'][-1] if metrics_history['kl_2to1'] else float('inf')
         }
 
+
 def visualize_reconstruction(gt_coords: torch.Tensor,
                            gt_types: torch.Tensor,
                            converter: GNFConverter,
@@ -379,16 +426,7 @@ def visualize_reconstruction(gt_coords: torch.Tensor,
                            codes: torch.Tensor,
                            output_dir: str = "reconstruction_results",
                            sample_idx: int = 0) -> Dict[str, Any]:
-    """便捷函数：可视化分子重建过程
-    Args:
-        gt_coords: 真实分子坐标
-        gt_types: 真实原子类型
-        converter: GNF转换器
-        decoder: 解码器模型
-        codes: 编码
-        output_dir: 输出目录
-        sample_idx: 要可视化的分子样本索引
-    """
+    """便捷函数：可视化分子重建过程"""
     visualizer = GNFVisualizer(output_dir)
     return visualizer.create_reconstruction_animation(
         gt_coords, gt_types, converter, decoder, codes,
@@ -396,14 +434,11 @@ def visualize_reconstruction(gt_coords: torch.Tensor,
     )
 
 def main():
-    """
-    主函数：加载训练好的模型和数据，执行GNF可视化
-    """
+    """主函数：加载训练好的模型和数据，执行GNF可视化"""
     def setup_environment():
         """初始化运行环境"""
         print("GNF Visualizer for QM9 Dataset")
         
-        # 初始化Fabric
         fabric = Fabric(
             accelerator="auto",
             devices=1,
@@ -412,7 +447,6 @@ def main():
         )
         fabric.launch()
         
-        # 设置设备
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Using device: {device}")
         
@@ -424,11 +458,9 @@ def main():
         if not config_path.exists():
             raise FileNotFoundError(f"Config file not found: {config_path}")
         
-        # 使用hydra加载配置
         with hydra.initialize_config_dir(config_dir=str(config_path.parent), version_base=None):
             config = hydra.compose(config_name="train_nf_qm9")
         
-        # 设置数据集路径
         config["dset"]["data_dir"] = str(project_root / "funcmol" / "dataset" / "data")
         print(f"Dataset directory: {config['dset']['data_dir']}")
         
@@ -436,7 +468,6 @@ def main():
     
     def load_model(fabric, config):
         """加载预训练模型"""
-        # 查找最新的实验目录
         exp_dir = Path(__file__).parent / "exps" / "neural_field"
         if not exp_dir.exists():
             raise FileNotFoundError(f"Experiment directory not found: {exp_dir}")
@@ -453,16 +484,13 @@ def main():
         
         print(f"Loading model from: {model_path}")
         
-        # 创建并加载模型
         enc, dec = create_neural_field(config, fabric)
         
-        # 完全禁用模型编译
         if hasattr(enc, '_orig_mod'):
             enc = enc._orig_mod
         if hasattr(dec, '_orig_mod'):
             dec = dec._orig_mod
         
-        # 加载权重
         checkpoint = fabric.load(str(model_path))
         enc = load_neural_field(checkpoint, fabric, config)[0]
         dec = load_neural_field(checkpoint, fabric, config)[1]
@@ -472,32 +500,30 @@ def main():
     
     def create_converter(config, device):
         """创建GNF转换器"""
-        # 从配置文件中读取GNF转换器参数
         gnf_config = config.get("converter", {}) or config.get("gnf_converter", {})
         sigma_ratios = gnf_config.get("sigma_ratios", None)
         if sigma_ratios is not None and not isinstance(sigma_ratios, dict):
             sigma_ratios = OmegaConf.to_container(sigma_ratios, resolve=True)
         
         return GNFConverter(
-            sigma=gnf_config.get("sigma", 0.2),
-            n_query_points=gnf_config.get("n_query_points", config["dset"]["n_points"]),
-            n_iter=gnf_config.get("n_iter", 5000),
-            step_size=gnf_config.get("step_size", 0.01),
-            eps=gnf_config.get("eps", 0.1),  # DBSCAN的邻域半径参数
-            min_samples=gnf_config.get("min_samples", 3),  # DBSCAN的最小样本数参数
+            sigma=gnf_config.get("sigma", 1),
+            n_query_points=gnf_config.get("n_query_points", 1000),
+            n_iter=gnf_config.get("n_iter", 2000),
+            step_size=gnf_config.get("step_size", 0.002),
+            eps=gnf_config.get("eps", 0.1),
+            min_samples=gnf_config.get("min_samples", 5),
             device=device,
-            sigma_ratios=sigma_ratios
+            sigma_ratios=sigma_ratios,
+            version=gnf_config.get("version", 2),
+            temperature=gnf_config.get("temperature", 0.008)
         )
     
     def prepare_data(fabric, config, device):
         """准备数据"""
-        # 创建数据加载器
         loader_val = create_field_loaders(config, split="val", fabric=fabric)
         
-        # 获取一个批次的数据
         batch = next(iter(loader_val)).to(device)
         
-        # 转换为稠密张量
         coords, _ = to_dense_batch(batch.pos, batch.batch, fill_value=0)
         atoms_channel, _ = to_dense_batch(batch.x, batch.batch, fill_value=PADDING_INDEX)
         
@@ -512,13 +538,12 @@ def main():
                 converter=converter,
                 decoder=decoder,
                 codes=codes,
-                save_interval=50,
+                save_interval=100,
                 animation_name="recon",
                 field_option=FIELD_OPTION,
                 sample_idx=sample_idx
             )
             
-            # 打印结果
             print("\n=== 重建结果 ===")
             print(f"RMSD: {results['final_rmsd']:.4f}")
             print(f"Reconstruction Loss: {results['final_loss']:.4f}")
@@ -537,30 +562,18 @@ def main():
             traceback.print_exc()
             return None
     
-    # 1. 初始化环境
     fabric, device = setup_environment()
-        
-    # 2. 加载配置
     config = load_config()
-        
-    # 3. 加载模型
     encoder, decoder = load_model(fabric, config)
-        
-    # 4. 创建转换器
     converter = create_converter(config, device)
-        
-    # 5. 准备数据
     batch, gt_coords, gt_types = prepare_data(fabric, config, device)
-        
-    # 6. 生成编码
+    
     print("Generating codes...")
     with torch.no_grad():
         codes = encoder(batch)
         
-    # 7. 执行可视化
     print("Starting visualization...")
-        
-    # 可以通过命令行参数或环境变量来控制sample_idx
+    
     sample_idx = int(os.environ.get("SAMPLE_IDX", "0"))
     print(f"Visualizing molecule sample {sample_idx}")
         

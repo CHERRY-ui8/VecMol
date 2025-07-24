@@ -28,6 +28,7 @@ class GNFConverter(nn.Module):
                 min_samples: int,  # DBSCAN的最小样本数参数
                 sigma_ratios: Dict[str, float],
                 version: int = 2,  # 添加version参数，默认为1（高斯定义）
+                temperature: float = 1.0,  # softmax温度参数，控制分布尖锐程度
                 device: str = "cuda" if torch.cuda.is_available() else "cpu"):  # 原子类型比例系数
         super().__init__()
         self.sigma = sigma
@@ -39,6 +40,7 @@ class GNFConverter(nn.Module):
         self.device = device
         self.sigma_ratios = sigma_ratios
         self.version = version  # 保存version参数
+        self.temperature = temperature  # 保存temperature参数
         
         # 为不同类型的原子设置不同的 sigma 参数
         # 原子类型索引映射：0=C, 1=H, 2=O, 3=N, 4=F
@@ -103,9 +105,8 @@ class GNFConverter(nn.Module):
                         individual_gradients = diff * torch.exp(-dist_sq / (2 * sigma ** 2)) / (sigma ** 2)
                         type_gradients = torch.sum(individual_gradients, dim=0)  # (n_points, 3)
                     elif self.version == 2:  # 新的基于softmax的定义
-                        temperature = 1
                         distances = torch.sqrt(dist_sq.squeeze(-1))  # (n_type_atoms, n_points)
-                        weights = torch.softmax(-distances / temperature, dim=0)  # (n_type_atoms, n_points)
+                        weights = torch.softmax(-distances / self.temperature, dim=0)  # (n_type_atoms, n_points)
                         weights = weights.unsqueeze(-1)  # (n_type_atoms, n_points, 1)
                         weighted_gradients = diff * weights  # (n_type_atoms, n_points, 3)
                         type_gradients = torch.sum(weighted_gradients, dim=0)  # (n_points, 3)

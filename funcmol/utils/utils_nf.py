@@ -130,8 +130,10 @@ def train_nf(
         # 前向传播
         codes = enc(data_batch)
         pred_field = dec(query_points, codes)
-        # 计算目标梯度场（标准答案）
-        target_field = gnf_converter.mol2gnf(coords, atoms_channel, query_points)
+        # 使用预计算的目标梯度场（从数据集中获取）
+        target_field = data_batch.target_field.to(fabric.device)
+        if target_field.dim() == 2:
+            target_field = target_field.view(B, n_points, -1, 3)  # [B, n_points, n_atom_types, 3]
         
         # 调试：输出5个query_point的梯度场大小（每2000个batch输出一次）
         if i % 2000 == 0 and fabric.global_rank == 0:
@@ -283,12 +285,14 @@ def eval_nf(
             n_points = config["dset"]["n_points"]
             query_points = query_points.view(B, n_points, 3)
         
-        # 获取目标矢量场
-        target_field = gnf_converter.mol2gnf(coords, atoms_channel, query_points)
-        
         # 前向传播
         codes = enc(data_batch)
         pred_field = dec(query_points, codes)
+        
+        # 使用预计算的目标梯度场（从数据集中获取）
+        target_field = data_batch.target_field.to(fabric.device)
+        if target_field.dim() == 2:
+            target_field = target_field.view(B, n_points, -1, 3)  # [B, n_points, n_atom_types, 3]
         
         # 计算损失
         loss = criterion(pred_field, target_field)
