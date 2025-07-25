@@ -22,7 +22,7 @@ sys.path.insert(0, str(project_root))
 import torch._dynamo
 torch._dynamo.config.suppress_errors = True
 
-FIELD_OPTION = 1
+FIELD_OPTION = 2
 
 class MoleculeMetrics:
     """分子重建指标计算类"""

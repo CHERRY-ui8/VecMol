@@ -132,14 +132,37 @@ def train_nf(
         pred_field = dec(query_points, codes)
         # 使用预计算的目标梯度场（从数据集中获取）
         target_field = data_batch.target_field.to(fabric.device)
-        if target_field.dim() == 2:
+        if target_field.dim() == 2: # TODO：看看这里的view有没有问题
             target_field = target_field.view(B, n_points, -1, 3)  # [B, n_points, n_atom_types, 3]
+        elif target_field.dim() == 3:
+            # 如果target_field是[n_points, n_atom_types, 3]，需要添加batch维度
+            if target_field.shape[0] == n_points:
+                target_field = target_field.unsqueeze(0).expand(B, -1, -1, -1)  # [B, n_points, n_atom_types, 3]
+            else:
+                # 如果已经是batch格式，确保维度正确
+                target_field = target_field.view(B, n_points, -1, 3)
+        
+        # 确保pred_field和target_field的维度匹配
+        if pred_field.shape != target_field.shape:
+            fabric.print(f"[Warning] Shape mismatch: pred_field {pred_field.shape} vs target_field {target_field.shape}")
+            # 尝试调整target_field的维度以匹配pred_field
+            if target_field.shape[1] != pred_field.shape[1]:
+                # 如果点数不匹配，取较小的那个
+                min_points = min(pred_field.shape[1], target_field.shape[1])
+                pred_field = pred_field[:, :min_points, :, :]
+                target_field = target_field[:, :min_points, :, :]
         
         # 调试：输出5个query_point的梯度场大小（每2000个batch输出一次）
         if i % 2000 == 0 and fabric.global_rank == 0:
             b_idx = 0  # 只看第一个样本
             n_points = pred_field.shape[1]
-            idxs = random.sample(range(n_points), 5)
+            
+            max_idx = min(n_points - 1, target_field.shape[1] - 1) if target_field.dim() >= 2 else 0
+            if max_idx < 4:  # 如果点数太少，跳过调试
+                fabric.print(f"[Debug] Not enough points for debugging (max_idx: {max_idx})")
+                continue
+                
+            idxs = random.sample(range(max_idx + 1), min(5, max_idx + 1))
             norms = []
             for idx in idxs:
                 # 取该query_point所有原子类型的3D向量，计算范数
@@ -151,7 +174,15 @@ def train_nf(
             target_norms = []
             rmsds = []
             for idx in idxs:
-                target_vec = target_field[b_idx, idx]  # [n_atom_types, 3]
+                # 确保target_field有正确的维度
+                if target_field.dim() == 4:
+                    target_vec = target_field[b_idx, idx]  # [n_atom_types, 3]
+                elif target_field.dim() == 3:
+                    target_vec = target_field[b_idx, idx]  # [n_atom_types, 3]
+                else:
+                    fabric.print(f"[Debug] Unexpected target_field dimension: {target_field.dim()}")
+                    continue
+                    
                 target_norm = torch.norm(target_vec, dim=-1)  # [n_atom_types]
                 target_norms.append(target_norm.detach().cpu().numpy())
                 # 计算RMSD
@@ -293,6 +324,23 @@ def eval_nf(
         target_field = data_batch.target_field.to(fabric.device)
         if target_field.dim() == 2:
             target_field = target_field.view(B, n_points, -1, 3)  # [B, n_points, n_atom_types, 3]
+        elif target_field.dim() == 3:
+            # 如果target_field是[n_points, n_atom_types, 3]，需要添加batch维度
+            if target_field.shape[0] == n_points:
+                target_field = target_field.unsqueeze(0).expand(B, -1, -1, -1)  # [B, n_points, n_atom_types, 3]
+            else:
+                # 如果已经是batch格式，确保维度正确
+                target_field = target_field.view(B, n_points, -1, 3)
+        
+        # 确保pred_field和target_field的维度匹配
+        if pred_field.shape != target_field.shape:
+            fabric.print(f"[Warning] Shape mismatch: pred_field {pred_field.shape} vs target_field {target_field.shape}")
+            # 尝试调整target_field的维度以匹配pred_field
+            if target_field.shape[1] != pred_field.shape[1]:
+                # 如果点数不匹配，取较小的那个
+                min_points = min(pred_field.shape[1], target_field.shape[1])
+                pred_field = pred_field[:, :min_points, :, :]
+                target_field = target_field[:, :min_points, :, :]
         
         # 计算损失
         loss = criterion(pred_field, target_field)
