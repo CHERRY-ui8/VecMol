@@ -119,9 +119,7 @@ def train_nf(
     for i, data_batch in pbar:
         # 数据预处理
         data_batch = data_batch.to(fabric.device)
-        coords, atom_mask = to_dense_batch(data_batch.pos, data_batch.batch, fill_value=0)
-        atoms_channel, _ = to_dense_batch(data_batch.x, data_batch.batch, fill_value=PADDING_INDEX)
-        B = coords.size(0)
+        B = data_batch.batch.max().item() + 1 # TODO：可以直接从data_batch中获取B
         # 获取query_points
         query_points = data_batch.xs.to(fabric.device)
         if query_points.dim() == 2:

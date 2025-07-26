@@ -57,7 +57,7 @@ class EGNNLayer(MessagePassing):
         dist = torch.norm(rel, dim=-1, keepdim=True)  # [E, 1]
         # 构造message输入
         h_i = h[row]
-        h_j = h[col]
+        h_j = h[col] # h_j 应该恒等于0，但是不是。发现h_j的从第501个开始不是0
         edge_input = torch.cat([h_i, h_j, dist], dim=-1)  # [E, 2*in_channels+1]
         m_ij = self.edge_mlp(edge_input)  # [E, hidden_channels]
         # 坐标更新：用message生成标量，乘以方向
@@ -158,73 +158,50 @@ class EGNNVectorField(nn.Module):
         grid_points = self.grid_points.to(device)  # [grid_size**3, 3]
         n_grid = grid_points.size(0)
 
+        # Flatten query_points immediately
+        query_points = query_points.reshape(-1, 3).float()  # [B * N, 3]        
+        grid_coords = grid_points.unsqueeze(0).expand(batch_size, -1, -1).reshape(-1, 3)  # [B * grid_size**3, 3]
+        n_points_total = query_points.size(0)
+
         # 1. 初始化节点特征
-        # 查询点特征初始化为0
-        # [B, n_points, code_dim]
-        query_features = torch.zeros(batch_size, n_points, self.code_dim, device=device)
+        query_features = torch.zeros(n_points_total, self.code_dim, device=device)
+        grid_features = codes.reshape(-1, self.code_dim)  # [B * grid_size**3, code_dim]
         
-        # 锚点特征为codes
-        # [B, n_grid, code_dim]
-        grid_features = codes
+        # 3. 合并节点
+        combined_features = torch.cat([query_features, grid_features], dim=0)  # [B*N + B*grid_size**3, code_dim]
+        combined_coords = torch.cat([query_points, grid_coords], dim=0)  # [B*N + B*grid_size**3, 3]
 
-        # 2. 初始化节点坐标
-        # 锚点坐标: [1, n_grid, 3] -> [batch_size, n_grid, 3]
-        grid_coords = grid_points.unsqueeze(0).expand(batch_size, -1, -1)
-
-        # 3. 合并节点，为每个分子构建一个图 TODO:
-        # [B, n_points + n_grid, code_dim]
-        combined_features = torch.cat([query_features, grid_features], dim=1)
-        # [B, n_points + n_grid, 3]
-        combined_coords = torch.cat([query_points, grid_coords], dim=1)
-        total_nodes = n_points + n_grid
-
-        # 4. 展平成适合PyG的格式
-        h = combined_features.reshape(-1, self.code_dim)  # [B * total_nodes, code_dim]
-        x = combined_coords.reshape(-1, 3)                  # [B * total_nodes, 3]
-
-        # 5. 构建边 - 修改逻辑：query_points之间不连边，grid_points之间可以连边
-            # 使用 knn 构建部分图，只保留 grid -> query 的连边
-            # 分别构造 batch index
-        query_coords_flat = query_points.reshape(-1, 3).float()       # [B * n_query, 3]
-        grid_coords_flat = grid_coords.reshape(-1, 3).float()     # [B * n_grid, 3]
+        # 5. 构建边
         query_batch = torch.arange(batch_size, device=device).repeat_interleave(n_points)
         grid_batch = torch.arange(batch_size, device=device).repeat_interleave(n_grid)
 
-        # 只构建 grid -> query edges (查询点从网格点获取信息)
+        # 只构建 query -> grid edges，是为了确保每个query point 都能从 grid 获取信息 TODO
         edge_grid_query = knn(
-            x=query_coords_flat,
-            y=grid_coords_flat,
+            x=grid_coords,
+            y=query_points,
             k=self.k_neighbors, 
-            batch_x=query_batch,
-            batch_y=grid_batch
+            batch_x=grid_batch,
+            batch_y=query_batch
         ) # [2, E=k_neighbors*n_points]
 
-        edge_grid_query[0] += len(query_coords_flat) # 添加bias，匹配knn的输出
-                    
-        # 7. 逐层EGNN消息传递
-        for layer in self.layers:
-            h, x = layer(x, h, edge_grid_query) # h: [B * total_nodes, code_dim], x: [B * total_nodes, 3]
+        edge_grid_query[1] += n_points_total # bias
         
-        # TODO: x-->node_coords
-        # Use original coordinates for final field prediction
-        node_coords = torch.cat([query_points, grid_coords], dim=1).reshape(-1, 3)
+        edge_grid_query = torch.stack([edge_grid_query[1], edge_grid_query[0]], dim=0) # 交换边的方向
+        
+        # 7. 逐层EGNN消息传递
+        h = combined_features
+        x = combined_coords
+        for layer in self.layers:
+            h, x = layer(x, h, edge_grid_query) # [total_nodes, code_dim], [total_nodes, 3]
 
-
-        # 8. 预测矢量场 
-        # _, predicted_sources = self.field_layer(x, h, edge_grid_query)  # [B * total_nodes, n_atom_types, 3]
-        # predicted_sources = predicted_sources.view(batch_size, total_nodes, self.n_atom_types, 3)
-        # predicted_sources = predicted_sources[:, :n_points, :, :]  # 只取查询点部分
-        # vector_field = predicted_sources - query_points[:,:,None,:]  # (B, n_points, n_atom_types, 3）
-        # Predict vector field separately for each atom type
-        # 如果没有 early type-awareness 的模型，容易出现折中解（所有类型都预测个平均场）。
-        # 如果一个 query point 对不同 atom type 的向量场是完全不同的（方向、长度、聚集），
-        # 而模型前几层是共享的，那么它容易出现折中解（所有类型都预测个平均场）。
-        # 模型在训练时会更难对多样化结构建模。
-        _, predicted_sources = self.field_layer(node_coords, h, edge_grid_query)  # [B*(N+G), T, 3]
-        predicted_sources = predicted_sources.view(batch_size, total_nodes, self.n_atom_types, 3)
-        predicted_sources = predicted_sources[:, :n_points, :, :]  # keep only query points
+        # 8. 预测矢量场
+        
+        _, predicted_sources = self.field_layer(x, h, edge_grid_query)  # [total_nodes, n_atom_types, 3]
+        predicted_sources = predicted_sources[:n_points_total]  # keep only query points
+        predicted_sources = predicted_sources.view(batch_size, n_points, self.n_atom_types, 3)
 
         # Compute residual vectors relative to query points
-        vector_field = predicted_sources - query_points[:, :, None, :]  # [B, N, T, 3]
+        query_points_reshaped = query_points.view(batch_size, n_points, 3)
+        vector_field = predicted_sources - query_points_reshaped[:, :, None, :]  # [B, N, n_atom_types, 3]
 
         return vector_field

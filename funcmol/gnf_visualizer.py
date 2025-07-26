@@ -438,9 +438,11 @@ def main():
     def setup_environment():
         """初始化运行环境"""
         print("GNF Visualizer for QM9 Dataset")
+
+        os.environ["CUDA_VISIBLE_DEVICES"] = "1"
         
         fabric = Fabric(
-            accelerator="auto",
+            accelerator="cuda",
             devices=1,
             precision="32-true",
             strategy="auto"
