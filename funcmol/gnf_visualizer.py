@@ -1,10 +1,11 @@
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import imageio.v2 as imageio
 from omegaconf import OmegaConf
-import os
 import sys
 from typing import Optional, Tuple, List, Dict, Any, Union
 from pathlib import Path
@@ -13,7 +14,8 @@ from funcmol.utils.utils_nf import create_neural_field, load_neural_field
 from funcmol.utils.gnf_converter import GNFConverter
 from lightning import Fabric
 from torch_geometric.utils import to_dense_batch
-from funcmol.dataset.dataset_field import create_field_loaders
+from funcmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
+
 import hydra
 
 project_root = Path(__file__).parent.parent
@@ -22,7 +24,10 @@ sys.path.insert(0, str(project_root))
 import torch._dynamo
 torch._dynamo.config.suppress_errors = True
 
-FIELD_OPTION = 2
+# 梯度场计算方式选择
+# FIELD_OPTION = "gt_field": 使用GNF转换器直接计算梯度场（基于真实分子坐标）
+# FIELD_OPTION = "predicted_field": 使用神经网络解码器计算梯度场（基于编码的潜在表示）
+FIELD_OPTION = "predicted_field"
 
 class MoleculeMetrics:
     """分子重建指标计算类"""
@@ -281,7 +286,7 @@ class GNFVisualizer(MoleculeVisualizer):
                                     codes: torch.Tensor,
                                     save_interval: int = 50,
                                     animation_name: str = "reconstruction",
-                                    field_option: int = 1,
+                                    field_option: str = "predicted_field",
                                     sample_idx: int = 1) -> Dict[str, Any]:
         """创建重建过程动画"""
         device = gt_coords.device
@@ -302,14 +307,14 @@ class GNFVisualizer(MoleculeVisualizer):
         
         def gnf_func(points):
             """一次性计算所有原子类型的梯度场"""
-            if field_option == 1:
+            if field_option == "gt_field":
                 vector_field = converter.mol2gnf(
                     gt_valid_coords.unsqueeze(0),
                     gt_valid_types.unsqueeze(0),
                     points.unsqueeze(0)
                 )
                 return vector_field[0]
-            else:
+            else: # field_option == "predicted_field"
                 field = decoder(points.unsqueeze(0), codes[sample_idx:sample_idx+1])[0]
                 return field
         
@@ -337,7 +342,7 @@ class GNFVisualizer(MoleculeVisualizer):
                     z_dict[atom_type] = z + converter.step_size * type_gradients
             
             if i % save_interval == 0 or i == converter.n_iter - 1:
-                frame_path = os.path.join(self.output_dir, f"frame_{i:04d}.png")
+                frame_path = os.path.join(self.output_dir, f"frame_sample_{sample_idx}_{i:04d}.png")
                 
                 all_points = []
                 all_types = []
@@ -424,7 +429,7 @@ def visualize_reconstruction(gt_coords: torch.Tensor,
                            converter: GNFConverter,
                            decoder: torch.nn.Module,
                            codes: torch.Tensor,
-                           output_dir: str = "reconstruction_results",
+                           output_dir: str = "gnf_visualization_results",
                            sample_idx: int = 0) -> Dict[str, Any]:
     """便捷函数：可视化分子重建过程"""
     visualizer = GNFVisualizer(output_dir)
@@ -433,6 +438,170 @@ def visualize_reconstruction(gt_coords: torch.Tensor,
         sample_idx=sample_idx
     )
 
+def visualize_1d_gradient_field_comparison(
+    gt_coords: torch.Tensor,
+    gt_types: torch.Tensor,
+    converter: GNFConverter,
+    decoder: torch.nn.Module,
+    codes: torch.Tensor,
+    sample_idx: int = 0,
+    atom_type: int = 0,  # 0=C, 1=H, 2=O, 3=N, 4=F
+    x_range: tuple = (-1, 1),
+    n_points: int = 1000,
+    y_coord: float = 0.0,  # y坐标固定值
+    z_coord: float = 0.0,  # z坐标固定值
+    save_path: Optional[str] = None
+):
+    """
+    可视化一维方向上的梯度场对比
+    
+    在x轴上采样query points，通过神经网络预测这些位置的梯度场，
+    并与真实梯度场进行对比。
+    
+    Args:
+        gt_coords: 真实分子坐标 [batch, n_atoms, 3]
+        gt_types: 真实原子类型 [batch, n_atoms]
+        converter: GNF转换器
+        decoder: 解码器模型
+        codes: 编码器输出的codes [batch, code_dim]
+        sample_idx: 要可视化的样本索引
+        atom_type: 要可视化的原子类型 (0=C, 1=H, 2=O, 3=N, 4=F)
+        x_range: x轴范围，默认(-1, 1)
+        n_points: 采样点数，默认1000
+        y_coord: y坐标固定值，默认0.0
+        z_coord: z坐标固定值，默认0.0
+        save_path: 保存图片的路径，如果为None则显示图片
+    """
+    device = gt_coords.device
+    
+    # 获取当前样本的有效原子
+    gt_mask = (gt_types[sample_idx] != PADDING_INDEX)
+    gt_valid_coords = gt_coords[sample_idx][gt_mask]
+    gt_valid_types = gt_types[sample_idx][gt_mask]
+    
+    # 检查是否有目标类型的原子
+    target_atoms = gt_valid_types == atom_type
+    if target_atoms.sum() == 0:
+        print(f"警告：样本 {sample_idx} 中没有类型为 {['C', 'H', 'O', 'N', 'F'][atom_type]} 的原子")
+        return None
+    
+    # 创建采样点：所有点都在同一条直线上
+    x = torch.linspace(x_range[0], x_range[1], n_points, device=device)
+    query_points = torch.zeros(n_points, 3, device=device)
+    query_points[:, 0] = x  # x轴变化
+    query_points[:, 1] = y_coord  # y坐标固定
+    query_points[:, 2] = z_coord  # z坐标固定
+    
+    # 计算标准答案梯度场
+    with torch.no_grad():
+        gt_field = converter.mol2gnf(
+            gt_valid_coords.unsqueeze(0),
+            gt_valid_types.unsqueeze(0),
+            query_points.unsqueeze(0)
+        )
+        # 计算梯度场的3D范数
+        gt_gradients_3d = gt_field[0, :, atom_type, :]  # [n_points, 3]
+        gt_gradients = torch.norm(gt_gradients_3d, dim=1)  # [n_points]
+    
+    # 计算预测梯度场
+    with torch.no_grad():
+        pred_field = decoder(query_points.unsqueeze(0), codes[sample_idx:sample_idx+1])
+        # 计算梯度场的3D范数
+        pred_gradients_3d = pred_field[0, :, atom_type, :]  # [n_points, 3]
+        pred_gradients = torch.norm(pred_gradients_3d, dim=1)  # [n_points]
+    
+    # 创建可视化
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
+    
+    # 上图：梯度场对比
+    ax1.plot(x.cpu().numpy(), gt_gradients.cpu().numpy(), 
+            label=f'Ground Truth ({["C", "H", "O", "N", "F"][atom_type]})', 
+            linewidth=2, color='blue', alpha=0.8)
+    ax1.plot(x.cpu().numpy(), pred_gradients.cpu().numpy(), 
+            label=f'Predicted ({["C", "H", "O", "N", "F"][atom_type]})', 
+            linewidth=2, color='red', alpha=0.8, linestyle='--')
+    
+    # 标记原子位置（只标记目标类型的原子）
+    atom_positions = gt_valid_coords[target_atoms, 0].cpu().numpy()
+    if len(atom_positions) > 0:
+        for i, pos in enumerate(atom_positions):
+            ax1.axvline(x=pos, color='green', linestyle=':', alpha=0.7, linewidth=1.5)
+            ax1.text(pos, ax1.get_ylim()[1] * 0.9, f'{["C", "H", "O", "N", "F"][atom_type]}{i+1}', 
+                   rotation=90, verticalalignment='top', fontsize=8)
+    
+    # 添加零线
+    ax1.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
+    
+    # 设置上图属性
+    ax1.set_xlabel('X Position (normalized)', fontsize=12)
+    ax1.set_ylabel('Gradient Field Magnitude', fontsize=12)
+    ax1.set_title(f'Gradient Field Comparison - {["C", "H", "O", "N", "F"][atom_type]} Atoms\n'
+                f'Sample {sample_idx}, Line: y={y_coord:.2f}, z={z_coord:.2f}', fontsize=14)
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(fontsize=11)
+    
+    # 计算并显示误差
+    mse = torch.mean((gt_gradients - pred_gradients) ** 2).item()
+    mae = torch.mean(torch.abs(gt_gradients - pred_gradients)).item()
+    
+    ax1.text(0.02, 0.98, f'MSE: {mse:.6f}\nMAE: {mae:.6f}', 
+            transform=ax1.transAxes, verticalalignment='top',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8),
+            fontsize=10)
+    
+    # 下图：误差分析
+    error = gt_gradients - pred_gradients
+    ax2.plot(x.cpu().numpy(), error.cpu().numpy(), 
+            label='Prediction Error (GT - Pred)', 
+            linewidth=2, color='purple', alpha=0.8)
+    
+    # 标记原子位置
+    if len(atom_positions) > 0:
+        for i, pos in enumerate(atom_positions):
+            ax2.axvline(x=pos, color='green', linestyle=':', alpha=0.7, linewidth=1.5)
+    
+    # 添加零线
+    ax2.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
+    
+    # 设置下图属性
+    ax2.set_xlabel('X Position (normalized)', fontsize=12)
+    ax2.set_ylabel('Prediction Error', fontsize=12)
+    ax2.set_title(f'Prediction Error Analysis - {["C", "H", "O", "N", "F"][atom_type]} Atoms', fontsize=14)
+    ax2.grid(True, alpha=0.3)
+    ax2.legend(fontsize=11)
+    
+    # 计算误差统计
+    error_mean = torch.mean(error).item()
+    error_std = torch.std(error).item()
+    ax2.text(0.02, 0.98, f'Error Mean: {error_mean:.6f}\nError Std: {error_std:.6f}', 
+            transform=ax2.transAxes, verticalalignment='top',
+            bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8),
+            fontsize=10)
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"Gradient field comparison saved to: {save_path}")
+    else:
+        plt.show()
+    
+    # 返回统计信息
+    return {
+        'mse': mse,
+        'mae': mae,
+        'error_mean': error_mean,
+        'error_std': error_std,
+        'gt_gradients': gt_gradients.cpu().numpy(),
+        'pred_gradients': pred_gradients.cpu().numpy(),
+        'error': error.cpu().numpy(),
+        'x_positions': x.cpu().numpy(),
+        'atom_positions': atom_positions
+    }
+
+
+
 def main():
     """主函数：加载训练好的模型和数据，执行GNF可视化"""
     def setup_environment():
@@ -440,16 +609,16 @@ def main():
         print("GNF Visualizer for QM9 Dataset")
 
         os.environ["CUDA_VISIBLE_DEVICES"] = "1"
-        
+
         fabric = Fabric(
-            accelerator="cuda",
+            accelerator="cpu",
             devices=1,
             precision="32-true",
             strategy="auto"
         )
         fabric.launch()
         
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = torch.device("cpu")
         print(f"Using device: {device}")
         
         return fabric, device
@@ -516,13 +685,16 @@ def main():
             min_samples=gnf_config.get("min_samples", 5),
             device=device,
             sigma_ratios=sigma_ratios,
-            version=gnf_config.get("version", 2),
+            gradient_field_method=gnf_config.get("gradient_field_method", "softmax"),
             temperature=gnf_config.get("temperature", 0.008)
         )
     
     def prepare_data(fabric, config, device):
         """准备数据"""
-        loader_val = create_field_loaders(config, split="val", fabric=fabric)
+        # 创建GNFConverter实例用于数据加载
+        gnf_converter = create_gnf_converter(config, device="cpu")
+        
+        loader_val = create_field_loaders(config, gnf_converter, split="val", fabric=fabric)
         
         batch = next(iter(loader_val)).to(device)
         
@@ -541,7 +713,7 @@ def main():
                 decoder=decoder,
                 codes=codes,
                 save_interval=100,
-                animation_name="recon",
+                animation_name=f"recon_sample_{sample_idx}",
                 field_option=FIELD_OPTION,
                 sample_idx=sample_idx
             )
@@ -579,12 +751,12 @@ def main():
     sample_idx = int(os.environ.get("SAMPLE_IDX", "0"))
     print(f"Visualizing molecule sample {sample_idx}")
         
-    output_dir = f"gnf_visualization_results_sample_{sample_idx}"
+    output_dir = f"gnf_visualization_results"
     visualizer = GNFVisualizer(output_dir)
         
     results = run_visualization(visualizer, gt_coords, gt_types, converter, decoder, codes, sample_idx=sample_idx)
     if results is not None:
         print("GNF visualization completed successfully!")
-        
+    
 if __name__ == "__main__":
     main()

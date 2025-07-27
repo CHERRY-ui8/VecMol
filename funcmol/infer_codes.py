@@ -4,7 +4,7 @@ import hydra
 import os
 from funcmol.utils.utils_nf import load_neural_field
 from funcmol.utils.utils_base import setup_fabric
-from funcmol.dataset.dataset_field import create_field_loaders
+from funcmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
 import omegaconf
 import torch
 
@@ -26,8 +26,11 @@ def main(config):
     config = config_model  # update config with checkpoint config
     enc, _ = load_neural_field(checkpoint, fabric, config)
 
+    # 创建GNFConverter实例用于数据加载
+    gnf_converter = create_gnf_converter(config, device="cpu")
+    
     # data loader
-    loader = create_field_loaders(config, split=config["split"], fabric=fabric)
+    loader = create_field_loaders(config, gnf_converter, split=config["split"], fabric=fabric)
 
     # Print config
     fabric.print(f">> config: {config}")

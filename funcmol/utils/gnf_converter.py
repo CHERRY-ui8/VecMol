@@ -27,7 +27,7 @@ class GNFConverter(nn.Module):
                 eps: float,  # DBSCAN的邻域半径参数
                 min_samples: int,  # DBSCAN的最小样本数参数
                 sigma_ratios: Dict[str, float],
-                version: int = 2,  # 添加version参数，默认为1（高斯定义）
+                gradient_field_method: str = "softmax",  # 梯度场计算方法: "gaussian" 或 "softmax"
                 temperature: float = 1.0,  # softmax温度参数，控制分布尖锐程度
                 device: str = "cuda" if torch.cuda.is_available() else "cpu"):  # 原子类型比例系数
         super().__init__()
@@ -39,7 +39,7 @@ class GNFConverter(nn.Module):
         self.min_samples = min_samples
         self.device = device
         self.sigma_ratios = sigma_ratios
-        self.version = version  # 保存version参数
+        self.gradient_field_method = gradient_field_method  # 保存梯度场计算方法
         self.temperature = temperature  # 保存temperature参数
         
         # 为不同类型的原子设置不同的 sigma 参数
@@ -100,11 +100,11 @@ class GNFConverter(nn.Module):
                     diff = coords_exp - q_exp                  # (n_type_atoms, n_points, 3)
                     dist_sq = torch.sum(diff ** 2, dim=-1, keepdim=True)  # (n_type_atoms, n_points, 1)
                     
-                    if self.version == 1:  # 原始的高斯定义
+                    if self.gradient_field_method == "gaussian":  # 高斯定义：基于距离的高斯权重
                         # 注意：这里不需要改变 diff 的符号，因为我们希望梯度指向原子位置
                         individual_gradients = diff * torch.exp(-dist_sq / (2 * sigma ** 2)) / (sigma ** 2)
                         type_gradients = torch.sum(individual_gradients, dim=0)  # (n_points, 3)
-                    elif self.version == 2:  # 新的基于softmax的定义
+                    elif self.gradient_field_method == "softmax":  # 基于softmax的定义：使用温度控制的权重
                         distances = torch.sqrt(dist_sq.squeeze(-1))  # (n_type_atoms, n_points)
                         weights = torch.softmax(-distances / self.temperature, dim=0)  # (n_type_atoms, n_points)
                         weights = weights.unsqueeze(-1)  # (n_type_atoms, n_points, 1)

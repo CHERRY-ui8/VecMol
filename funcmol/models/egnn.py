@@ -175,7 +175,7 @@ class EGNNVectorField(nn.Module):
         query_batch = torch.arange(batch_size, device=device).repeat_interleave(n_points)
         grid_batch = torch.arange(batch_size, device=device).repeat_interleave(n_grid)
 
-        # 只构建 query -> grid edges，是为了确保每个query point 都能从 grid 获取信息 TODO
+        # 只构建 query -> grid edges，是为了确保每个query point 都能从 grid 获取信息
         edge_grid_query = knn(
             x=grid_coords,
             y=query_points,

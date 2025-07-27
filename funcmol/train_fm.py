@@ -15,7 +15,7 @@ from funcmol.models.ema import ModelEma
 from funcmol.utils.utils_base import setup_fabric
 from funcmol.utils.utils_nf import infer_codes_occs_batch, load_neural_field, normalize_code
 from funcmol.dataset.dataset_code import create_code_loaders
-from funcmol.dataset.dataset_field import create_field_loaders
+from funcmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
 
 
 @hydra.main(config_path="configs", config_name="train_fm_qm9", version_base=None)
@@ -44,8 +44,11 @@ def main(config):
     config_nf["dset"]["batch_size"] = config["dset"]["batch_size"]
 
     if config["on_the_fly"]:
-        loader_train = create_field_loaders(config, split="train", fabric=fabric)
-        loader_val = create_field_loaders(config, split="val", fabric=fabric) if fabric.global_rank == 0 else None
+        # 创建GNFConverter实例用于数据加载
+        gnf_converter = create_gnf_converter(config, device="cpu")
+        
+        loader_train = create_field_loaders(config, gnf_converter, split="train", fabric=fabric)
+        loader_val = create_field_loaders(config, gnf_converter, split="val", fabric=fabric) if fabric.global_rank == 0 else None
         _, code_stats = compute_codes(
             loader_train, enc, config_nf, "train", fabric, config["normalize_codes"],
             code_stats=None

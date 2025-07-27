@@ -1,0 +1,9 @@
+wandb: false
+seed: 1234
+nf_pretrained_path: ''
+n_dataset_iterations: 30
+dirname: ${nf_pretrained_path}/codes/${split}
+split: train
+dset:
+  data_aug: true
+  batch_size: 500

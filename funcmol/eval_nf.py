@@ -9,7 +9,7 @@ from torch import nn
 
 from funcmol.utils.utils_nf import eval_nf, infer_codes, load_neural_field
 from funcmol.utils.utils_base import convert_xyzs_to_sdf, save_xyz, setup_fabric
-from funcmol.dataset.dataset_field import create_field_loaders
+from funcmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
 
 
 @hydra.main(config_path="configs", config_name="eval_nf", version_base=None)
@@ -62,7 +62,10 @@ def main(config):
             config["dset"]["batch_size"] = min(8, n_samples)
         else:
             config["dset"]["batch_size"] = min(2, n_samples)
-        loader = create_field_loaders(config, split=config["split"], n_samples=n_samples, fabric=fabric, sample_full_grid=True)
+        # 创建GNFConverter实例用于数据加载
+        gnf_converter = create_gnf_converter(config, device="cpu")
+        
+        loader = create_field_loaders(config, gnf_converter, split=config["split"], n_samples=n_samples, fabric=fabric, sample_full_grid=True)
         loss_val, miou_val = eval_nf(
             loader,
             dec,
@@ -80,7 +83,7 @@ def main(config):
     elif config["eval_metric"] == "sampling":
         config["dset"]["batch_size"] = min(config["dset"]["batch_size"], n_samples)
 
-        loader = create_field_loaders(config, split=config["split"], n_samples=n_samples, fabric=fabric)
+        loader = create_field_loaders(config, gnf_converter, split=config["split"], n_samples=n_samples, fabric=fabric)
         with torch.no_grad():
             codes_all = infer_codes(loader, enc, config, fabric)
             mols = dec_module.codes_to_molecules(codes_all, unnormalize=False, config=config, fabric=fabric)

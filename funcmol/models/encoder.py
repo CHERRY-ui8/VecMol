@@ -17,7 +17,7 @@ class CrossGraphEncoder(nn.Module):
         self.atom_k_neighbors = atom_k_neighbors  # 原子 atom 内部的连接数
 
         # 注册grid坐标作为buffer（不需要训练）
-        grid_coords = create_grid_coords(1, self.grid_size, device="cuda").squeeze(0)  # [n_grid, 3]
+        grid_coords = create_grid_coords(1, self.grid_size, device="cpu").squeeze(0)  # [n_grid, 3]
         self.register_buffer('grid_coords', grid_coords)
 
         # GNN layers
@@ -73,7 +73,7 @@ class CrossGraphEncoder(nn.Module):
         node_feats = torch.cat([atom_feat, grid_codes], dim=0)  # [(N_total_atoms + B*n_grid), code_dim]
         node_pos = torch.cat([atom_coords, grid_coords_flat], dim=0)  # [(N_total_atoms + B*n_grid), 3]
 
-        # 5. 构建两个分离的图 TODO
+        # 5. 构建两个分离的图
         # 5.1 原子内部连接图（只连接原子之间）
         atom_edge_index = knn_graph(
             x=atom_coords,

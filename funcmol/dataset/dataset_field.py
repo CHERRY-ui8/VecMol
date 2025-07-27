@@ -20,6 +20,7 @@ class FieldDataset(Dataset):
     Initializes the dataset with the specified parameters.
 
     Args:
+        gnf_converter (GNFConverter): GNFConverter实例用于计算目标梯度场
         dset_name (str): Name of the dataset. Default is "qm9".
         data_dir (str): Directory where the dataset is stored. Default is "dataset/data".
         elements (list): List of elements to filter by. Default is None, which uses ELEMENTS_HASH.
@@ -37,6 +38,7 @@ class FieldDataset(Dataset):
     """
     def __init__(
         self,
+        gnf_converter: GNFConverter,  # 接收GNFConverter实例
         dset_name: str = "qm9",
         data_dir: str = "dataset/data",
         elements: Optional[dict] = None,
@@ -51,15 +53,6 @@ class FieldDataset(Dataset):
         cubes_around: int = 3,
         debug_one_mol: bool = False,
         debug_subset: bool = False,
-        # GNFConverter parameters
-        sigma: float = 1.0,
-        n_iter: int = 500,
-        step_size: float = 0.01,
-        eps: float = 0.1,
-        min_samples: int = 5,
-        sigma_ratios: Optional[dict] = None,
-        version: int = 2,
-        temperature: float = 1.0,
     ):
         if elements is None:
             elements = ELEMENTS_HASH
@@ -80,7 +73,7 @@ class FieldDataset(Dataset):
         self._read_data()
         self._filter_by_elements(elements)
 
-        # TODO: normalize the increments
+        # normalize the increments
         self.increments = torch.tensor(
             list(itertools.product(list(range(-cubes_around, cubes_around+1)), repeat=3)),
             dtype=torch.float32
@@ -90,28 +83,8 @@ class FieldDataset(Dataset):
         self.field_idxs = torch.arange(len(self.data))
         self.discrete_grid, self.full_grid_high_res = get_grid(self.grid_dim)
         
-        # Initialize GNFConverter for computing target fields
-        if sigma_ratios is None:
-            sigma_ratios = {
-                'C': 0.9,
-                'H': 1.3,
-                'O': 1.1,
-                'N': 1.0,
-                'F': 1.2
-            }
-        
-        self.gnf_converter = GNFConverter(
-            sigma=sigma,
-            n_query_points=n_points,  # 使用相同的点数
-            n_iter=n_iter,
-            step_size=step_size,
-            eps=eps,
-            min_samples=min_samples,
-            sigma_ratios=sigma_ratios,
-            version=version,
-            temperature=temperature,
-            device="cpu"  # 在数据预处理阶段使用CPU
-        )
+        # 使用传入的GNFConverter实例
+        self.gnf_converter = gnf_converter
 
     def _read_data(self):
         fname = f"{self.split}_data"
@@ -398,6 +371,7 @@ def _random_rot_matrix() -> torch.Tensor:
 # create loaders
 def create_field_loaders(
     config: dict,
+    gnf_converter: GNFConverter,  # 接收GNFConverter实例
     split: str = "train",
     fabric = Fabric(),
     n_samples = None,
@@ -408,6 +382,7 @@ def create_field_loaders(
 
     Args:
         config (dict): Configuration dictionary containing dataset parameters.
+        gnf_converter (GNFConverter): GNFConverter instance for computing target fields.
         split (str, optional): Dataset split to load. Options are "train", "val", or "test".
             Defaults to "train".
         fabric (Fabric, optional): Fabric object for distributed training.
@@ -419,7 +394,9 @@ def create_field_loaders(
     Returns:
         DataLoader: Configured DataLoader for the specified dataset split.
     """
+
     dset = FieldDataset(
+        gnf_converter=gnf_converter,  # 传入GNFConverter实例
         dset_name=config["dset"]["dset_name"],
         data_dir=config["dset"]["data_dir"],
         elements=config["dset"]["elements"],
@@ -432,15 +409,6 @@ def create_field_loaders(
         sample_full_grid=sample_full_grid,
         debug_one_mol=config.get("debug_one_mol", False),
         debug_subset=config.get("debug_subset", False),
-        # GNFConverter parameters
-        sigma=config.get("gnf_converter", {}).get("sigma", 1.0),
-        n_iter=config.get("gnf_converter", {}).get("n_iter", 500),
-        step_size=config.get("gnf_converter", {}).get("step_size", 0.01),
-        eps=config.get("gnf_converter", {}).get("eps", 0.1),
-        min_samples=config.get("gnf_converter", {}).get("min_samples", 5),
-        sigma_ratios=config.get("gnf_converter", {}).get("sigma_ratios", None),
-        version=config.get("gnf_converter", {}).get("version", 2),
-        temperature=config.get("gnf_converter", {}).get("temperature", 1.0),
     )
 
     if config.get("debug_one_mol", False):
@@ -455,9 +423,43 @@ def create_field_loaders(
         batch_size=min(config["dset"]["batch_size"], len(dset)),
         num_workers=config["dset"]["num_workers"],
         shuffle=True if split == "train" else False,
-        pin_memory=True,
+        pin_memory=False,
         drop_last=True,
     )
     fabric.print(f">> {split} set size: {len(dset)}")
 
     return fabric.setup_dataloaders(loader, use_distributed_sampler=(split == "train"))
+
+
+def create_gnf_converter(config: dict, device: str = "cpu") -> GNFConverter:
+    """
+    根据配置创建GNFConverter实例的便捷函数。
+    
+    Args:
+        config (dict): 配置字典，包含gnf_converter相关参数
+        device (str): 设备类型，默认为"cpu"
+        
+    Returns:
+        GNFConverter: 配置好的GNFConverter实例
+    """
+    gnf_config = config.get("gnf_converter", {})
+    default_sigma_ratios = {
+        'C': 0.9,
+        'H': 1.3,
+        'O': 1.1,
+        'N': 1.0,
+        'F': 1.2
+    }
+    
+    return GNFConverter(
+        sigma=gnf_config.get("sigma", 1.0),
+        n_query_points=config["dset"]["n_points"],
+        n_iter=gnf_config.get("n_iter", 500),
+        step_size=gnf_config.get("step_size", 0.01),
+        eps=gnf_config.get("eps", 0.1),
+        min_samples=gnf_config.get("min_samples", 5),
+        sigma_ratios=gnf_config.get("sigma_ratios", default_sigma_ratios),
+        gradient_field_method=gnf_config.get("gradient_field_method", "softmax"),
+        temperature=gnf_config.get("temperature", 1.0),
+        device=device
+    ) 

@@ -15,7 +15,8 @@ from funcmol.utils.utils_base import setup_fabric
 from funcmol.utils.utils_nf import (
     create_neural_field, train_nf, eval_nf, save_checkpoint, load_network, load_optim_fabric
 )
-from funcmol.dataset.dataset_field import create_field_loaders
+from funcmol.utils.gnf_converter import GNFConverter
+from funcmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
 from lightning import Fabric
 from omegaconf import OmegaConf
 
@@ -60,10 +61,13 @@ def main(config):
     
     ##############################
     # data loaders
-    loader_train = create_field_loaders(config, split="train", fabric=fabric)
+    # 创建GNFConverter实例用于数据加载
+    data_gnf_converter = create_gnf_converter(config, device="cpu")
+    
+    loader_train = create_field_loaders(config, data_gnf_converter, split="train", fabric=fabric)
     if isinstance(loader_train, list):
         loader_train = loader_train[0]
-    loader_val = create_field_loaders(config, split="val", fabric=fabric) if fabric.global_rank == 0 else None
+    loader_val = create_field_loaders(config, data_gnf_converter, split="val", fabric=fabric) if fabric.global_rank == 0 else None
     if isinstance(loader_val, list):
         loader_val = loader_val[0]
     # 只有主进程（global_rank == 0）加载验证集
@@ -118,7 +122,6 @@ def main(config):
     
     # 实例化gnf_converter
     gnf_config = config.get("converter")
-    from funcmol.utils.gnf_converter import GNFConverter
     if gnf_config is not None and not isinstance(gnf_config, dict):
         gnf_config = OmegaConf.to_container(gnf_config, resolve=True)
     if isinstance(gnf_config, list):
@@ -218,7 +221,7 @@ def adjust_learning_rate(optim_enc, optim_dec, epoch, config):
         return
     lr_enc = config["dset"]["lr_enc"]
     lr_dec = config["dset"]["lr_dec"]
-    for milestone in [500]: # TODO：这里的80是hardcoded的，可以改进
+    for milestone in [500]: # TODO：这里的数字是hardcoded的，可以改进
         lr_enc *= 0.1 if epoch >= milestone else 1.0
         lr_dec *= 0.1 if epoch >= milestone else 1.0
 

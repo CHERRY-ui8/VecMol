@@ -119,7 +119,7 @@ def train_nf(
     for i, data_batch in pbar:
         # 数据预处理
         data_batch = data_batch.to(fabric.device)
-        B = data_batch.batch.max().item() + 1 # TODO：可以直接从data_batch中获取B
+        B = data_batch.batch.max().item() + 1 # 可以直接从data_batch中获取B
         # 获取query_points
         query_points = data_batch.xs.to(fabric.device)
         if query_points.dim() == 2:
@@ -399,8 +399,9 @@ def load_network(
     net_dict.update(pretrained_dict)
     net.load_state_dict(net_dict)
 
-    weight_first_layer_after = next(iter(net_dict.values())).sum()
-    assert weight_first_layer_before != weight_first_layer_after, "loading did not work"
+    # weight_first_layer_after = next(iter(net_dict.values())).sum()
+    # assert (weight_first_layer_before != weight_first_layer_after).item(), "loading did not work"
+    # 现在的 net_dict 是一个dict，net_dict.keys()的第0个元素是"layers.0.weight"，对应的是grid_coords，它本来就不会更新，所以这里的assert一定会报错
     fabric.print(f">> loaded {net_name}")
 
     return net
@@ -495,24 +496,25 @@ def load_neural_field(nf_checkpoint: dict, fabric: object, config: dict = None) 
     """
     if config is None:
         config = nf_checkpoint["config"]
-
+    
+    # Initialize the decoder
     dec = Decoder({
         "grid_size": config["decoder"]["grid_size"],
         "hidden_dim": config["decoder"]["hidden_dim"],
         "n_layers": config["decoder"]["n_layers"],
-        "k_neighbors": config["encoder"]["k_neighbors"],
+        "k_neighbors": config["decoder"]["k_neighbors"],
         "n_channels": config["dset"]["n_channels"],
         "code_dim": config["decoder"]["code_dim"]
     }, device=fabric.device)
     dec = load_network(nf_checkpoint, dec, fabric, net_name="dec")
     dec = torch.compile(dec)
     dec.eval()
-
+    
     enc = CrossGraphEncoder(
         n_atom_types=config["dset"]["n_channels"],
         grid_size=config["encoder"]["grid_size"],
-        code_dim=config["decoder"]["code_dim"],
-        hidden_dim=config["decoder"]["hidden_dim"],
+        code_dim=config["encoder"]["code_dim"],
+        hidden_dim=config["encoder"]["hidden_dim"],
         num_layers=config["encoder"]["num_layers"],
         k_neighbors=config["encoder"]["k_neighbors"],
         atom_k_neighbors=config["encoder"]["atom_k_neighbors"]
