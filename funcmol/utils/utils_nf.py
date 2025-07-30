@@ -15,12 +15,44 @@ from funcmol.utils.utils_vis import visualize_voxel_grid
 import time
 from omegaconf import OmegaConf
 import random
+from pathlib import Path
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_AVAILABLE = True
 except ImportError:
     TENSORBOARD_AVAILABLE = False
     SummaryWriter = None
+
+
+def get_latest_model_path(base_exp_dir: str = "exps/neural_field", model_prefix: str = "nf_qm9_") -> str:
+    """
+    自动获取最新的模型路径
+    
+    Args:
+        base_exp_dir: 实验目录的基础路径
+        model_prefix: 模型文件夹的前缀
+        
+    Returns:
+        str: 最新模型的完整路径
+    """
+    exp_dir = Path(base_exp_dir)
+    if not exp_dir.exists():
+        raise FileNotFoundError(f"Experiment directory not found: {exp_dir}")
+    
+    # 查找所有以指定前缀开头的目录
+    exp_dirs = [d for d in exp_dir.iterdir() if d.is_dir() and d.name.startswith(model_prefix)]
+    if not exp_dirs:
+        raise FileNotFoundError(f"No experiment directories found with prefix '{model_prefix}'")
+    
+    # 选择最新的目录（按修改时间排序）
+    latest_exp_dir = max(exp_dirs, key=lambda x: x.stat().st_mtime)
+    model_path = latest_exp_dir / "model.pt"
+    
+    if not model_path.exists():
+        raise FileNotFoundError(f"Model file not found: {model_path}")
+    
+    print(f"Using latest model from: {latest_exp_dir}")
+    return str(latest_exp_dir)
 
 def create_neural_field(config: dict, fabric: object) -> tuple:
     """
@@ -520,7 +552,8 @@ def load_neural_field(nf_checkpoint: dict, fabric: object, config: dict = None) 
         atom_k_neighbors=config["encoder"]["atom_k_neighbors"]
     )
     enc = load_network(nf_checkpoint, enc, fabric, net_name="enc")
-    enc = torch.compile(enc)
+    # Disable torch.compile for encoder due to torch_cluster compatibility issues
+    # enc = torch.compile(enc)
     enc.eval()
 
     dec = fabric.setup_module(dec)
@@ -600,3 +633,99 @@ def create_tensorboard_writer(log_dir: str, experiment_name: str = None) -> Summ
     print(f"To view logs, run: tensorboard --logdir {log_path}")
     
     return writer
+
+def infer_codes(
+    loader: torch.utils.data.DataLoader,
+    enc: torch.nn.Module,
+    config: dict,
+    fabric = None,
+    to_cpu: bool = True,
+    code_stats=None,
+    n_samples=None,
+) -> torch.Tensor:
+    """
+    Infer codes from a data loader using the specified encoder model.
+
+    Args:
+        loader (torch.utils.data.DataLoader): DataLoader providing batches of data
+        enc (torch.nn.Module): Encoder model for inferring codes
+        config (dict): Configuration dictionary containing model and dataset parameters
+        fabric: Optional fabric object for distributed training (default: None)
+        to_cpu (bool): Flag indicating whether to move inferred codes to CPU (default: True)
+        code_stats (dict, optional): Statistics for code normalization (default: None)
+        n_samples (int, optional): Number of samples to infer codes for. If None, infer for all samples (default: None)
+
+    Returns:
+        torch.Tensor: Tensor containing the inferred codes
+    """
+    enc.eval()
+    codes_all = []
+    
+    if fabric is not None:
+        fabric.print(f">> Inferring codes - batch size: {config['dset']['batch_size']}")
+    
+    total_samples = 0
+    
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(loader):
+            # Directly use encoder to process batch data
+            codes = enc(batch)
+            
+            # Normalize codes if needed
+            if code_stats is not None:
+                codes = normalize_code(codes, code_stats)
+            
+            # Move to CPU if needed
+            if to_cpu:
+                codes = codes.cpu()
+            
+            # Gather codes in distributed environment
+            if fabric is not None:
+                codes = fabric.all_gather(codes).view(-1, config["decoder"]["code_dim"])
+            
+            codes_all.append(codes)
+            total_samples += codes.size(0)
+            
+            # Stop if we've reached the specified number of samples
+            if n_samples is not None and total_samples >= n_samples:
+                break
+    
+    # Concatenate all codes
+    codes = torch.cat(codes_all, dim=0)
+    
+    # Truncate to specified number if needed
+    if n_samples is not None and codes.size(0) > n_samples:
+        codes = codes[:n_samples]
+    
+    if fabric is not None:
+        fabric.print(f">> Inference completed, generated {codes.size(0)} codes in total")
+    
+    return codes
+
+
+def infer_codes_occs_batch(batch, enc, config, to_cpu=False, code_stats=None):
+    """
+    Infer codes for a batch of data.
+
+    Args:
+        batch (torch_geometric.data.Batch): Input data batch
+        enc (torch.nn.Module): Encoder model
+        config (dict): Configuration dictionary
+        to_cpu (bool, optional): If True, move codes to CPU. Defaults to False
+        code_stats (dict, optional): Statistics for code normalization. Defaults to None
+
+    Returns:
+        torch.Tensor: Inferred codes
+    """
+    # Directly use encoder to process batch
+    codes = enc(batch)
+    
+    # Normalize codes if needed
+    if code_stats is not None:
+        codes = normalize_code(codes, code_stats)
+    
+    # Move to CPU if needed
+    if to_cpu:
+        codes = codes.cpu()
+    
+    return codes

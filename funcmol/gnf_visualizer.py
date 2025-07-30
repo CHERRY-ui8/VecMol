@@ -1,6 +1,7 @@
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 import torch
+import hydra
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
@@ -10,13 +11,12 @@ import sys
 from typing import Optional, Tuple, List, Dict, Any, Union
 from pathlib import Path
 from funcmol.utils.constants import PADDING_INDEX
-from funcmol.utils.utils_nf import create_neural_field, load_neural_field
+from funcmol.utils.utils_nf import create_neural_field, load_neural_field, get_latest_model_path
 from funcmol.utils.gnf_converter import GNFConverter
 from lightning import Fabric
 from torch_geometric.utils import to_dense_batch
 from funcmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
 
-import hydra
 
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
@@ -27,7 +27,7 @@ torch._dynamo.config.suppress_errors = True
 # 梯度场计算方式选择
 # FIELD_OPTION = "gt_field": 使用GNF转换器直接计算梯度场（基于真实分子坐标）
 # FIELD_OPTION = "predicted_field": 使用神经网络解码器计算梯度场（基于编码的潜在表示）
-FIELD_OPTION = "predicted_field"
+FIELD_OPTION = "gt_field"
 
 class MoleculeMetrics:
     """分子重建指标计算类"""
@@ -698,39 +698,43 @@ def main():
     
     def load_model(fabric, config):
         """加载预训练模型"""
-        exp_dir = Path(__file__).parent / "exps" / "neural_field"
-        if not exp_dir.exists():
-            raise FileNotFoundError(f"Experiment directory not found: {exp_dir}")
         
-        exp_dirs = [d for d in exp_dir.iterdir() if d.is_dir() and d.name.startswith("nf_qm9_")]
-        if not exp_dirs:
-            raise FileNotFoundError("No experiment directories found")
-        
-        latest_exp_dir = max(exp_dirs, key=lambda x: x.stat().st_mtime)
-        model_path = latest_exp_dir / "model.pt"
-        
-        if not model_path.exists():
-            raise FileNotFoundError(f"Model file not found: {model_path}")
-        
-        print(f"Loading model from: {model_path}")
-        
-        enc, dec = create_neural_field(config, fabric)
-        
-        if hasattr(enc, '_orig_mod'):
-            enc = enc._orig_mod
-        if hasattr(dec, '_orig_mod'):
-            dec = dec._orig_mod
-        
-        checkpoint = fabric.load(str(model_path))
-        enc = load_neural_field(checkpoint, fabric, config)[0]
-        dec = load_neural_field(checkpoint, fabric, config)[1]
-        print("Model loaded successfully!")
-        
-        return enc, dec
+        try:
+            # 根据数据集名称选择合适的前缀
+            if config["dset"]["dset_name"] == "drugs":
+                model_prefix = "nf_drugs_"
+            elif config["dset"]["dset_name"] == "qm9":
+                model_prefix = "nf_qm9_"
+            else:
+                model_prefix = "nf_"
+            
+            latest_exp_dir = get_latest_model_path("exps/neural_field", model_prefix)
+            model_path = Path(latest_exp_dir) / "model.pt"
+            
+            print(f"Loading model from: {model_path}")
+            
+            enc, dec = create_neural_field(config, fabric)
+            
+            if hasattr(enc, '_orig_mod'):
+                enc = enc._orig_mod
+            if hasattr(dec, '_orig_mod'):
+                dec = dec._orig_mod
+            
+            checkpoint = fabric.load(str(model_path))
+            enc = load_neural_field(checkpoint, fabric, config)[0]
+            dec = load_neural_field(checkpoint, fabric, config)[1]
+            print("Model loaded successfully!")
+            
+            return enc, dec
+            
+        except FileNotFoundError as e:
+            print(f"Error: {e}")
+            print("Please ensure you have a trained neural field model in exps/neural_field/")
+            raise
     
     def create_converter(config, device):
         """创建GNF转换器"""
-        gnf_config = config.get("converter", {}) or config.get("gnf_converter", {})
+        gnf_config = config.get("converter", {}) or config.get("gnf_converter", {}) # TODO：所有这种or的写法，到后面都要改成确定性的
         sigma_ratios = gnf_config.get("sigma_ratios", None)
         if sigma_ratios is not None and not isinstance(sigma_ratios, dict):
             sigma_ratios = OmegaConf.to_container(sigma_ratios, resolve=True)
@@ -745,7 +749,8 @@ def main():
             device=device,
             sigma_ratios=sigma_ratios,
             gradient_field_method=gnf_config.get("gradient_field_method", "softmax"),
-            temperature=gnf_config.get("temperature", 0.008)
+            temperature=gnf_config.get("temperature", 0.008),
+            logsumexp_eps=gnf_config.get("logsumexp_eps", 1e-8)
         )
     
     def prepare_data(fabric, config, device):

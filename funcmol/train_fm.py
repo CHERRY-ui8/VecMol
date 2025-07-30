@@ -13,7 +13,7 @@ from funcmol.utils.utils_fm import (
 from funcmol.models.adamw import AdamW
 from funcmol.models.ema import ModelEma
 from funcmol.utils.utils_base import setup_fabric
-from funcmol.utils.utils_nf import infer_codes_occs_batch, load_neural_field, normalize_code
+from funcmol.utils.utils_nf import infer_codes_occs_batch, load_neural_field, normalize_code, get_latest_model_path
 from funcmol.dataset.dataset_code import create_code_loaders
 from funcmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
 
@@ -33,6 +33,22 @@ def main(config):
 
     ##############################
     # load pretrained neural field
+    # 自动检测模型路径
+    if not os.path.exists(config["nf_pretrained_path"]):
+        # 尝试自动找到最新的模型
+        try:
+            if config["dset"]["dset_name"] == "drugs":
+                config["nf_pretrained_path"] = get_latest_model_path("exps/neural_field", "nf_drugs_")
+            elif config["dset"]["dset_name"] == "qm9":
+                config["nf_pretrained_path"] = get_latest_model_path("exps/neural_field", "nf_qm9_")
+            else:
+                config["nf_pretrained_path"] = get_latest_model_path("exps/neural_field", "nf_")
+            fabric.print(f">> Using auto-detected model path: {config['nf_pretrained_path']}")
+        except FileNotFoundError as e:
+            fabric.print(f">> Error: {e}")
+            fabric.print(">> Please ensure you have a trained neural field model in exps/neural_field/")
+            return
+    
     nf_checkpoint = fabric.load(os.path.join(config["nf_pretrained_path"], "model.pt"))
     enc, dec = load_neural_field(nf_checkpoint, fabric)
     dec_module = dec.module if hasattr(dec, "module") else dec

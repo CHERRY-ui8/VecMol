@@ -12,5 +12,6 @@ sigma_ratios:
   O: 1.1    # 氧原子，中等 sigma
   'N': 1.0    # 氮原子，略小于氧原子
   F: 1.2    # 氟原子，略大于氧原子
-version: 2
+gradient_field_method: softmax
 temperature: 0.008 # 温度越高，分布越尖锐，越容易收敛（很可能极端地收敛到单个原子）；温度越低，分布越平缓，越不易收敛
+logsumexp_eps: 1e-8  # logsumexp方法的数值稳定性参数

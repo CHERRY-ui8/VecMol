@@ -27,8 +27,9 @@ class GNFConverter(nn.Module):
                 eps: float,  # DBSCAN的邻域半径参数
                 min_samples: int,  # DBSCAN的最小样本数参数
                 sigma_ratios: Dict[str, float],
-                gradient_field_method: str = "softmax",  # 梯度场计算方法: "gaussian" 或 "softmax"
+                gradient_field_method: str = "softmax",  # 梯度场计算方法: "gaussian", "softmax", "logsumexp"
                 temperature: float = 1.0,  # softmax温度参数，控制分布尖锐程度
+                logsumexp_eps: float = 1e-8,  # logsumexp方法的数值稳定性参数
                 device: str = "cuda" if torch.cuda.is_available() else "cpu"):  # 原子类型比例系数
         super().__init__()
         self.sigma = sigma
@@ -41,6 +42,7 @@ class GNFConverter(nn.Module):
         self.sigma_ratios = sigma_ratios
         self.gradient_field_method = gradient_field_method  # 保存梯度场计算方法
         self.temperature = temperature  # 保存temperature参数
+        self.logsumexp_eps = logsumexp_eps  # 保存logsumexp_eps参数
         
         # 为不同类型的原子设置不同的 sigma 参数
         # 原子类型索引映射：0=C, 1=H, 2=O, 3=N, 4=F
@@ -101,7 +103,6 @@ class GNFConverter(nn.Module):
                     dist_sq = torch.sum(diff ** 2, dim=-1, keepdim=True)  # (n_type_atoms, n_points, 1)
                     
                     if self.gradient_field_method == "gaussian":  # 高斯定义：基于距离的高斯权重
-                        # 注意：这里不需要改变 diff 的符号，因为我们希望梯度指向原子位置
                         individual_gradients = diff * torch.exp(-dist_sq / (2 * sigma ** 2)) / (sigma ** 2)
                         type_gradients = torch.sum(individual_gradients, dim=0)  # (n_points, 3)
                     elif self.gradient_field_method == "softmax":  # 基于softmax的定义：使用温度控制的权重
@@ -110,6 +111,20 @@ class GNFConverter(nn.Module):
                         weights = weights.unsqueeze(-1)  # (n_type_atoms, n_points, 1)
                         weighted_gradients = diff * weights  # (n_type_atoms, n_points, 3)
                         type_gradients = torch.sum(weighted_gradients, dim=0)  # (n_points, 3)
+                    elif self.gradient_field_method == "logsumexp":  # 基于LogSumExp的定义
+                        # 计算每个原子产生的梯度
+                        scale = 0.1 # TODO：目前这个参数是hard code的，因为不确定有没有必要添加这个参数。如果必要，后期把这个参数移动到初始化阶段
+                        individual_gradients = diff * torch.exp(-dist_sq / (2 * sigma ** 2)) / (sigma ** 2)  # (n_type_atoms, n_points, 3)
+                        
+                        # 对每个原子产生的梯度分别进行幅度的对数变换
+                        gradient_magnitudes = torch.norm(individual_gradients, dim=2, keepdim=True)  # (n_type_atoms, n_points, 1)
+                        gradient_directions = individual_gradients / (gradient_magnitudes + self.logsumexp_eps)  # (n_type_atoms, n_points, 3)
+                        
+                        # 计算LogSumExp
+                        log_sum_exp = torch.logsumexp(gradient_magnitudes, dim=0, keepdim=True)  # (1, n_points, 1)
+                        
+                        # 计算最终梯度：方向之和 × LogSumExp(log(||∇fᵢ(z)||))
+                        type_gradients = scale * torch.sum(gradient_directions, dim=0) * log_sum_exp.squeeze(0)  # (n_points, 3)
                     
                     vector_field[b, :, t, :] = type_gradients
         return vector_field

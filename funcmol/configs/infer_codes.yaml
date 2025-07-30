@@ -4,8 +4,13 @@ defaults:
 
 wandb: False
 seed: 1234
-nf_pretrained_path: exps/neural_field/nf_qm9
+nf_pretrained_path: null  # 逻辑是让程序自动选择最新模型，如果需要指定，则需要手动设置
 n_dataset_iterations: 10
+
+# debug options
+debug: False
+debug_one_mol: False
+debug_subset: False
 
 dirname: ${nf_pretrained_path}/codes/${split}
 

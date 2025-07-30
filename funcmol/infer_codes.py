@@ -1,7 +1,16 @@
+import sys
+import os
+from pathlib import Path
+# 添加当前目录到Python路径
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# 设置torch._dynamo配置以解决编译兼容性问题
+import torch._dynamo
+torch._dynamo.config.suppress_errors = True
+
 from tqdm import tqdm
 import time
 import hydra
-import os
 from funcmol.utils.utils_nf import load_neural_field
 from funcmol.utils.utils_base import setup_fabric
 from funcmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
@@ -11,6 +20,10 @@ import torch
 
 @hydra.main(config_path="configs", config_name="infer_codes", version_base=None)
 def main(config):
+    # 自动获取最新的模型路径
+    if "nf_pretrained_path" not in config or config["nf_pretrained_path"] is None:
+        config["nf_pretrained_path"] = get_latest_model_path()
+    
     # initial setup
     fabric = setup_fabric(config)
 

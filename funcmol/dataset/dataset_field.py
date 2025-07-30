@@ -442,7 +442,7 @@ def create_gnf_converter(config: dict, device: str = "cpu") -> GNFConverter:
     Returns:
         GNFConverter: 配置好的GNFConverter实例
     """
-    gnf_config = config.get("gnf_converter", {})
+    gnf_config = config.get("converter", {}) or config.get("gnf_converter", {})
     default_sigma_ratios = {
         'C': 0.9,
         'H': 1.3,
@@ -454,12 +454,13 @@ def create_gnf_converter(config: dict, device: str = "cpu") -> GNFConverter:
     return GNFConverter(
         sigma=gnf_config.get("sigma", 1.0),
         n_query_points=config["dset"]["n_points"],
-        n_iter=gnf_config.get("n_iter", 500),
-        step_size=gnf_config.get("step_size", 0.01),
-        eps=gnf_config.get("eps", 0.1),
+        n_iter=gnf_config.get("n_iter", 2000),
+        step_size=gnf_config.get("step_size", 0.003),
+        eps=gnf_config.get("eps", 0.01),
         min_samples=gnf_config.get("min_samples", 5),
         sigma_ratios=gnf_config.get("sigma_ratios", default_sigma_ratios),
         gradient_field_method=gnf_config.get("gradient_field_method", "softmax"),
-        temperature=gnf_config.get("temperature", 1.0),
+        temperature=gnf_config.get("temperature", 0.008),
+        logsumexp_eps=gnf_config.get("logsumexp_eps", 1e-8),
         device=device
     ) 
