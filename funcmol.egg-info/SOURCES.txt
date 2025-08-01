@@ -4,6 +4,7 @@ README.md
 setup.py
 funcmol/__init__.py
 funcmol/eval_nf.py
+funcmol/gnf_visualizer.py
 funcmol/infer_codes.py
 funcmol/sample_fm.py
 funcmol/train_fm.py
@@ -18,7 +19,6 @@ funcmol/dataset/create_data_geomdrugs.py
 funcmol/dataset/create_data_qm9.py
 funcmol/dataset/dataset_code.py
 funcmol/dataset/dataset_field.py
-funcmol/dataset/field_maker.py
 funcmol/models/__init__.py
 funcmol/models/adamw.py
 funcmol/models/decoder.py
@@ -31,7 +31,6 @@ funcmol/models/unet1d.py
 funcmol/utils/__init__.py
 funcmol/utils/constants.py
 funcmol/utils/gnf_converter.py
-funcmol/utils/gnf_visualizer.py
 funcmol/utils/utils_base.py
 funcmol/utils/utils_fm.py
 funcmol/utils/utils_nf.py

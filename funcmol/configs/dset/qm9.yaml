@@ -10,6 +10,6 @@ n_points: 500
 subsampling_ratio: 2
 
 num_workers: 4
-batch_size: 64
+batch_size: 128
 lr_enc: 1e-4
 lr_dec: 5e-4

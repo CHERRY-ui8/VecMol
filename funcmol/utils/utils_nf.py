@@ -1,4 +1,5 @@
 import os
+import numpy as np
 import torch
 from collections import OrderedDict, defaultdict
 from tqdm import tqdm
@@ -182,45 +183,45 @@ def train_nf(
                 pred_field = pred_field[:, :min_points, :, :]
                 target_field = target_field[:, :min_points, :, :]
         
-        # 调试：输出5个query_point的梯度场大小（每2000个batch输出一次）
-        if i % 2000 == 0 and fabric.global_rank == 0:
-            b_idx = 0  # 只看第一个样本
-            n_points = pred_field.shape[1]
+        # # 调试：输出5个query_point的梯度场大小（每2000个batch输出一次）
+        # if i % 2000 == 0 and fabric.global_rank == 0:
+        #     b_idx = 0  # 只看第一个样本
+        #     n_points = pred_field.shape[1]
             
-            max_idx = min(n_points - 1, target_field.shape[1] - 1) if target_field.dim() >= 2 else 0
-            if max_idx < 4:  # 如果点数太少，跳过调试
-                fabric.print(f"[Debug] Not enough points for debugging (max_idx: {max_idx})")
-                continue
+        #     max_idx = min(n_points - 1, target_field.shape[1] - 1) if target_field.dim() >= 2 else 0
+        #     if max_idx < 4:  # 如果点数太少，跳过调试
+        #         fabric.print(f"[Debug] Not enough points for debugging (max_idx: {max_idx})")
+        #         continue
                 
-            idxs = random.sample(range(max_idx + 1), min(5, max_idx + 1))
-            norms = []
-            for idx in idxs:
-                # 取该query_point所有原子类型的3D向量，计算范数
-                vec = pred_field[b_idx, idx]  # [n_atom_types, 3]
-                norm = torch.norm(vec, dim=-1)  # [n_atom_types]
-                norms.append(norm.detach().cpu().numpy())
-            fabric.print(f"[Debug] 5个query_point的vector field范数: {norms}")
+        #     idxs = random.sample(range(max_idx + 1), min(5, max_idx + 1))
+        #     norms = []
+        #     for idx in idxs:
+        #         # 取该query_point所有原子类型的3D向量，计算范数
+        #         vec = pred_field[b_idx, idx]  # [n_atom_types, 3]
+        #         norm = torch.norm(vec, dim=-1)  # [n_atom_types]
+        #         norms.append(norm.detach().cpu().numpy())
+        #     fabric.print(f"[Debug] 5个query_point的vector field范数: {norms}")
 
-            target_norms = []
-            rmsds = []
-            for idx in idxs:
-                # 确保target_field有正确的维度
-                if target_field.dim() == 4:
-                    target_vec = target_field[b_idx, idx]  # [n_atom_types, 3]
-                elif target_field.dim() == 3:
-                    target_vec = target_field[b_idx, idx]  # [n_atom_types, 3]
-                else:
-                    fabric.print(f"[Debug] Unexpected target_field dimension: {target_field.dim()}")
-                    continue
+        #     target_norms = []
+        #     rmsds = []
+        #     for idx in idxs:
+        #         # 确保target_field有正确的维度
+        #         if target_field.dim() == 4:
+        #             target_vec = target_field[b_idx, idx]  # [n_atom_types, 3]
+        #         elif target_field.dim() == 3:
+        #             target_vec = target_field[b_idx, idx]  # [n_atom_types, 3]
+        #         else:
+        #             fabric.print(f"[Debug] Unexpected target_field dimension: {target_field.dim()}")
+        #             continue
                     
-                target_norm = torch.norm(target_vec, dim=-1)  # [n_atom_types]
-                target_norms.append(target_norm.detach().cpu().numpy())
-                # 计算RMSD
-                pred_vec = pred_field[b_idx, idx]  # [n_atom_types, 3]
-                rmsd = compute_rmsd(pred_vec, target_vec)
-                rmsds.append(rmsd.item() if hasattr(rmsd, 'item') else float(rmsd))
-            fabric.print(f"[Debug] 5个query_point的target field标准答案范数: {target_norms}")
-            fabric.print(f"[Debug] 5个query_point的vector field与target field RMSD: {rmsds}")
+        #         target_norm = torch.norm(target_vec, dim=-1)  # [n_atom_types]
+        #         target_norms.append(target_norm.detach().cpu().numpy())
+        #         # 计算RMSD
+        #         pred_vec = pred_field[b_idx, idx]  # [n_atom_types, 3]
+        #         rmsd = compute_rmsd(pred_vec, target_vec)
+        #         rmsds.append(rmsd.item() if hasattr(rmsd, 'item') else float(rmsd))
+        #     fabric.print(f"[Debug] 5个query_point的target field标准答案范数: {target_norms}")
+        #     fabric.print(f"[Debug] 5个query_point的vector field与target field RMSD: {rmsds}")
 
         # 计算损失
         loss = criterion(pred_field, target_field)
@@ -275,7 +276,7 @@ def train_nf(
         torch.nn.utils.clip_grad_norm_(enc.parameters(), max_grad_norm)
         optim_dec.step()
         optim_enc.step()
-        total_loss += loss.item()
+        total_loss += loss.item() #  total loss 是 MSE 损失（预测的向量场与目标向量场之间的均方误差）
         
         # 更新运行中的loss平均值
         running_loss = (running_loss * i + loss.item()) / (i + 1)
@@ -393,7 +394,7 @@ def set_requires_grad(module: nn.Module, tf: bool = False) -> None:
     for param in module.parameters():
         param.requires_grad = tf
 
-
+# TODO: 还没有改动的旧逻辑。这个函数在train_nf.py和train_fm.py中都被调用，但是train_nf.py中没有is_compile参数，train_fm.py中没有sd参数
 def load_network(
     checkpoint: dict,
     net: nn.Module,
@@ -511,6 +512,94 @@ def save_checkpoint(
         except Exception as e:
             fabric.print(f"Error saving checkpoint: {e}")
     return loss_min_tot
+
+
+def auto_load_latest_checkpoint(
+    config: dict,
+    enc: nn.Module,
+    dec: nn.Module,
+    optim_enc: torch.optim.Optimizer,
+    optim_dec: torch.optim.Optimizer,
+    fabric: object
+) -> tuple:
+    """
+    自动加载最新的checkpoint并返回训练状态
+    
+    Args:
+        config (dict): 配置字典
+        enc (nn.Module): 编码器
+        dec (nn.Module): 解码器
+        optim_enc (torch.optim.Optimizer): 编码器优化器
+        optim_dec (torch.optim.Optimizer): 解码器优化器
+        fabric (object): Fabric对象
+        
+    Returns:
+        tuple: (enc, dec, optim_enc, optim_dec, start_epoch, train_losses, val_losses, best_loss)
+    """
+    try:
+        # 查找所有以nf_qm9_开头的目录
+        exp_dir = Path("exps/neural_field")
+        if not exp_dir.exists():
+            fabric.print(">> No exps/neural_field directory found, starting fresh training")
+            return enc, dec, optim_enc, optim_dec, 0, [], [], float("inf")
+        
+        # 查找所有以nf_qm9_开头的目录
+        exp_dirs = [d for d in exp_dir.iterdir() if d.is_dir() and d.name.startswith("nf_qm9_")]
+        if not exp_dirs:
+            fabric.print(">> No existing experiment directories found, starting fresh training")
+            return enc, dec, optim_enc, optim_dec, 0, [], [], float("inf")
+        
+        # 查找有model.pt文件的目录
+        valid_dirs = []
+        for d in exp_dirs:
+            model_path = d / "model.pt"
+            if model_path.exists():
+                valid_dirs.append(d)
+        
+        if not valid_dirs:
+            fabric.print(">> No existing checkpoints found, starting fresh training")
+            return enc, dec, optim_enc, optim_dec, 0, [], [], float("inf")
+        
+        # 选择最新的有checkpoint的目录
+        latest_model_path = max(valid_dirs, key=lambda x: x.stat().st_mtime)
+        checkpoint_path = latest_model_path / "model.pt"
+        
+        fabric.print(f">> Auto-loaded latest checkpoint: {latest_model_path}")
+        
+        # 加载checkpoint
+        checkpoint = fabric.load(str(checkpoint_path))
+        
+        # 加载模型和优化器状态
+        dec = load_network(checkpoint, dec, fabric, net_name="dec")
+        optim_dec = load_optim_fabric(optim_dec, checkpoint, config, fabric, net_name="dec")
+        
+        enc = load_network(checkpoint, enc, fabric, net_name="enc")
+        optim_enc = load_optim_fabric(optim_enc, checkpoint, config, fabric, net_name="enc")
+        
+        # 设置起始epoch
+        start_epoch = checkpoint.get("epoch", 0) + 1
+        fabric.print(f">> Resuming from epoch {start_epoch}")
+        
+        # 加载训练历史
+        train_losses = []
+        if os.path.exists(os.path.join(latest_model_path, "train_losses.npy")):
+            train_losses = list(np.load(os.path.join(latest_model_path, "train_losses.npy")))
+            fabric.print(f">> Loaded {len(train_losses)} previous training losses")
+        
+        val_losses = []
+        if os.path.exists(os.path.join(latest_model_path, "val_losses.npy")):
+            val_losses = list(np.load(os.path.join(latest_model_path, "val_losses.npy")))
+            fabric.print(f">> Loaded {len(val_losses)} previous validation losses")
+        
+        # 更新最佳loss
+        best_loss = checkpoint.get("best_loss", float("inf"))
+        
+        return enc, dec, optim_enc, optim_dec, start_epoch, train_losses, val_losses, best_loss
+        
+    except Exception as e:
+        fabric.print(f"Error auto-loading checkpoint: {e}")
+        fabric.print(">> Starting fresh training")
+        return enc, dec, optim_enc, optim_dec, 0, [], [], float("inf")
 
 
 def load_neural_field(nf_checkpoint: dict, fabric: object, config: dict = None) -> tuple:

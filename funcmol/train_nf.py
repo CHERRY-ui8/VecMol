@@ -1,24 +1,28 @@
 import sys
 sys.path.append("..")
 
-import time
-import hydra
 import os
-import torch
-import torchmetrics
-from torch import nn
-from tqdm import tqdm
-import wandb
+import time
 import matplotlib.pyplot as plt
-import numpy as np
-from funcmol.utils.utils_base import setup_fabric
-from funcmol.utils.utils_nf import (
-    create_neural_field, train_nf, eval_nf, save_checkpoint, load_network, load_optim_fabric
-)
-from funcmol.utils.gnf_converter import GNFConverter
-from funcmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
+import torch
+import torch.nn as nn
+import torchmetrics
 from lightning import Fabric
 from omegaconf import OmegaConf
+import hydra
+from pathlib import Path
+import numpy as np
+
+# 在导入torch之前设置GPU
+# 手动指定要使用的GPU（0, 1, 或 2）
+gpu_id = 1  # 修改这里来选择GPU：0, 1, 或 2
+os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+print(f"Setting CUDA_VISIBLE_DEVICES={gpu_id}")
+
+from funcmol.utils.utils_nf import train_nf, create_neural_field, eval_nf
+from funcmol.utils.utils_nf import load_network, load_optim_fabric, save_checkpoint, auto_load_latest_checkpoint
+from funcmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
+from funcmol.utils.gnf_converter import GNFConverter
 
 
 def plot_loss_curve(train_losses, val_losses, save_path, title_suffix=""):
@@ -49,15 +53,22 @@ def main(config):
     # 设置CUDA内存分配策略
     os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
     
-    # 初始化fabric（单卡模式）
+    # 初始化fabric
     fabric = Fabric(
-        accelerator="auto",
-        devices=1,  # 使用单卡
+        accelerator="gpu",
+        devices=1,  # 使用cuda:0（通过CUDA_VISIBLE_DEVICES设置）
         precision="bf16-mixed"
     )
     fabric.launch()
     
     fabric.print(">> start training the neural field", config["exp_name"])
+    fabric.print(f">> Using GPU {gpu_id}")
+    
+    # 添加调试信息
+    fabric.print(f">> CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'Not set')}")
+    fabric.print(f">> Torch device count: {torch.cuda.device_count()}")
+    fabric.print(f">> Torch current device: {torch.cuda.current_device()}")
+    fabric.print(f">> Fabric device: {fabric.device}")
     
     ##############################
     # data loaders
@@ -99,6 +110,21 @@ def main(config):
             optim_enc = load_optim_fabric(optim_enc, checkpoint, config, fabric, net_name="enc")
         except Exception as e:
             fabric.print(f"Error loading checkpoint: {e}")
+    
+    # 自动检测并加载最新的checkpoint（如果启用了auto_resume且没有指定reload_model_path）
+    elif config.get("auto_resume", True) and config["reload_model_path"] is None:
+        fabric.print(">> Auto-resume enabled, looking for latest checkpoint...")
+        enc, dec, optim_enc, optim_dec, start_epoch, train_losses, val_losses, best_loss = auto_load_latest_checkpoint(
+            config, enc, dec, optim_enc, optim_dec, fabric
+        )
+    
+    # 从头开始训练（如果禁用了auto_resume）
+    else:
+        fabric.print(">> Auto-resume disabled, starting fresh training")
+        start_epoch = 0
+        train_losses = []
+        val_losses = []
+        best_loss = float("inf")
 
     # Metrics
     metrics = {
@@ -113,7 +139,6 @@ def main(config):
     ##############################
     # start training the neural field
     best_loss = float("inf")
-    start_epoch = 0
     
     train_losses = []  # 记录每个epoch的训练loss
     val_losses = []    # 记录每个epoch的验证loss
@@ -129,8 +154,12 @@ def main(config):
     assert isinstance(gnf_config, dict), f"gnf_config should be dict, got {type(gnf_config)}"
     gnf_converter = GNFConverter(**gnf_config)
     
+    fabric.print(f">> Training loop will start from epoch {start_epoch}")
+    
     for epoch in range(start_epoch, config["n_epochs"]):
         start_time = time.time()
+        
+        fabric.print(f">> Current epoch in loop: {epoch}")
 
         adjust_learning_rate(optim_enc, optim_dec, epoch, config)
 

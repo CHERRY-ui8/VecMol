@@ -220,7 +220,14 @@ def train_denoiser(
         adjust_learning_rate(optimizer, acc_iter, config)
         acc_iter += 1
 
-        codes = normalize_code(batch, dec_module.code_stats)
+        if config["on_the_fly"]:
+            with torch.no_grad():
+                codes, _ = infer_codes_occs_batch(
+                    batch, enc, config, to_cpu=False,
+                    code_stats=dec_module.code_stats if config["normalize_codes"] else None
+                )
+        else:
+            codes = normalize_code(batch, dec_module.code_stats)
 
         smooth_codes = add_noise_to_code(codes, smooth_sigma=config["smooth_sigma"])
         loss = compute_loss(codes, smooth_codes, model, criterion)
@@ -265,7 +272,13 @@ def val_denoiser(
     model.eval()
     metrics.reset()
     for batch in loader:
-        codes = normalize_code(batch, dec_module.code_stats)
+        if config["on_the_fly"]:
+            codes, _ = infer_codes_occs_batch(
+                batch, enc, config, to_cpu=False,
+                code_stats=dec_module.code_stats if config["normalize_codes"] else None
+            )
+        else:
+            codes = normalize_code(batch, dec_module.code_stats)
         smooth_codes = add_noise_to_code(codes, smooth_sigma=config["smooth_sigma"])
         loss = compute_loss(codes, smooth_codes, model, criterion)
         metrics.update(loss)

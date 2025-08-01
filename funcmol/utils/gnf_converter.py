@@ -27,9 +27,11 @@ class GNFConverter(nn.Module):
                 eps: float,  # DBSCAN的邻域半径参数
                 min_samples: int,  # DBSCAN的最小样本数参数
                 sigma_ratios: Dict[str, float],
-                gradient_field_method: str = "softmax",  # 梯度场计算方法: "gaussian", "softmax", "logsumexp"
+                gradient_field_method: str = "softmax",  # 梯度场计算方法: "gaussian", "softmax", "logsumexp", "inverse_square"
                 temperature: float = 1.0,  # softmax温度参数，控制分布尖锐程度
                 logsumexp_eps: float = 1e-8,  # logsumexp方法的数值稳定性参数
+                inverse_square_strength: float = 1.0,  # 距离平方反比方法的强度参数
+                gradient_clip_threshold: float = 0.3,  # 梯度模长截断阈值
                 device: str = "cuda" if torch.cuda.is_available() else "cpu"):  # 原子类型比例系数
         super().__init__()
         self.sigma = sigma
@@ -43,6 +45,8 @@ class GNFConverter(nn.Module):
         self.gradient_field_method = gradient_field_method  # 保存梯度场计算方法
         self.temperature = temperature  # 保存temperature参数
         self.logsumexp_eps = logsumexp_eps  # 保存logsumexp_eps参数
+        self.inverse_square_strength = inverse_square_strength  # 保存inverse_square_strength参数
+        self.gradient_clip_threshold = gradient_clip_threshold  # 保存梯度模长截断阈值
         
         # 为不同类型的原子设置不同的 sigma 参数
         # 原子类型索引映射：0=C, 1=H, 2=O, 3=N, 4=F
@@ -111,6 +115,18 @@ class GNFConverter(nn.Module):
                         weights = weights.unsqueeze(-1)  # (n_type_atoms, n_points, 1)
                         weighted_gradients = diff * weights  # (n_type_atoms, n_points, 3)
                         type_gradients = torch.sum(weighted_gradients, dim=0)  # (n_points, 3)
+                        
+                        # 应用梯度模长截断
+                        if self.gradient_clip_threshold > 0:
+                            gradient_magnitudes = torch.norm(type_gradients, dim=-1, keepdim=True)  # (n_points, 1)
+                            clip_mask = gradient_magnitudes > self.gradient_clip_threshold
+                            if clip_mask.any():
+                                # 保持方向不变，只截断模长
+                                type_gradients = torch.where(
+                                    clip_mask,
+                                    type_gradients * self.gradient_clip_threshold / gradient_magnitudes,
+                                    type_gradients
+                                )
                     elif self.gradient_field_method == "logsumexp":  # 基于LogSumExp的定义
                         # 计算每个原子产生的梯度
                         scale = 0.1 # TODO：目前这个参数是hard code的，因为不确定有没有必要添加这个参数。如果必要，后期把这个参数移动到初始化阶段
@@ -125,6 +141,20 @@ class GNFConverter(nn.Module):
                         
                         # 计算最终梯度：方向之和 × LogSumExp(log(||∇fᵢ(z)||))
                         type_gradients = scale * torch.sum(gradient_directions, dim=0) * log_sum_exp.squeeze(0)  # (n_points, 3)
+                    elif self.gradient_field_method == "inverse_square":  # 基于距离平方反比的定义
+                        # 计算距离（避免除零）
+                        distances = torch.sqrt(dist_sq.squeeze(-1) + 1e-8)  # (n_type_atoms, n_points)
+                        
+                        # 计算距离平方反比权重：1/r²
+                        inverse_square_weights = 1.0 / (distances ** 2 + 1e-8)  # (n_type_atoms, n_points)
+                        
+                        # 应用强度参数
+                        weighted_weights = inverse_square_weights * self.inverse_square_strength  # (n_type_atoms, n_points)
+                        weighted_weights = weighted_weights.unsqueeze(-1)  # (n_type_atoms, n_points, 1)
+                        
+                        # 计算加权梯度：方向 × 距离平方反比权重
+                        weighted_gradients = diff * weighted_weights  # (n_type_atoms, n_points, 3)
+                        type_gradients = torch.sum(weighted_gradients, dim=0)  # (n_points, 3)
                     
                     vector_field[b, :, t, :] = type_gradients
         return vector_field

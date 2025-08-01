@@ -13,5 +13,7 @@ sigma_ratios:
   'N': 1.0    # 氮原子，略小于氧原子
   F: 1.2    # 氟原子，略大于氧原子
 gradient_field_method: softmax
-temperature: 0.008 # 温度越高，分布越尖锐，越容易收敛（很可能极端地收敛到单个原子）；温度越低，分布越平缓，越不易收敛
+temperature: 0.01 # 温度越高，分布越尖锐，越容易收敛（很可能极端地收敛到单个原子）；温度越低，分布越平缓，越不易收敛
 logsumexp_eps: 1e-8  # logsumexp方法的数值稳定性参数
+inverse_square_strength: 1.0 # 距离平方反比方法的强度参数
+gradient_clip_threshold: 0.3 # 梯度模长截断阈值
