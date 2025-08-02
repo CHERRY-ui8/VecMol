@@ -12,12 +12,13 @@ except ImportError:
         return fn
 
 class EGNNLayer(MessagePassing):
-    def __init__(self, in_channels, hidden_channels, out_channels, k_neighbors=8, out_x_dim=1):
+    def __init__(self, in_channels, hidden_channels, out_channels, k_neighbors=8, out_x_dim=1, cutoff=None):
         """
             EGNN等变层实现：
             - 只用h_i, h_j, ||x_i-x_j||作为边特征输入
             - 用message的标量加权方向向量更新坐标
             - 不用EGNN论文里的a_ij（在这个模型里无化学键信息）
+            - 添加cutoff参数进行距离过滤
         """
         super().__init__(aggr='mean')
         self.in_channels = in_channels
@@ -25,6 +26,7 @@ class EGNNLayer(MessagePassing):
         self.out_channels = out_channels
         self.k_neighbors = k_neighbors
         self.out_x_dim = out_x_dim
+        self.cutoff = cutoff
 
         # 用于message计算的MLP，输入[h_i, h_j, ||x_i-x_j||]，输出hidden_channels
         self.edge_mlp = nn.Sequential(
@@ -55,11 +57,20 @@ class EGNNLayer(MessagePassing):
         # 计算距离和方向
         rel = x[row] - x[col]  # [E, 3]
         dist = torch.norm(rel, dim=-1, keepdim=True)  # [E, 1]
+        
         # 构造message输入
         h_i = h[row]
         h_j = h[col] # h_j 应该恒等于0，但是不是。发现h_j的从第501个开始不是0
         edge_input = torch.cat([h_i, h_j, dist], dim=-1)  # [E, 2*in_channels+1]
         m_ij = self.edge_mlp(edge_input)  # [E, hidden_channels]
+        
+        # 应用cutoff过滤
+        if self.cutoff is not None:
+            PI = torch.pi
+            C = 0.5 * (torch.cos(dist.squeeze(-1) * PI / self.cutoff) + 1.0)
+            C = C * (dist.squeeze(-1) <= self.cutoff) * (dist.squeeze(-1) >= 0.0)
+            m_ij = m_ij * C.view(-1, 1)
+        
         # 坐标更新：用message生成标量，乘以方向
         coord_coef = self.coord_mlp(m_ij)  # [E, out_x_dim]
         direction = rel / (dist + 1e-8)  # 单位向量 [E, 3]
@@ -95,6 +106,7 @@ class EGNNVectorField(nn.Module):
                  k_neighbors: int = 8,
                  n_atom_types: int = 5,
                  code_dim: int = 128,
+                 cutoff: float = None,
                  device=None):
         """
         Initialize the EGNN Vector Field model.
@@ -107,6 +119,7 @@ class EGNNVectorField(nn.Module):
             k_neighbors (int): Number of nearest neighbors for KNN graph
             n_atom_types (int): Number of atom types
             code_dim (int): Dimension of the latent code and node features
+            cutoff (float, optional): Cutoff distance for edge filtering
             device (torch.device, optional): The device to run the model on.
         """
         super().__init__()
@@ -116,6 +129,7 @@ class EGNNVectorField(nn.Module):
         self.k_neighbors = k_neighbors
         self.n_atom_types = n_atom_types
         self.code_dim = code_dim
+        self.cutoff = cutoff
 
         # Create learnable grid points and features for G_L
         self.register_buffer('grid_points', create_grid_coords(batch_size=1, grid_size=self.grid_size, device=device).squeeze(0))
@@ -130,7 +144,8 @@ class EGNNVectorField(nn.Module):
                 in_channels=code_dim,
                 hidden_channels=hidden_dim,
                 out_channels=code_dim,
-                k_neighbors=k_neighbors
+                k_neighbors=k_neighbors,
+                cutoff=cutoff
             ) for _ in range(num_layers)
         ])
         
@@ -140,7 +155,8 @@ class EGNNVectorField(nn.Module):
             hidden_channels=hidden_dim,
             out_channels=code_dim,
             k_neighbors=k_neighbors,
-            out_x_dim=n_atom_types
+            out_x_dim=n_atom_types,
+            cutoff=cutoff
         )
         
     def forward(self, query_points, codes):

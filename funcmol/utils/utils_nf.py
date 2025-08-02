@@ -10,7 +10,7 @@ from funcmol.utils.constants import PADDING_INDEX
 from funcmol.utils.gnf_converter import GNFConverter
 from torch_geometric.utils import to_dense_batch
 from funcmol.models.encoder import CrossGraphEncoder
-from funcmol.models.decoder import Decoder, _normalize_coords, get_atom_coords
+from funcmol.models.decoder import Decoder, get_atom_coords
 from funcmol.utils.utils_base import convert_xyzs_to_sdf, save_xyz
 from funcmol.utils.utils_vis import visualize_voxel_grid
 import time
@@ -651,21 +651,6 @@ def load_neural_field(nf_checkpoint: dict, fabric: object, config: dict = None) 
     return enc, dec
 
 
-def normalize_code(codes: torch.Tensor, code_stats: dict) -> torch.Tensor:
-    """
-    Normalize codes using mean and std from code_stats.
-
-    Args:
-        codes (torch.Tensor): The input codes to be normalized.
-        code_stats (dict): A dictionary containing 'mean' and 'std' for normalization.
-
-    Returns:
-        torch.Tensor: The normalized codes.
-    """
-    codes = (codes - code_stats["mean"]) / code_stats["std"]
-    return codes
-
-
 def compute_rmsd(coords1, coords2):
     """
     Calculate symmetric RMSD between two sets of coordinates.
@@ -760,10 +745,6 @@ def infer_codes(
             # Directly use encoder to process batch data
             codes = enc(batch)
             
-            # Normalize codes if needed
-            if code_stats is not None:
-                codes = normalize_code(codes, code_stats)
-            
             # Move to CPU if needed
             if to_cpu:
                 codes = codes.cpu()
@@ -808,10 +789,6 @@ def infer_codes_occs_batch(batch, enc, config, to_cpu=False, code_stats=None):
     """
     # Directly use encoder to process batch
     codes = enc(batch)
-    
-    # Normalize codes if needed
-    if code_stats is not None:
-        codes = normalize_code(codes, code_stats)
     
     # Move to CPU if needed
     if to_cpu:

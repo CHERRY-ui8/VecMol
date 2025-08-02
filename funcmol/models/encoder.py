@@ -3,10 +3,49 @@ import torch.nn as nn
 from torch_geometric.nn import MessagePassing, knn_graph, knn
 import torch.nn.functional as F
 from torch_geometric.loader import DataLoader
+import math
+import numpy as np
+
+
+class GaussianSmearing(nn.Module):
+    """Gaussian distance expansion for edge features."""
+    
+    def __init__(self, start=0.0, stop=10.0, num_gaussians=50, type_='exp'):
+        super().__init__()
+        self.start = start
+        self.stop = stop
+        if type_ == 'exp':
+            offset = torch.exp(torch.linspace(start=np.log(start+1), end=np.log(stop+1), steps=num_gaussians)) - 1
+        elif type_ == 'linear':
+            offset = torch.linspace(start=start, end=stop, steps=num_gaussians)
+        else:
+            raise NotImplementedError('type_ must be either exp or linear')
+        diff = torch.diff(offset)
+        diff = torch.cat([diff[:1], diff])
+        coeff = -0.5 / (diff**2)
+        self.register_buffer('coeff', coeff)
+        self.register_buffer('offset', offset)
+
+    def forward(self, dist):
+        """
+        Args:
+            dist: Tensor of shape [E] or [E, 1] containing distances
+            
+        Returns:
+            Tensor of shape [E, num_gaussians] containing Gaussian expanded features
+        """
+        if dist.dim() == 2:
+            dist = dist.squeeze(-1)
+        
+        dist = dist.clamp_min(self.start)
+        dist = dist.clamp_max(self.stop)
+        dist = dist.view(-1, 1) - self.offset.view(1, -1)
+        return torch.exp(self.coeff * torch.pow(dist, 2))
 
 
 class CrossGraphEncoder(nn.Module):
-    def __init__(self, n_atom_types, grid_size, code_dim, hidden_dim=128, num_layers=4, k_neighbors=32, atom_k_neighbors=8):
+    def __init__(self, n_atom_types, grid_size, code_dim, hidden_dim=128, num_layers=4, k_neighbors=32, atom_k_neighbors=8, 
+                 dist_version='new', cutoff=5.0, additional_edge_feat=0, edge_dim=128):
         super().__init__()
         self.n_atom_types = n_atom_types
         self.grid_size = grid_size
@@ -15,6 +54,10 @@ class CrossGraphEncoder(nn.Module):
         self.num_layers = num_layers
         self.k_neighbors = k_neighbors  # 原子 atom 和网格 grid 之间的连接数
         self.atom_k_neighbors = atom_k_neighbors  # 原子 atom 内部的连接数
+        self.dist_version = dist_version
+        self.cutoff = cutoff
+        self.additional_edge_feat = additional_edge_feat
+        self.edge_dim = edge_dim
 
         # 注册grid坐标作为buffer（不需要训练）
         grid_coords = create_grid_coords(1, self.grid_size, device="cpu").squeeze(0)  # [n_grid, 3]
@@ -22,7 +65,7 @@ class CrossGraphEncoder(nn.Module):
 
         # GNN layers
         self.layers = nn.ModuleList([
-            MessagePassingGNN(n_atom_types, code_dim, hidden_dim)
+            MessagePassingGNN(n_atom_types, code_dim, hidden_dim, edge_dim, dist_version, cutoff)
             for _ in range(num_layers)
         ])
 
@@ -115,16 +158,45 @@ class CrossGraphEncoder(nn.Module):
     
 
 class MessagePassingGNN(MessagePassing):
-    def __init__(self, atom_feat_dim, code_dim, hidden_dim):
+    def __init__(self, atom_feat_dim, code_dim, hidden_dim, edge_dim, dist_version, cutoff=5.0): # TODO
         super().__init__(aggr='mean')
         self.code_dim = code_dim
         self.hidden_dim = hidden_dim
+        self.edge_dim = edge_dim
+        self.dist_version = dist_version
+        self.cutoff = cutoff
+        
+        # 距离扩展
+        if dist_version == 'new':
+            self.distance_expansion = GaussianSmearing(start=0.0, stop=cutoff, num_gaussians=20, type_='exp')
+            self.edge_emb = nn.Linear(20, edge_dim)
+            self.use_gaussian_smearing = True
+        elif dist_version == 'old':
+            self.distance_expansion = GaussianSmearing(start=0.0, stop=cutoff, num_gaussians=edge_dim, type_='exp')
+            self.edge_emb = nn.Linear(edge_dim, edge_dim)
+            self.use_gaussian_smearing = True
+        elif dist_version is None:
+            # 向后兼容：不使用GaussianSmearing
+            self.distance_expansion = None
+            self.edge_emb = None
+            self.use_gaussian_smearing = False
+        else:
+            raise NotImplementedError('dist_version notimplemented')
+        
         # 修改MLP的输入维度，使其匹配实际输入
-        self.mlp = nn.Sequential(
-            nn.Linear(2*code_dim + 1, hidden_dim, bias=True),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, code_dim, bias=True)
-        )
+        if self.use_gaussian_smearing:
+            self.mlp = nn.Sequential(
+                nn.Linear(2*code_dim + edge_dim, hidden_dim, bias=True),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, code_dim, bias=True)
+            )
+        else:
+            # 向后兼容：使用原始维度
+            self.mlp = nn.Sequential(
+                nn.Linear(2*code_dim + 1, hidden_dim, bias=True),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, code_dim, bias=True)
+            )
         self.layernorm = nn.LayerNorm(code_dim)
         
         # 确保所有参数都设置了requires_grad=True
@@ -142,10 +214,23 @@ class MessagePassingGNN(MessagePassing):
         rel = rel.float()  # 确保rel是float类型
         dist = dist.float()  # 确保dist是float类型
         
-        msg_input = torch.cat([x[row], x[col], dist], dim=-1)  # [E, 2*code_dim+1]
+        # 距离扩展和边嵌入
+        if self.use_gaussian_smearing:
+            dist_expanded = self.distance_expansion(dist)  # [E, num_gaussians]
+            edge_features = self.edge_emb(dist_expanded)  # [E, edge_dim]
+            msg_input = torch.cat([x[row], x[col], edge_features], dim=-1)  # [E, 2*code_dim+edge_dim]
+        else:
+            # 向后兼容：直接使用距离
+            msg_input = torch.cat([x[row], x[col], dist], dim=-1)  # [E, 2*code_dim+1]
         
         msg = self.mlp(msg_input)  # [E, code_dim]
-        aggr = self.propagate(edge_index, x=x, message=msg)  # [N, code_dim]
+        
+        # 使用propagate方法进行消息传递
+        # 使用更精确的size参数：源节点和目标节点都是所有节点
+        # 这样可以确保所有节点都参与聚合，同时避免维度不匹配
+        aggr = self.propagate(edge_index, x=x, message=msg, size=(x.size(0), x.size(0)))  # [N, code_dim]
+        
+        # 残差连接
         x = x + aggr  # 残差连接
         x = self.layernorm(x)
         return x
@@ -175,47 +260,3 @@ def create_grid_coords(batch_size, grid_size, device=None):
     coords = torch.stack(mesh, dim=-1).reshape(-1, 3)  # [n_grid, 3]
     coords = coords.unsqueeze(0).expand(batch_size, -1, -1)  # [B, n_grid, 3]
     return coords
-
-
-class Encoder(nn.Module):
-    def __init__(
-        self,
-        in_channels,
-        level_channels=[32, 64, 128],
-        bottleneck_channel=1024,
-        smaller=False
-    ):
-        super(Encoder, self).__init__()
-        self.enc_blocks = nn.ModuleList()
-        for i in range(len(level_channels)):
-            in_ch = in_channels if i == 0 else level_channels[i - 1]
-            out_ch = level_channels[i]
-            self.enc_blocks.append(
-                Conv3DBlock(
-                    in_channels=in_ch,
-                    out_channels=out_ch,
-                    bottleneck=False,
-                    smaller=smaller
-                )
-            )
-        self.bottleNeck = Conv3DBlock(
-            in_channels=out_ch,
-            out_channels=bottleneck_channel,
-            bottleneck=True,
-            smaller=smaller
-        )
-        self.fc = nn.Linear(bottleneck_channel, bottleneck_channel)
-
-    def forward(self, voxels):
-        # encoder
-        out = voxels
-        for block in self.enc_blocks:
-            out, _ = block(out)
-        out, _ = self.bottleNeck(out)
-
-        # pooling
-        out = torch.nn.functional.avg_pool3d(out, out.size()[2:])
-        out = out.squeeze()
-        out = self.fc(out)
-
-        return out

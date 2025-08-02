@@ -14,8 +14,8 @@ from pathlib import Path
 import numpy as np
 
 # 在导入torch之前设置GPU
-# 手动指定要使用的GPU（0, 1, 或 2）
-gpu_id = 1  # 修改这里来选择GPU：0, 1, 或 2
+# TODO：手动指定要使用的GPU（0, 1, 或 2）
+gpu_id = 2  # 修改这里来选择GPU：0, 1, 或 2
 os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
 print(f"Setting CUDA_VISIBLE_DEVICES={gpu_id}")
 

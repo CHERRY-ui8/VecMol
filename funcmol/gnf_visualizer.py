@@ -1,5 +1,5 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
+# os.environ["CUDA_VISIBLE_DEVICES"] = ""
 import torch
 import hydra
 import numpy as np
@@ -430,12 +430,14 @@ def visualize_reconstruction(gt_coords: torch.Tensor,
                            decoder: torch.nn.Module,
                            codes: torch.Tensor,
                            output_dir: str = "gnf_visualization_results",
-                           sample_idx: int = 0) -> Dict[str, Any]:
+                           sample_idx: int = 0,
+                           field_option: str = "predicted_field") -> Dict[str, Any]:
     """便捷函数：可视化分子重建过程"""
     visualizer = GNFVisualizer(output_dir)
     return visualizer.create_reconstruction_animation(
         gt_coords, gt_types, converter, decoder, codes,
-        sample_idx=sample_idx
+        sample_idx=sample_idx,
+        field_option=field_option
     )
 
 def visualize_1d_gradient_field_comparison(

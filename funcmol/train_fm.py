@@ -13,7 +13,7 @@ from funcmol.utils.utils_fm import (
 from funcmol.models.adamw import AdamW
 from funcmol.models.ema import ModelEma
 from funcmol.utils.utils_base import setup_fabric
-from funcmol.utils.utils_nf import infer_codes_occs_batch, load_neural_field, normalize_code, get_latest_model_path
+from funcmol.utils.utils_nf import infer_codes_occs_batch, load_neural_field, get_latest_model_path
 from funcmol.dataset.dataset_code import create_code_loaders
 from funcmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
 
@@ -66,13 +66,13 @@ def main(config):
         loader_train = create_field_loaders(config, gnf_converter, split="train", fabric=fabric)
         loader_val = create_field_loaders(config, gnf_converter, split="val", fabric=fabric) if fabric.global_rank == 0 else None
         _, code_stats = compute_codes(
-            loader_train, enc, config_nf, "train", fabric, config["normalize_codes"],
+            loader_train, enc, config_nf, "train", fabric, False,
             code_stats=None
         )
     else:
         loader_train = create_code_loaders(config, split="train", fabric=fabric)
         loader_val = create_code_loaders(config, split="val", fabric=fabric) if fabric.global_rank == 0 else None
-        code_stats = compute_code_stats_offline(loader_train, "train", fabric, config["normalize_codes"])
+        code_stats = compute_code_stats_offline(loader_train, "train", fabric, False)
     dec_module.set_code_stats(code_stats)
 
     config["num_iterations"] = config["num_epochs"] * len(loader_train)
@@ -221,13 +221,11 @@ def train_denoiser(
         acc_iter += 1
 
         if config["on_the_fly"]:
-            with torch.no_grad():
-                codes, _ = infer_codes_occs_batch(
-                    batch, enc, config, to_cpu=False,
-                    code_stats=dec_module.code_stats if config["normalize_codes"] else None
-                )
+            codes = infer_codes_occs_batch(
+                batch, enc, config_nf, to_cpu=False, code_stats=None
+            )
         else:
-            codes = normalize_code(batch, dec_module.code_stats)
+            codes = batch
 
         smooth_codes = add_noise_to_code(codes, smooth_sigma=config["smooth_sigma"])
         loss = compute_loss(codes, smooth_codes, model, criterion)
@@ -273,12 +271,11 @@ def val_denoiser(
     metrics.reset()
     for batch in loader:
         if config["on_the_fly"]:
-            codes, _ = infer_codes_occs_batch(
-                batch, enc, config, to_cpu=False,
-                code_stats=dec_module.code_stats if config["normalize_codes"] else None
+            codes = infer_codes_occs_batch(
+                batch, enc, config_nf, to_cpu=False, code_stats=None
             )
         else:
-            codes = normalize_code(batch, dec_module.code_stats)
+            codes = batch
         smooth_codes = add_noise_to_code(codes, smooth_sigma=config["smooth_sigma"])
         loss = compute_loss(codes, smooth_codes, model, criterion)
         metrics.update(loss)

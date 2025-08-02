@@ -27,11 +27,13 @@ class GNFConverter(nn.Module):
                 eps: float,  # DBSCAN的邻域半径参数
                 min_samples: int,  # DBSCAN的最小样本数参数
                 sigma_ratios: Dict[str, float],
-                gradient_field_method: str = "softmax",  # 梯度场计算方法: "gaussian", "softmax", "logsumexp", "inverse_square"
+                gradient_field_method: str = "softmax",  # 梯度场计算方法: "gaussian", "softmax", "logsumexp", "inverse_square", "sigmoid", "gaussian_mag", "distance"
                 temperature: float = 1.0,  # softmax温度参数，控制分布尖锐程度
                 logsumexp_eps: float = 1e-8,  # logsumexp方法的数值稳定性参数
                 inverse_square_strength: float = 1.0,  # 距离平方反比方法的强度参数
                 gradient_clip_threshold: float = 0.3,  # 梯度模长截断阈值
+                sig_sf: float = 0.01,  # softmax field的sigma参数
+                sig_mag: float = 0.1,  # magnitude的sigma参数
                 device: str = "cuda" if torch.cuda.is_available() else "cpu"):  # 原子类型比例系数
         super().__init__()
         self.sigma = sigma
@@ -47,6 +49,8 @@ class GNFConverter(nn.Module):
         self.logsumexp_eps = logsumexp_eps  # 保存logsumexp_eps参数
         self.inverse_square_strength = inverse_square_strength  # 保存inverse_square_strength参数
         self.gradient_clip_threshold = gradient_clip_threshold  # 保存梯度模长截断阈值
+        self.sig_sf = sig_sf  # 保存softmax field的sigma参数
+        self.sig_mag = sig_mag  # 保存magnitude的sigma参数
         
         # 为不同类型的原子设置不同的 sigma 参数
         # 原子类型索引映射：0=C, 1=H, 2=O, 3=N, 4=F
@@ -127,6 +131,14 @@ class GNFConverter(nn.Module):
                                     type_gradients * self.gradient_clip_threshold / gradient_magnitudes,
                                     type_gradients
                                 )
+                    elif self.gradient_field_method == "sfnorm":  # 基于softmax的定义：使用温度控制的权重，并除以diff的模长
+                        distances = torch.sqrt(dist_sq.squeeze(-1))  # (n_type_atoms, n_points)
+                        weights = torch.softmax(-distances / self.temperature, dim=0)  # (n_type_atoms, n_points)
+                        weights = weights.unsqueeze(-1)  # (n_type_atoms, n_points, 1)
+                        diff_norm = diff / (torch.norm(diff, dim=-1, keepdim=True) + 1e-8)
+                        weighted_gradients = diff_norm * weights  # (n_type_atoms, n_points, 3)
+                        type_gradients = torch.sum(weighted_gradients, dim=0)  # (n_points, 3)
+                        
                     elif self.gradient_field_method == "logsumexp":  # 基于LogSumExp的定义
                         # 计算每个原子产生的梯度
                         scale = 0.1 # TODO：目前这个参数是hard code的，因为不确定有没有必要添加这个参数。如果必要，后期把这个参数移动到初始化阶段
@@ -154,6 +166,43 @@ class GNFConverter(nn.Module):
                         
                         # 计算加权梯度：方向 × 距离平方反比权重
                         weighted_gradients = diff * weighted_weights  # (n_type_atoms, n_points, 3)
+                        type_gradients = torch.sum(weighted_gradients, dim=0)  # (n_points, 3)
+                    
+                    elif self.gradient_field_method == "sigmoid":  # sigmoid版本：使用tanh作为magnitude权重
+                        distances = torch.sqrt(dist_sq.squeeze(-1))  # (n_type_atoms, n_points)
+                        # softmax权重
+                        w_softmax = torch.softmax(-distances / self.sig_sf, dim=0)  # (n_type_atoms, n_points)
+                        # sigmoid magnitude权重
+                        w_mag = torch.tanh(distances / self.sig_mag)  # (n_type_atoms, n_points)
+                        # 归一化方向
+                        diff_normed = diff / (torch.norm(diff, dim=-1, keepdim=True) + 1e-8)  # (n_type_atoms, n_points, 3)
+                        # 计算最终field
+                        weighted_gradients = diff_normed.squeeze(-1) * w_softmax.unsqueeze(-1) * w_mag.unsqueeze(-1)  # (n_type_atoms, n_points, 3)
+                        type_gradients = torch.sum(weighted_gradients, dim=0)  # (n_points, 3)
+                    
+                    elif self.gradient_field_method == "gaussian_mag":  # gaussian版本：使用高斯作为magnitude权重
+                        distances = torch.sqrt(dist_sq.squeeze(-1))  # (n_type_atoms, n_points)
+                        # softmax权重
+                        w_softmax = torch.softmax(-distances / self.sig_sf, dim=0)  # (n_type_atoms, n_points)
+                        # gaussian magnitude权重
+                        w_mag = torch.exp(-distances**2 / (2 * self.sig_mag**2)) * distances  # (n_type_atoms, n_points)
+                        # 归一化方向
+                        diff_normed = diff / (torch.norm(diff, dim=-1, keepdim=True) + 1e-8)  # (n_type_atoms, n_points, 3)
+                        # 计算最终field
+                        weighted_gradients = diff_normed.squeeze(-1) * w_softmax.unsqueeze(-1) * w_mag.unsqueeze(-1)  # (n_type_atoms, n_points, 3)
+                        type_gradients = torch.sum(weighted_gradients, dim=0)  # (n_points, 3)
+                        type_gradients = type_gradients * 30
+                    
+                    elif self.gradient_field_method == "distance":  # distance版本：使用距离作为magnitude权重
+                        distances = torch.sqrt(dist_sq.squeeze(-1))  # (n_type_atoms, n_points)
+                        # softmax权重
+                        w_softmax = torch.softmax(-distances / self.sig_sf, dim=0)  # (n_type_atoms, n_points)
+                        # distance magnitude权重（在原子处为0，随距离线性增长到1）
+                        w_mag = torch.clamp(distances, min=0, max=1)  # (n_type_atoms, n_points)
+                        # 归一化方向
+                        diff_normed = diff / (torch.norm(diff, dim=-1, keepdim=True) + 1e-8)  # (n_type_atoms, n_points, 3)
+                        # 计算最终field
+                        weighted_gradients = diff_normed.squeeze(-1) * w_softmax.unsqueeze(-1) * w_mag.unsqueeze(-1)  # (n_type_atoms, n_points, 3)
                         type_gradients = torch.sum(weighted_gradients, dim=0)  # (n_points, 3)
                     
                     vector_field[b, :, t, :] = type_gradients

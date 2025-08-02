@@ -17,24 +17,28 @@ from funcmol.utils.gnf_converter import GNFConverter
 
 class FieldDataset(Dataset):
     """
-    Initializes the dataset with the specified parameters.
+    A dataset class for field-based molecular data.
+
+    This dataset loads molecular data and provides field-based representations
+    for training neural field models. It handles coordinate preprocessing,
+    rotation, and field computation.
 
     Args:
-        gnf_converter (GNFConverter): GNFConverter实例用于计算目标梯度场
-        dset_name (str): Name of the dataset. Default is "qm9".
-        data_dir (str): Directory where the dataset is stored. Default is "dataset/data".
-        elements (list): List of elements to filter by. Default is None, which uses ELEMENTS_HASH.
-        split (str): Dataset split to use. Must be one of ["train", "val", "test"]. Default is "train".
-        rotate (bool): Whether to apply rotation. Default is False.
-        radius (float): Radius for some operation. Default is 0.5.
-        grid_dim (int): Dimension of the grid. Default is 32.
-        resolution (float): Resolution of the grid. Default is 0.25.
-        n_points (int): Number of points to sample. Default is 4000.
-        sample_full_grid (bool): Whether to sample the full grid. Default is False.
-        targeted_sampling_ratio (int): Ratio for targeted sampling. Default is 2.
-        cubes_around (int): Number of cubes around to consider. Default is 3.
-        debug_one_mol (bool): Whether to keep only the first molecule for debugging. Default is False.
-        debug_subset (bool): Whether to use only the first 128 molecules for debugging. Default is False.
+        gnf_converter (GNFConverter): GNFConverter instance for computing target fields.
+        dset_name (str): Name of the dataset (e.g., 'qm9', 'drugs', 'cremp').
+        data_dir (str): Directory containing the dataset files.
+        elements (list, optional): List of chemical elements to include. Defaults to None.
+        split (str): Dataset split ('train', 'val', 'test').
+        rotate (bool): Whether to apply random rotations during training. Defaults to False.
+        radius (float): Atomic radius for field computation. Defaults to 0.5.
+        grid_dim (int): Dimension of the grid. Defaults to 32.
+        grid_spacing (float): Spacing between grid points in Angstroms. Defaults to 2.0.
+        n_points (int): Number of points to sample for field prediction. Defaults to 4000.
+        sample_full_grid (bool): Whether to sample the full grid. Defaults to False.
+        targeted_sampling_ratio (int): Ratio for targeted sampling. Defaults to 2.
+        cubes_around (int): Number of cubes around atoms for sampling. Defaults to 3.
+        debug_one_mol (bool): Whether to debug with one molecule. Defaults to False.
+        debug_subset (bool): Whether to debug with a subset. Defaults to False.
     """
     def __init__(
         self,
@@ -46,7 +50,7 @@ class FieldDataset(Dataset):
         rotate: bool = False,
         radius: float = 0.5,
         grid_dim: int = 32,
-        resolution: float = 0.25,
+        grid_spacing: float = 2.0,  # 每2A一个格点
         n_points: int = 4000,
         sample_full_grid: bool = False,
         targeted_sampling_ratio: int = 2,
@@ -54,9 +58,6 @@ class FieldDataset(Dataset):
         debug_one_mol: bool = False,
         debug_subset: bool = False,
     ):
-        if elements is None:
-            elements = ELEMENTS_HASH
-        assert dset_name in ["qm9", "drugs", "cremp"]
         assert split in ["train", "val", "test"]
         self.dset_name = dset_name
         self.data_dir = data_dir
@@ -64,24 +65,23 @@ class FieldDataset(Dataset):
         self.split = split
         self.rotate = rotate
         self.fix_radius = radius
-        self.resolution = resolution
+        self.grid_spacing = grid_spacing
         self.n_points = n_points
         self.sample_full_grid = sample_full_grid
         self.grid_dim = grid_dim
-        self.scale_factor = 1 / (self.resolution * self.grid_dim / 2)
 
         self._read_data()
         self._filter_by_elements(elements)
 
-        # normalize the increments
+        # 直接使用真实空间距离，不再需要缩放
         self.increments = torch.tensor(
             list(itertools.product(list(range(-cubes_around, cubes_around+1)), repeat=3)),
             dtype=torch.float32
-        ) * self.scale_factor  # 标准化increments以匹配分子坐标的缩放
+        ) * self.grid_spacing  # 使用真实空间距离
         
         self.targeted_sampling_ratio = targeted_sampling_ratio if split == "train" else 0
         self.field_idxs = torch.arange(len(self.data))
-        self.discrete_grid, self.full_grid_high_res = get_grid(self.grid_dim)
+        self.discrete_grid, self.full_grid_high_res = get_grid(self.grid_dim, self.grid_spacing)
         
         # 使用传入的GNFConverter实例
         self.gnf_converter = gnf_converter
@@ -265,11 +265,10 @@ class FieldDataset(Dataset):
 
     def _scale_molecule(self, coords) -> torch.Tensor:
         """
-        Scales the coordinates of a molecule.
+        Returns the coordinates without scaling (now using real coordinates).
 
-        This method scales the input coordinates by multiplying the masked coordinates
-        by the scale factor (1 / (resolution * grid_dim / 2)). The scaling
-        is applied only to the coordinates that are not equal to the PADDING_INDEX.
+        This method now simply returns the input coordinates without any scaling,
+        as we are using real-world coordinates instead of normalized ones.
 
         Args:
             coords (torch.Tensor): A tensor containing the coordinates of the molecule.
@@ -277,29 +276,24 @@ class FieldDataset(Dataset):
                        and the second dimension contains the coordinate values.
 
         Returns:
-            torch.Tensor: The scaled coordinates tensor.
+            torch.Tensor: The coordinates tensor (unchanged).
         """
-        mask = coords[:, 0] != PADDING_INDEX
-        masked_coords = coords[mask]
-        masked_coords = masked_coords * self.scale_factor
-        coords[mask] = masked_coords
+        # 不再需要缩放，直接返回原始坐标
         return coords
 
     def _scale_batch_molecules(self, batch) -> torch.Tensor:
         """
-        Scales the coordinates of molecules in a batch.
+        Returns the coordinates of molecules in a batch without scaling.
 
         Args:
             batch (dict): A dictionary containing the batch data. It must include a key "coords"
                           which holds the coordinates of the molecules.
 
         Returns:
-            torch.Tensor: The scaled coordinates of the molecules.
+            torch.Tensor: The coordinates of the molecules (unchanged).
         """
-        coords = batch["coords"]
-        mask = coords[:, :, 0] != PADDING_INDEX
-        coords[mask] = coords[mask] * self.scale_factor
-        return coords
+        # 不再需要缩放，直接返回原始坐标
+        return batch["coords"]
 
     def _rotate_coords(self, sample, rot_matrix=None) -> torch.Tensor:
         """
@@ -403,7 +397,7 @@ def create_field_loaders(
         split=split,
         n_points=config["dset"]["n_points"],
         rotate=config["dset"]["data_aug"] if split == "train" else False,
-        resolution=config["dset"]["resolution"],
+        grid_spacing=config["dset"]["grid_spacing"],
         grid_dim=config["dset"]["grid_dim"],
         radius=config["dset"]["atomic_radius"],
         sample_full_grid=sample_full_grid,

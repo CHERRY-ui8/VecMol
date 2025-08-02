@@ -60,7 +60,7 @@ qm9_dataset = FieldDataset(
     split='train',
     n_points=config['n_points'],
     rotate=config['data_aug'],
-    resolution=config['resolution'],
+    grid_spacing=config['grid_spacing'],
     grid_dim=config['grid_dim'],
     radius=config['atomic_radius'],
 )

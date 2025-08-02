@@ -86,7 +86,7 @@ def main(config):
         loader = create_field_loaders(config, gnf_converter, split=config["split"], n_samples=n_samples, fabric=fabric)
         with torch.no_grad():
             codes_all = infer_codes(loader, enc, config, fabric)
-            mols = dec_module.codes_to_molecules(codes_all, unnormalize=False, config=config, fabric=fabric)
+            mols = dec_module.codes_to_molecules(codes_all, config=config, fabric=fabric)
         save_xyz(mols, config["dirname"], fabric, atom_elements=config["dset"]["elements"])
         convert_xyzs_to_sdf(config["dirname"], fabric=fabric)
 
