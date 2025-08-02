@@ -97,6 +97,7 @@ class Decoder(nn.Module):
     def codes_to_molecules(
         self,
         codes: torch.Tensor,
+        unnormalize: bool = True,
         config: dict = None,
         fabric: object = None,
     ) -> list:
@@ -105,6 +106,7 @@ class Decoder(nn.Module):
 
         Args:
             codes (torch.Tensor): The input codes representing molecular structures.
+            unnormalize (bool): Flag indicating whether to unnormalize the codes.
             config (dict): Configuration dictionary containing parameters for the conversion.
             fabric (optional): An optional fabric object for logging and printing.
 
@@ -115,6 +117,8 @@ class Decoder(nn.Module):
         codes_dict = defaultdict(list)
 
         codes = codes.detach()
+        if unnormalize:
+            codes = self.unnormalize_code(codes).detach()
 
         mols_dict, codes_dict = self.codes_to_grid(
             codes=codes,
@@ -134,7 +138,7 @@ class Decoder(nn.Module):
             grouped_codes=codes_dict,
             maxiter=200,
             grid_dim=self.grid_dim,
-            grid_spacing=config["dset"]["grid_spacing"],
+            resolution=config["dset"]["resolution"],
             fabric=fabric,
         )
 
@@ -167,6 +171,7 @@ class Decoder(nn.Module):
         for idx, grid in tqdm(enumerate(grids)):
             mol_init = get_atom_coords(grid, rad=config["dset"]["atomic_radius"])
             if mol_init is not None:
+                mol_init = _normalize_coords(mol_init, self.grid_dim)
                 num_coords = int(mol_init["coords"].size(1))
                 if num_coords <= 500:
                     mols_dict[num_coords].append(mol_init)
@@ -183,7 +188,7 @@ class Decoder(nn.Module):
         grouped_codes: dict,
         maxiter: int = 10,
         grid_dim: int = 32,
-        grid_spacing: float = 2.0,
+        resolution: float = 0.25,
         fabric=None,
     ) -> list:
         """
@@ -193,8 +198,8 @@ class Decoder(nn.Module):
             grouped_mol_inits (dict): A dictionary where keys are group identifiers and values are lists of initial molecule data.
             grouped_codes (dict): A dictionary where keys are group identifiers and values are lists of codes corresponding to the molecules.
             maxiter (int, optional): Maximum number of iterations for the refinement process. Default is 10.
-            grid_dim (int, optional): Dimension of the grid. Default is 32.
-            grid_spacing (float, optional): Spacing between grid points in Angstroms. Default is 2.0.
+            grid_dim (int, optional): Dimension of the grid used for normalization. Default is 32.
+            resolution (int, optional): Resolution used for normalization. Default is 0.25.
             fabric (optional): An object with a print method for logging messages.
 
         Returns:
@@ -211,16 +216,15 @@ class Decoder(nn.Module):
                 )
                 for i in range(coords.size(0)):
                     mols[i]["coords"] = coords[i].unsqueeze(0)
-                    # 不再需要反归一化，直接使用真实坐标
+                    mols[i] = _unnormalize_coords(mols[i], grid_dim, resolution)
             except Exception as e:
                 fabric.print(f"Error refinement: {e}")
                 for i in range(len(grouped_mol_inits[key])):
                     try:
-                        # 不再需要反归一化，直接使用真实坐标
-                        pass
+                        mols[i] = _unnormalize_coords(mols[i], grid_dim, resolution)
                     except Exception:
                         fabric.print(
-                            f"Error processing: {e} for {i}/{len(grouped_mol_inits[key])}"
+                            f"Error unnormalization: {e} for {i}/{len(grouped_mol_inits[key])}"
                         )
         return list(chain.from_iterable(grouped_mol_inits.values()))
 
@@ -310,6 +314,23 @@ class Decoder(nn.Module):
         """
         self.code_stats = code_stats
 
+    def unnormalize_code(self, codes: torch.Tensor):
+        """
+        Unnormalizes the given codes based on the provided normalization parameters.
+
+        Args:
+            codes (torch.Tensor): The codes to be unnormalized.
+            code_stats (dict): The statistics for the codes.
+
+        Returns:
+            torch.Tensor: The unnormalized codes.
+        """
+        mean, std = (
+            self.code_stats["mean"].to(codes.device),
+            self.code_stats["std"].to(codes.device),
+        )
+        return codes * std + mean
+
 
 ########################################################################################
 ## auxiliary functions
@@ -365,22 +386,21 @@ def get_atom_coords(grid, rad=0.5):
     return structure
 
 
-def get_grid(grid_dim, grid_spacing=2.0):
-    """
-    Generate a grid with real-world spacing.
-    
-    Args:
-        grid_dim (int): Dimension of the grid
-        grid_spacing (float): Spacing between grid points in Angstroms
-        
-    Returns:
-        tuple: (discrete_grid, full_grid) where discrete_grid is 1D array and full_grid is 3D coordinates
-    """
-    # 计算真实空间范围
-    real_range = (grid_dim - 1) * grid_spacing / 2
-    discrete_grid = np.linspace(-real_range, real_range, grid_dim)
-    
-    # 生成3D网格坐标
+def _normalize_coords(mol, grid_dim):
+    mol["coords"] -= (grid_dim - 1) / 2
+    mol["coords"] /= grid_dim / 2
+    return mol
+
+
+def _unnormalize_coords(mol, grid_dim, resolution=0.25):
+    mol["coords"] *= grid_dim / 2
+    mol["coords"] *= resolution
+    return mol
+
+
+def get_grid(grid_dim):
+    discrete_grid = (np.arange(grid_dim) - (grid_dim // 2)) / (grid_dim // 2)
+    # 例如：当 grid_dim=8 时，discrete_grid 值为 [-1, -0.75, -0.5, -0.25, 0, 0.25, 0.5, 0.75]
     full_grid = torch.Tensor(
         [[a, b, c] for a in discrete_grid for b in discrete_grid for c in discrete_grid]
     )

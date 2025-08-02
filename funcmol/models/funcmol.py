@@ -231,7 +231,7 @@ class FuncMol(nn.Module):
         mols = []
         fabric.print(f">> Splitting codes for rendering in batches of {batch_size_render_codes}")
         for batched_code in tqdm(batched_codes):
-            mols += dec.codes_to_molecules(batched_code, fabric=fabric, config=config)
+            mols += dec.codes_to_molecules(batched_code, unnormalize=config["normalize_codes"], fabric=fabric, config=config)
 
         # save the molecules in sdf file
         save_dir = os.path.join(os.getcwd(), save_dir)

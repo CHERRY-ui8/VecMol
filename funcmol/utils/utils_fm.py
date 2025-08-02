@@ -99,7 +99,7 @@ def compute_codes(
         config_nf (dict): Configuration dictionary for the neural field.
         split (str): Data split identifier (e.g., 'train', 'val', 'test').
         fabric (object): Fabric object for distributed training.
-        normalize_codes (bool): Whether to normalize the codes (deprecated, kept for compatibility).
+        normalize_codes (bool): Whether to normalize the codes.
         code_stats (dict, optional): Optional dictionary to store code statistics. Defaults to None.
     Returns:
         tuple: A tuple containing the generated codes and the code statistics.
@@ -114,9 +114,9 @@ def compute_codes(
         n_samples=100_000,
     )
     if code_stats is None:
-        code_stats = process_codes(codes, fabric, split)
+        code_stats = process_codes(codes, fabric, split, normalize_codes)
     else:
-        get_stats(codes, fabric=fabric, message=f"====codes {split}====")
+        get_stats(codes, fabric=fabric, message=f"====normalized codes {split}====")
     return codes, code_stats
 
 
@@ -133,13 +133,13 @@ def compute_code_stats_offline(
         loader (torch.utils.data.DataLoader): DataLoader containing the dataset.
         split (str): The data split (e.g., 'train', 'val', 'test').
         fabric (object): An object representing the fabric used for processing.
-        normalize_codes (bool): Whether to normalize the codes (deprecated, kept for compatibility).
+        normalize_codes (bool): Whether to normalize the codes.
 
     Returns:
         dict: A dictionary containing the computed code statistics.
     """
     codes = loader.dataset.curr_codes[:]
-    code_stats = process_codes(codes, fabric, split)
+    code_stats = process_codes(codes, fabric, split, normalize_codes)
     return code_stats
 
 
@@ -147,17 +147,19 @@ def process_codes(
     codes: torch.Tensor,
     fabric: object,
     split: str,
+    normalize_codes: bool,
 ) -> dict:
     """
     Process the codes from the checkpoint.
 
     Args:
-        codes (torch.Tensor): The codes to process.
-        fabric (object): The fabric object for logging messages.
-        split (str): The data split identifier.
+        checkpoint (dict): The checkpoint containing the codes.
+        logger (object): The logger object for logging messages.
+        device (torch.device): The device to use for processing the codes.
+        is_filter (bool, optional): Whether to filter the codes. Defaults to False.
 
     Returns:
-        dict: A dictionary containing the code statistics.
+        tuple: A tuple containing the processed codes, statistics, and normalized codes.
     """
     max, min, mean, std = get_stats(
         codes,
@@ -168,14 +170,19 @@ def process_codes(
         "mean": mean,
         "std": std,
     }
-    
-    # 不再进行归一化，直接返回统计信息
-    get_stats(
-        codes,
-        fabric=fabric,
-        message=f"====codes {split}====",
-    )
-    
+    if normalize_codes:
+        codes = normalize_code(codes, code_stats)
+        max_normalized, min_normalized, _, _ = get_stats(
+            codes,
+            fabric=fabric,
+            message=f"====normalized codes {split}====",
+        )
+    else:
+        max_normalized, min_normalized = max, min
+    code_stats.update({
+        "max_normalized": max_normalized.item(),
+        "min_normalized": min_normalized.item(),
+    })
     return code_stats
 
 
