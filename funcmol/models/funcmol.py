@@ -163,8 +163,8 @@ class FuncMol(nn.Module):
                 - y (torch.Tensor): Tensor of shape (n_chains, code_dim) with added Gaussian noise.
                 - torch.Tensor: Tensor of zeros with the same shape as `y`.
         """
-        # uniform noise
-        y = torch.empty((n_chains, code_dim), device=self.device, dtype=torch.float32).uniform_(code_stats["min_normalized"], code_stats["max_normalized"])
+        # uniform noise - no longer use normalized bounds
+        y = torch.empty((n_chains, code_dim), device=self.device, dtype=torch.float32).uniform_(-1, 1)
 
         # gaussian noise
         y = add_noise_to_code(y, self.smooth_sigma)
@@ -219,7 +219,7 @@ class FuncMol(nn.Module):
             torch.cuda.empty_cache()
 
         codes = torch.cat(codes_all, dim=0)
-        # mols = dec_module.codes_to_molecules(codes, unnormalize=config["normalize_codes"], fabric=fabric, config=config)
+        # mols = dec_module.codes_to_molecules(codes, unnormalize=False, fabric=fabric, config=config)  # No longer normalize
         # need to batch the codes to avoid OOM
         if config["dset"]["grid_dim"] >= 96 and codes.size(0) >= 2000:
             batch_size_render_codes = 2000
@@ -231,7 +231,7 @@ class FuncMol(nn.Module):
         mols = []
         fabric.print(f">> Splitting codes for rendering in batches of {batch_size_render_codes}")
         for batched_code in tqdm(batched_codes):
-            mols += dec.codes_to_molecules(batched_code, unnormalize=config["normalize_codes"], fabric=fabric, config=config)
+            mols += dec.codes_to_molecules(batched_code, unnormalize=False, fabric=fabric, config=config)  # No longer normalize
 
         # save the molecules in sdf file
         save_dir = os.path.join(os.getcwd(), save_dir)

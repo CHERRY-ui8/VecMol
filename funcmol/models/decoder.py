@@ -23,7 +23,7 @@ class Decoder(nn.Module):
         self.n_channels = config["n_channels"]  # Add n_channels attribute
         
         # Initialize coords using get_grid function
-        _, self.coords = get_grid(self.grid_dim)
+        _, self.coords = get_grid(self.grid_dim, resolution=0.25)
         self.coords = self.coords.to(device)
         
         self.net = EGNNVectorField(
@@ -34,6 +34,7 @@ class Decoder(nn.Module):
             n_atom_types=config["n_channels"],
             code_dim=config["code_dim"],
             cutoff=config.get("cutoff", None),  # Add cutoff parameter with default None
+            anchor_spacing=config.get("anchor_spacing", 2.0),  # Add anchor_spacing parameter with default 2.0
             device=device
         )
 
@@ -117,8 +118,9 @@ class Decoder(nn.Module):
         codes_dict = defaultdict(list)
 
         codes = codes.detach()
-        if unnormalize:
-            codes = self.unnormalize_code(codes).detach()
+        # No longer unnormalize codes
+        # if unnormalize:
+        #     codes = self.unnormalize_code(codes).detach()
 
         mols_dict, codes_dict = self.codes_to_grid(
             codes=codes,
@@ -171,7 +173,8 @@ class Decoder(nn.Module):
         for idx, grid in tqdm(enumerate(grids)):
             mol_init = get_atom_coords(grid, rad=config["dset"]["atomic_radius"])
             if mol_init is not None:
-                mol_init = _normalize_coords(mol_init, self.grid_dim)
+                # No longer normalize coordinates
+                # mol_init = _normalize_coords(mol_init, self.grid_dim)
                 num_coords = int(mol_init["coords"].size(1))
                 if num_coords <= 500:
                     mols_dict[num_coords].append(mol_init)
@@ -216,12 +219,15 @@ class Decoder(nn.Module):
                 )
                 for i in range(coords.size(0)):
                     mols[i]["coords"] = coords[i].unsqueeze(0)
-                    mols[i] = _unnormalize_coords(mols[i], grid_dim, resolution)
+                    # No longer unnormalize coordinates
+                    # mols[i] = _unnormalize_coords(mols[i], grid_dim, resolution)
             except Exception as e:
                 fabric.print(f"Error refinement: {e}")
                 for i in range(len(grouped_mol_inits[key])):
                     try:
-                        mols[i] = _unnormalize_coords(mols[i], grid_dim, resolution)
+                        # No longer unnormalize coordinates
+                        # mols[i] = _unnormalize_coords(mols[i], grid_dim, resolution)
+                        pass
                     except Exception:
                         fabric.print(
                             f"Error unnormalization: {e} for {i}/{len(grouped_mol_inits[key])}"
@@ -317,19 +323,18 @@ class Decoder(nn.Module):
     def unnormalize_code(self, codes: torch.Tensor):
         """
         Unnormalizes the given codes based on the provided normalization parameters.
+        NOTE: This function is deprecated and will be removed in future versions.
+        For now, it returns the original codes without unnormalization.
 
         Args:
             codes (torch.Tensor): The codes to be unnormalized.
             code_stats (dict): The statistics for the codes.
 
         Returns:
-            torch.Tensor: The unnormalized codes.
+            torch.Tensor: The original codes (no unnormalization applied).
         """
-        mean, std = (
-            self.code_stats["mean"].to(codes.device),
-            self.code_stats["std"].to(codes.device),
-        )
-        return codes * std + mean
+        # Return original codes without unnormalization
+        return codes
 
 
 ########################################################################################
@@ -387,20 +392,42 @@ def get_atom_coords(grid, rad=0.5):
 
 
 def _normalize_coords(mol, grid_dim):
-    mol["coords"] -= (grid_dim - 1) / 2
-    mol["coords"] /= grid_dim / 2
+    """
+    NOTE: This function is deprecated and will be removed in future versions.
+    For now, it returns the original molecule without normalization.
+    """
+    # Return original molecule without normalization
     return mol
 
 
 def _unnormalize_coords(mol, grid_dim, resolution=0.25):
-    mol["coords"] *= grid_dim / 2
-    mol["coords"] *= resolution
+    """
+    NOTE: This function is deprecated and will be removed in future versions.
+    For now, it returns the original molecule without unnormalization.
+    """
+    # Return original molecule without unnormalization
     return mol
 
 
-def get_grid(grid_dim):
-    discrete_grid = (np.arange(grid_dim) - (grid_dim // 2)) / (grid_dim // 2)
-    # 例如：当 grid_dim=8 时，discrete_grid 值为 [-1, -0.75, -0.5, -0.25, 0, 0.25, 0.5, 0.75]
+def get_grid(grid_dim, resolution=0.25):
+    """
+    Create a grid based on real-world distances.
+    
+    Args:
+        grid_dim (int): Number of grid points per dimension
+        resolution (float): Distance between grid points in Angstroms (default: 0.25)
+    
+    Returns:
+        tuple: (discrete_grid, full_grid) where discrete_grid is 1D array and full_grid is 3D coordinates
+    """
+    # Calculate the total span in Angstroms
+    total_span = (grid_dim - 1) * resolution
+    half_span = total_span / 2
+    
+    # Create grid points in real space (Angstroms)
+    discrete_grid = np.linspace(-half_span, half_span, grid_dim)
+    
+    # Create full 3D grid
     full_grid = torch.Tensor(
         [[a, b, c] for a in discrete_grid for b in discrete_grid for c in discrete_grid]
     )

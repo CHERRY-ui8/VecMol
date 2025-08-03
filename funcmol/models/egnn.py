@@ -107,6 +107,7 @@ class EGNNVectorField(nn.Module):
                  n_atom_types: int = 5,
                  code_dim: int = 128,
                  cutoff: float = None,
+                 anchor_spacing: float = 2.0,
                  device=None):
         """
         Initialize the EGNN Vector Field model.
@@ -132,7 +133,8 @@ class EGNNVectorField(nn.Module):
         self.cutoff = cutoff
 
         # Create learnable grid points and features for G_L
-        self.register_buffer('grid_points', create_grid_coords(batch_size=1, grid_size=self.grid_size, device=device).squeeze(0))
+        # 指定batch_size=1：只存储一份网格坐标，而不是为每个可能的 batch_size 都存储一份
+        self.register_buffer('grid_points', create_grid_coords(batch_size=1, grid_size=self.grid_size, device=device, anchor_spacing=anchor_spacing).squeeze(0))
         self.grid_features = nn.Parameter(torch.randn(self.grid_size**3, self.code_dim, requires_grad=True) / math.sqrt(self.code_dim)) # TODO: 是否需要初始化？
 
         # type embedding
@@ -178,7 +180,7 @@ class EGNNVectorField(nn.Module):
         query_points = query_points.reshape(-1, 3).float()  # [B * N, 3]        
         grid_coords = grid_points.unsqueeze(0).expand(batch_size, -1, -1).reshape(-1, 3)  # [B * grid_size**3, 3]
         n_points_total = query_points.size(0)
-
+        
         # 1. 初始化节点特征
         query_features = torch.zeros(n_points_total, self.code_dim, device=device)
         grid_features = codes.reshape(-1, self.code_dim)  # [B * grid_size**3, code_dim]

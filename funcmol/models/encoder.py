@@ -10,7 +10,7 @@ import numpy as np
 class GaussianSmearing(nn.Module):
     """Gaussian distance expansion for edge features."""
     
-    def __init__(self, start=0.0, stop=10.0, num_gaussians=50, type_='exp'):
+    def __init__(self, start=0.0, stop=10.0, num_gaussians=50, type_='linear'):
         super().__init__()
         self.start = start
         self.stop = stop
@@ -45,7 +45,7 @@ class GaussianSmearing(nn.Module):
 
 class CrossGraphEncoder(nn.Module):
     def __init__(self, n_atom_types, grid_size, code_dim, hidden_dim=128, num_layers=4, k_neighbors=32, atom_k_neighbors=8, 
-                 dist_version='new', cutoff=5.0, additional_edge_feat=0, edge_dim=128):
+                 dist_version='new', cutoff=5.0, additional_edge_feat=0, edge_dim=128, anchor_spacing=1.5):
         super().__init__()
         self.n_atom_types = n_atom_types
         self.grid_size = grid_size
@@ -58,9 +58,10 @@ class CrossGraphEncoder(nn.Module):
         self.cutoff = cutoff
         self.additional_edge_feat = additional_edge_feat
         self.edge_dim = edge_dim
+        self.anchor_spacing = anchor_spacing  # 锚点间距
 
         # 注册grid坐标作为buffer（不需要训练）
-        grid_coords = create_grid_coords(1, self.grid_size, device="cpu").squeeze(0)  # [n_grid, 3]
+        grid_coords = create_grid_coords(1, self.grid_size, device="cpu", anchor_spacing=self.anchor_spacing).squeeze(0)  # [n_grid, 3]
         self.register_buffer('grid_coords', grid_coords)
 
         # GNN layers
@@ -208,7 +209,7 @@ class MessagePassingGNN(MessagePassing):
         row, col = edge_index
         rel = pos[row] - pos[col]  # [E, 3]
         dist = torch.norm(rel, dim=-1, keepdim=True)  # [E, 1]
-        
+                
         # 确保数据类型正确
         x = x.float()  # 确保x是float类型
         rel = rel.float()  # 确保rel是float类型
@@ -239,13 +240,14 @@ class MessagePassingGNN(MessagePassing):
         """Message function for MessagePassing"""
         return message
 
-def create_grid_coords(batch_size, grid_size, device=None):
-    """Create grid coordinates for a given grid size.
+def create_grid_coords(batch_size, grid_size, device=None, anchor_spacing=1.5):
+    """Create anchor grid coordinates for a given grid size.
     
     Args:
         batch_size: Number of batches
-        grid_size: Size of the grid (will create grid_size^3 points)
+        grid_size: Size of the anchor grid (will create grid_size^3 anchor points)
         device: Optional device to place the tensor on. If None, uses the default device.
+        anchor_spacing: Distance between anchor points in Angstroms (default: 2.0)
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -254,9 +256,139 @@ def create_grid_coords(batch_size, grid_size, device=None):
         
     if device.type == "cuda" and not torch.cuda.is_available():
         device = torch.device("cpu")
-        
-    grid_1d = torch.linspace(-1, 1, grid_size, device=device)
+    
+    # Calculate the total span for anchor grid in Angstroms
+    # For anchor grid, we want to cover a reasonable molecular space
+    total_span = (grid_size - 1) * anchor_spacing
+    half_span = total_span / 2
+    
+    # Create anchor grid points in real space (Angstroms)
+    grid_1d = torch.linspace(-half_span, half_span, grid_size, device=device)
     mesh = torch.meshgrid(grid_1d, grid_1d, grid_1d, indexing='ij')
     coords = torch.stack(mesh, dim=-1).reshape(-1, 3)  # [n_grid, 3]
     coords = coords.unsqueeze(0).expand(batch_size, -1, -1)  # [B, n_grid, 3]
     return coords
+
+
+def analyze_distribution(dist_tensor, save_plot=False, plot_path="dist_distribution.png"):
+    """
+    Analyze distance distribution and provide cutoff suggestions
+    
+    Args:
+        dist_tensor: Distance tensor [E] or [E, 1]
+        save_plot: Whether to save distribution plot
+        plot_path: Path to save the plot
+    
+    Returns:
+        dict: Dictionary containing distribution statistics
+    """
+    import matplotlib.pyplot as plt
+    
+    # Ensure dist is 1D tensor
+    if dist_tensor.dim() == 2:
+        dist_tensor = dist_tensor.squeeze(-1)
+    
+    dist_np = dist_tensor.detach().cpu().numpy()
+    
+    # Basic statistics
+    stats = {
+        'min': float(dist_np.min()),
+        'max': float(dist_np.max()),
+        'mean': float(dist_np.mean()),
+        'median': float(np.median(dist_np)),
+        'std': float(dist_np.std()),
+        'total_edges': len(dist_np)
+    }
+    
+    # Percentile statistics
+    percentiles = [10, 25, 50, 75, 90, 95, 99]
+    for p in percentiles:
+        stats[f'p{p}'] = float(np.percentile(dist_np, p))
+    
+    # Edge ratio under different cutoffs
+    cutoffs = [2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 15.0]
+    for cutoff in cutoffs:
+        ratio = np.mean(dist_np < cutoff)
+        stats[f'ratio_cutoff_{cutoff}'] = ratio
+    
+    # Print statistics
+    print("=" * 50)
+    print("Distance Distribution Analysis Report")
+    print("=" * 50)
+    print(f"Total edges: {stats['total_edges']}")
+    print(f"Distance range: {stats['min']:.4f} - {stats['max']:.4f} Å")
+    print(f"Mean: {stats['mean']:.4f} Å")
+    print(f"Median: {stats['median']:.4f} Å")
+    print(f"Standard deviation: {stats['std']:.4f} Å")
+    print()
+    
+    print("Percentile statistics:")
+    for p in percentiles:
+        print(f"  {p}% percentile: {stats[f'p{p}']:.4f} Å")
+    print()
+    
+    print("Edge ratio under different cutoff values:")
+    for cutoff in cutoffs:
+        ratio = stats[f'ratio_cutoff_{cutoff}']
+        print(f"  Distance<{cutoff}Å: {ratio:.3f} ({ratio*100:.1f}%)")
+    print()
+    
+    # Provide cutoff suggestions
+    print("Cutoff suggestions:")
+    if stats['p90'] < 5.0:
+        print(f"  Recommended cutoff: {stats['p90']:.2f}Å (90% percentile)")
+    elif stats['p95'] < 8.0:
+        print(f"  Recommended cutoff: {stats['p95']:.2f}Å (95% percentile)")
+    else:
+        print(f"  Recommended cutoff: {stats['p99']:.2f}Å (99% percentile)")
+    
+    # Warning if distance distribution is too scattered
+    if stats['std'] > stats['mean'] * 0.5:
+        print("  Warning: Distance distribution is quite scattered, consider checking data or adjusting parameters")
+    
+    print("=" * 50)
+    
+    # Plot distribution
+    if save_plot:
+        plt.figure(figsize=(12, 8))
+        
+        # Main distribution plot
+        plt.subplot(2, 2, 1)
+        plt.hist(dist_np, bins=100, alpha=0.7, edgecolor='black')
+        plt.xlabel('Distance (Å)')
+        plt.ylabel('Frequency')
+        plt.title('Distance Distribution Histogram')
+        plt.axvline(stats['mean'], color='red', linestyle='--', label=f'Mean: {stats["mean"]:.2f}Å')
+        plt.axvline(stats['median'], color='orange', linestyle='--', label=f'Median: {stats["median"]:.2f}Å')
+        plt.legend()
+        
+        # Cumulative distribution plot
+        plt.subplot(2, 2, 2)
+        sorted_dist = np.sort(dist_np)
+        cumulative = np.arange(1, len(sorted_dist) + 1) / len(sorted_dist)
+        plt.plot(sorted_dist, cumulative)
+        plt.xlabel('Distance (Å)')
+        plt.ylabel('Cumulative Probability')
+        plt.title('Cumulative Distribution Function')
+        
+        # Edge ratio under different cutoffs
+        plt.subplot(2, 2, 3)
+        ratios = [stats[f'ratio_cutoff_{c}'] for c in cutoffs]
+        plt.bar(range(len(cutoffs)), ratios)
+        plt.xlabel('Cutoff Value (Å)')
+        plt.ylabel('Edge Ratio')
+        plt.title('Edge Ratio Under Different Cutoffs')
+        plt.xticks(range(len(cutoffs)), cutoffs)
+        
+        # Box plot
+        plt.subplot(2, 2, 4)
+        plt.boxplot(dist_np)
+        plt.ylabel('Distance (Å)')
+        plt.title('Distance Distribution Box Plot')
+        
+        plt.tight_layout()
+        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"Distribution plot saved to: {plot_path}")
+    
+    return stats

@@ -32,8 +32,10 @@ class GNFConverter(nn.Module):
                 logsumexp_eps: float = 1e-8,  # logsumexp方法的数值稳定性参数
                 inverse_square_strength: float = 1.0,  # 距离平方反比方法的强度参数
                 gradient_clip_threshold: float = 0.3,  # 梯度模长截断阈值
-                sig_sf: float = 0.01,  # softmax field的sigma参数
-                sig_mag: float = 0.1,  # magnitude的sigma参数
+                sig_sf: float = 0.1,  # softmax field的sigma参数
+                sig_mag: float = 0.45,  # magnitude的sigma参数
+                gradient_sampling_candidate_multiplier: int = 10,  # 梯度采样候选点倍数
+                gradient_sampling_temperature: float = 0.1,  # 梯度采样温度参数
                 device: str = "cuda" if torch.cuda.is_available() else "cpu"):  # 原子类型比例系数
         super().__init__()
         self.sigma = sigma
@@ -51,6 +53,8 @@ class GNFConverter(nn.Module):
         self.gradient_clip_threshold = gradient_clip_threshold  # 保存梯度模长截断阈值
         self.sig_sf = sig_sf  # 保存softmax field的sigma参数
         self.sig_mag = sig_mag  # 保存magnitude的sigma参数
+        self.gradient_sampling_candidate_multiplier = gradient_sampling_candidate_multiplier  # 保存梯度采样候选点倍数
+        self.gradient_sampling_temperature = gradient_sampling_temperature  # 保存梯度采样温度参数
         
         # 为不同类型的原子设置不同的 sigma 参数
         # 原子类型索引映射：0=C, 1=H, 2=O, 3=N, 4=F
@@ -86,7 +90,7 @@ class GNFConverter(nn.Module):
             
         n_atom_types = 5  # 默认支持5种原子类型
         batch_size, n_points, _ = query_points.shape
-        device = self.device
+        device = query_points.device  # 使用输入张量的设备，而不是converter的设备
         vector_field = torch.zeros(batch_size, n_points, n_atom_types, 3, device=device)
         
         for b in range(batch_size):
@@ -191,7 +195,7 @@ class GNFConverter(nn.Module):
                         # 计算最终field
                         weighted_gradients = diff_normed.squeeze(-1) * w_softmax.unsqueeze(-1) * w_mag.unsqueeze(-1)  # (n_type_atoms, n_points, 3)
                         type_gradients = torch.sum(weighted_gradients, dim=0)  # (n_points, 3)
-                        type_gradients = type_gradients * 30
+                        type_gradients = type_gradients
                     
                     elif self.gradient_field_method == "distance":  # distance版本：使用距离作为magnitude权重
                         distances = torch.sqrt(dist_sq.squeeze(-1))  # (n_type_atoms, n_points)
@@ -234,8 +238,28 @@ class GNFConverter(nn.Module):
             types_list = []
             # 对每个原子类型分别做流动和聚类
             for t in range(n_atom_types):
-                # 1. 初始化采样点（可用均匀网格或随机点）
-                z = torch.rand(n_query_points, 3, device=device) * 2 - 1  # [-1,1]区间
+                # 1. 初始化采样点 - 智能梯度场采样策略
+                # 不再在整个空间随机洒点，而是优先在梯度场强度大的位置采样
+                # 这样可以提高采样效率，减少在无意义区域的采样
+                init_min, init_max = -6.0, 6.0  # 使用更大的默认范围
+                n_candidates = n_query_points * self.gradient_sampling_candidate_multiplier  # 生成候选点
+                candidate_points = torch.rand(n_candidates, 3, device=device) * (init_max - init_min) + init_min
+                
+                # 计算候选点的梯度场强度
+                candidate_batch = candidate_points.unsqueeze(0)  # [1, n_candidates, 3]
+                candidate_field = decoder(candidate_batch, codes[b:b+1])  # [1, n_candidates, n_atom_types, 3]
+                candidate_grad = candidate_field[0, :, t, :]  # [n_candidates, 3]
+                
+                # 计算梯度场强度（模长）
+                grad_magnitudes = torch.norm(candidate_grad, dim=1)  # [n_candidates]
+                
+                # 根据梯度场强度进行加权采样，优先选择梯度场大的位置
+                # 使用softmax将梯度强度转换为概率分布，温度参数控制采样的尖锐程度
+                probabilities = torch.softmax(grad_magnitudes / self.gradient_sampling_temperature, dim=0)
+                
+                # 从候选点中采样n_query_points个点，使用加权采样策略
+                sampled_indices = torch.multinomial(probabilities, n_query_points, replacement=False)
+                z = candidate_points[sampled_indices]  # [n_query_points, 3]
                 
                 # 2. 梯度上升（每次迭代都重新计算梯度！）
                 for _ in range(self.n_iter):

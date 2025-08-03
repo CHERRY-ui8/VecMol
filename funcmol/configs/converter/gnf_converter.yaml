@@ -1,8 +1,6 @@
 # 一定注意，这里的参数都是针对归一化到[-1,1]的坐标系而言的
 sigma: 1
-n_query_points: 3000 # guassian_mag版本需要更多点，因为很多点都不会动，是死点
 n_iter: 2000
-step_size: 0.005 # 曾经用过0.1（手动放大field之前），改变了field定义之后，需要放大step_size很多倍
 # DBSCAN聚类参数
 eps: 0.01      # 邻域半径，单位为Å。越小越严格（原子密集度高就设小），目前调得很小，但是如果使用预测的梯度场，需要适当放大
 min_samples: 10 # 至少多少个点才能形成一个"原子簇" TODO：这个参数可能需要调整（5的时候感觉有点小）
@@ -12,10 +10,29 @@ sigma_ratios:
   O: 1.1    # 氧原子，中等 sigma
   'N': 1.0    # 氮原子，略小于氧原子
   F: 1.2    # 氟原子，略大于氧原子
-gradient_field_method: gaussian_mag # softmax
+gradient_field_method: gaussian_mag # softmax, gaussian_mag, logsumexp, inverse_square
 temperature: 0.01 # 温度越高，分布越尖锐，越容易收敛（很可能极端地收敛到单个原子）；温度越低，分布越平缓，越不易收敛
 logsumexp_eps: 1e-8  # logsumexp方法的数值稳定性参数
 inverse_square_strength: 1.0 # 距离平方反比方法的强度参数
 gradient_clip_threshold: 0.3 # 梯度模长截断阈值
-sig_sf: 0.01
-sig_mag: 0.1
+
+# 不同方法的参数配置
+method_configs:
+  gaussian_mag:
+    n_query_points: 3000  # gaussian_mag版本需要更多点，因为很多点都不会动，是死点
+    step_size: 0.005      # 曾经用过0.1（手动放大field之前），改变了field定义之后，需要放大step_size很多倍
+    sig_sf: 0.1
+    sig_mag: 0.45
+
+  sfnorm:
+    n_query_points: 2000
+    step_size: 0.005
+    sig_sf: 0.1
+    sig_mag: 2
+  
+
+default_config: # softmax, logsumexp, inverse_square
+  n_query_points: 2500
+  step_size: 0.01
+  sig_sf: 0.1
+  sig_mag: 0.45

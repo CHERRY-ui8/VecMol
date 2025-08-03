@@ -10,7 +10,7 @@ from funcmol.utils.constants import PADDING_INDEX
 from funcmol.utils.gnf_converter import GNFConverter
 from torch_geometric.utils import to_dense_batch
 from funcmol.models.encoder import CrossGraphEncoder
-from funcmol.models.decoder import Decoder, _normalize_coords, get_atom_coords
+from funcmol.models.decoder import Decoder, get_atom_coords
 from funcmol.utils.utils_base import convert_xyzs_to_sdf, save_xyz
 from funcmol.utils.utils_vis import visualize_voxel_grid
 import time
@@ -82,16 +82,18 @@ def create_neural_field(config: dict, fabric: object) -> tuple:
     # Initialize the encoder
     enc = CrossGraphEncoder(
         n_atom_types=config["dset"]["n_channels"],
-        grid_size=config["encoder"]["grid_size"],
+        grid_size=config["dset"]["grid_size"],
         code_dim=config["encoder"]["code_dim"],
         hidden_dim=config["encoder"]["hidden_dim"],
         num_layers=config["encoder"]["num_layers"],
         k_neighbors=config["encoder"]["k_neighbors"],
-        atom_k_neighbors=config["encoder"]["atom_k_neighbors"]
+        atom_k_neighbors=config["encoder"]["atom_k_neighbors"],
+        anchor_spacing=config["dset"]["anchor_spacing"]
     )
     # Initialize the decoder
     dec = Decoder({
-        "grid_size": config["decoder"]["grid_size"],
+        "grid_size": config["dset"]["grid_size"],
+        "anchor_spacing": config["dset"]["anchor_spacing"],
         "hidden_dim": config["decoder"]["hidden_dim"],
         "n_layers": config["decoder"]["n_layers"],
         "k_neighbors": config["decoder"]["k_neighbors"],
@@ -173,55 +175,55 @@ def train_nf(
                 # 如果已经是batch格式，确保维度正确
                 target_field = target_field.view(B, n_points, -1, 3)
         
-        # 确保pred_field和target_field的维度匹配
-        if pred_field.shape != target_field.shape:
-            fabric.print(f"[Warning] Shape mismatch: pred_field {pred_field.shape} vs target_field {target_field.shape}")
-            # 尝试调整target_field的维度以匹配pred_field
-            if target_field.shape[1] != pred_field.shape[1]:
-                # 如果点数不匹配，取较小的那个
-                min_points = min(pred_field.shape[1], target_field.shape[1])
-                pred_field = pred_field[:, :min_points, :, :]
-                target_field = target_field[:, :min_points, :, :]
+        # # 确保pred_field和target_field的维度匹配
+        # if pred_field.shape != target_field.shape:
+        #     fabric.print(f"[Warning] Shape mismatch: pred_field {pred_field.shape} vs target_field {target_field.shape}")
+        #     # 尝试调整target_field的维度以匹配pred_field
+        #     if target_field.shape[1] != pred_field.shape[1]:
+        #         # 如果点数不匹配，取较小的那个
+        #         min_points = min(pred_field.shape[1], target_field.shape[1])
+        #         pred_field = pred_field[:, :min_points, :, :]
+        #         target_field = target_field[:, :min_points, :, :]
         
-        # # 调试：输出5个query_point的梯度场大小（每2000个batch输出一次）
-        # if i % 2000 == 0 and fabric.global_rank == 0:
-        #     b_idx = 0  # 只看第一个样本
-        #     n_points = pred_field.shape[1]
+        # 调试：输出5个query_point的梯度场大小（每2000个batch输出一次）
+        if i % 2000 == 0 and fabric.global_rank == 0:
+            b_idx = 0  # 只看第一个样本
+            n_points = pred_field.shape[1]
             
-        #     max_idx = min(n_points - 1, target_field.shape[1] - 1) if target_field.dim() >= 2 else 0
-        #     if max_idx < 4:  # 如果点数太少，跳过调试
-        #         fabric.print(f"[Debug] Not enough points for debugging (max_idx: {max_idx})")
-        #         continue
+            max_idx = min(n_points - 1, target_field.shape[1] - 1) if target_field.dim() >= 2 else 0
+            if max_idx < 4:  # 如果点数太少，跳过调试
+                fabric.print(f"[Debug] Not enough points for debugging (max_idx: {max_idx})")
+                continue
                 
-        #     idxs = random.sample(range(max_idx + 1), min(5, max_idx + 1))
-        #     norms = []
-        #     for idx in idxs:
-        #         # 取该query_point所有原子类型的3D向量，计算范数
-        #         vec = pred_field[b_idx, idx]  # [n_atom_types, 3]
-        #         norm = torch.norm(vec, dim=-1)  # [n_atom_types]
-        #         norms.append(norm.detach().cpu().numpy())
-        #     fabric.print(f"[Debug] 5个query_point的vector field范数: {norms}")
+            idxs = random.sample(range(max_idx + 1), min(5, max_idx + 1))
+            norms = []
+            for idx in idxs:
+                # 取该query_point所有原子类型的3D向量，计算范数
+                vec = pred_field[b_idx, idx]  # [n_atom_types, 3]
+                norm = torch.norm(vec, dim=-1)  # [n_atom_types]
+                norms.append(norm.detach().cpu().numpy())
+            fabric.print(f"[Debug] 5个query_point的vector field范数: {norms}")
 
-        #     target_norms = []
-        #     rmsds = []
-        #     for idx in idxs:
-        #         # 确保target_field有正确的维度
-        #         if target_field.dim() == 4:
-        #             target_vec = target_field[b_idx, idx]  # [n_atom_types, 3]
-        #         elif target_field.dim() == 3:
-        #             target_vec = target_field[b_idx, idx]  # [n_atom_types, 3]
-        #         else:
-        #             fabric.print(f"[Debug] Unexpected target_field dimension: {target_field.dim()}")
-        #             continue
+            target_norms = []
+            rmsds = []
+            for idx in idxs:
+                # 确保target_field有正确的维度
+                if target_field.dim() == 4:
+                    target_vec = target_field[b_idx, idx]  # [n_atom_types, 3]
+                elif target_field.dim() == 3:
+                    target_vec = target_field[b_idx, idx]  # [n_atom_types, 3]
+                else:
+                    fabric.print(f"[Debug] Unexpected target_field dimension: {target_field.dim()}")
+                    continue
                     
-        #         target_norm = torch.norm(target_vec, dim=-1)  # [n_atom_types]
-        #         target_norms.append(target_norm.detach().cpu().numpy())
-        #         # 计算RMSD
-        #         pred_vec = pred_field[b_idx, idx]  # [n_atom_types, 3]
-        #         rmsd = compute_rmsd(pred_vec, target_vec)
-        #         rmsds.append(rmsd.item() if hasattr(rmsd, 'item') else float(rmsd))
-        #     fabric.print(f"[Debug] 5个query_point的target field标准答案范数: {target_norms}")
-        #     fabric.print(f"[Debug] 5个query_point的vector field与target field RMSD: {rmsds}")
+                target_norm = torch.norm(target_vec, dim=-1)  # [n_atom_types]
+                target_norms.append(target_norm.detach().cpu().numpy())
+                # 计算RMSD
+                pred_vec = pred_field[b_idx, idx]  # [n_atom_types, 3]
+                rmsd = compute_rmsd(pred_vec, target_vec)
+                rmsds.append(rmsd.item() if hasattr(rmsd, 'item') else float(rmsd))
+            fabric.print(f"[Debug] 5个query_point的target field标准答案范数: {target_norms}")
+            fabric.print(f"[Debug] 5个query_point的vector field与target field RMSD: {rmsds}")
 
         # 计算损失
         loss = criterion(pred_field, target_field)
@@ -620,7 +622,8 @@ def load_neural_field(nf_checkpoint: dict, fabric: object, config: dict = None) 
     
     # Initialize the decoder
     dec = Decoder({
-        "grid_size": config["decoder"]["grid_size"],
+        "grid_size": config["dset"]["grid_size"],
+        "anchor_spacing": config["dset"]["anchor_spacing"],
         "hidden_dim": config["decoder"]["hidden_dim"],
         "n_layers": config["decoder"]["n_layers"],
         "k_neighbors": config["decoder"]["k_neighbors"],
@@ -633,12 +636,13 @@ def load_neural_field(nf_checkpoint: dict, fabric: object, config: dict = None) 
     
     enc = CrossGraphEncoder(
         n_atom_types=config["dset"]["n_channels"],
-        grid_size=config["encoder"]["grid_size"],
+        grid_size=config["dset"]["grid_size"],
         code_dim=config["encoder"]["code_dim"],
         hidden_dim=config["encoder"]["hidden_dim"],
         num_layers=config["encoder"]["num_layers"],
         k_neighbors=config["encoder"]["k_neighbors"],
-        atom_k_neighbors=config["encoder"]["atom_k_neighbors"]
+        atom_k_neighbors=config["encoder"]["atom_k_neighbors"],
+        anchor_spacing=config["dset"]["anchor_spacing"]
     )
     enc = load_network(nf_checkpoint, enc, fabric, net_name="enc")
     # Disable torch.compile for encoder due to torch_cluster compatibility issues

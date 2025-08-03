@@ -3,7 +3,6 @@ code_dim: 128
 spatial: false
 hidden_dim: 128
 coord_dim: 3
-n_layers: 3
+n_layers: 4
 input_scale: 32
-grid_size: 8
-k_neighbors: 8
+k_neighbors: 16

@@ -68,20 +68,22 @@ class FieldDataset(Dataset):
         self.n_points = n_points
         self.sample_full_grid = sample_full_grid
         self.grid_dim = grid_dim
-        self.scale_factor = 1 / (self.resolution * self.grid_dim / 2)
+        # Remove scale_factor - no longer needed for normalization
+        # self.scale_factor = 1 / (self.resolution * self.grid_dim / 2)
 
         self._read_data()
         self._filter_by_elements(elements)
 
-        # normalize the increments
+        # Create increments based on real-world distances (Angstroms)
+        # Each increment represents a step in Angstrom units
         self.increments = torch.tensor(
             list(itertools.product(list(range(-cubes_around, cubes_around+1)), repeat=3)),
             dtype=torch.float32
-        ) * self.scale_factor  # 标准化increments以匹配分子坐标的缩放
+        ) * self.resolution  # Scale by resolution to get real distances
         
         self.targeted_sampling_ratio = targeted_sampling_ratio if split == "train" else 0
         self.field_idxs = torch.arange(len(self.data))
-        self.discrete_grid, self.full_grid_high_res = get_grid(self.grid_dim)
+        self.discrete_grid, self.full_grid_high_res = get_grid(self.grid_dim, self.resolution)
         
         # 使用传入的GNFConverter实例
         self.gnf_converter = gnf_converter
@@ -180,7 +182,8 @@ class FieldDataset(Dataset):
 
         sample["coords"] = self._center_molecule(sample["coords"])
 
-        sample["coords"] = self._scale_molecule(sample["coords"]) # 原来的 funcmol 根本就没有用 _scale_molecule
+        # 移除分子缩放，保持原始坐标
+        # sample["coords"] = self._scale_molecule(sample["coords"]) # 原来的 funcmol 根本就没有用 _scale_molecule
 
         return sample
 
@@ -196,11 +199,11 @@ class FieldDataset(Dataset):
 
         if self.targeted_sampling_ratio >= 1:
             # 1. 目标采样：原子周围的点
-            # 注意：coords 已经通过 _scale_molecule 进行了缩放
-            # 现在 coords 的范围应该在 [-1, 1] 附近
+            # 注意：coords 现在保持原始坐标，不再进行缩放
+            # coords 的范围是真实的埃单位
             rand_points = coords
             # 添加小的噪声，噪声大小应该与网格分辨率相关
-            noise = torch.randn_like(rand_points, device=device) / self.grid_dim / 4  # 或者这里乘scale_factor，总之要找一点真实物理世界的解释
+            noise = torch.randn_like(rand_points, device=device) * self.resolution / 4  # Scale noise by resolution
             rand_points = (rand_points + noise)  # .floor().long() TODO：如果这里floor()再long()，会全部变成-1,0,1
             
             # 计算每个原子周围需要采样的点数
@@ -209,9 +212,12 @@ class FieldDataset(Dataset):
             
             # 在原子周围采样
             rand_points = (rand_points.unsqueeze(1) + self.increments[random_indices].to(device)).view(-1, 3)
-            min_bound = -1 # -(self.grid_dim // 2)
-            max_bound = 1 # (self.grid_dim - 1) // 2
-            rand_points = torch.clamp(rand_points, min_bound, max_bound).float() # / (self.grid_dim // 2)
+            # Calculate bounds based on real-world distances
+            total_span = (self.grid_dim - 1) * self.resolution
+            half_span = total_span / 2
+            min_bound = -half_span
+            max_bound = half_span
+            rand_points = torch.clamp(rand_points, min_bound, max_bound).float()
             
             # 2. 随机采样网格点
             grid_indices = torch.randperm(grid_size, device=device)[:self.n_points]
@@ -266,10 +272,8 @@ class FieldDataset(Dataset):
     def _scale_molecule(self, coords) -> torch.Tensor:
         """
         Scales the coordinates of a molecule.
-
-        This method scales the input coordinates by multiplying the masked coordinates
-        by the scale factor (1 / (resolution * grid_dim / 2)). The scaling
-        is applied only to the coordinates that are not equal to the PADDING_INDEX.
+        NOTE: This function is deprecated and will be removed in future versions.
+        For now, it returns the original coordinates without scaling.
 
         Args:
             coords (torch.Tensor): A tensor containing the coordinates of the molecule.
@@ -277,29 +281,26 @@ class FieldDataset(Dataset):
                        and the second dimension contains the coordinate values.
 
         Returns:
-            torch.Tensor: The scaled coordinates tensor.
+            torch.Tensor: The original coordinates tensor (no scaling applied).
         """
-        mask = coords[:, 0] != PADDING_INDEX
-        masked_coords = coords[mask]
-        masked_coords = masked_coords * self.scale_factor
-        coords[mask] = masked_coords
+        # Return original coordinates without scaling
         return coords
 
     def _scale_batch_molecules(self, batch) -> torch.Tensor:
         """
         Scales the coordinates of molecules in a batch.
+        NOTE: This function is deprecated and will be removed in future versions.
+        For now, it returns the original coordinates without scaling.
 
         Args:
             batch (dict): A dictionary containing the batch data. It must include a key "coords"
                           which holds the coordinates of the molecules.
 
         Returns:
-            torch.Tensor: The scaled coordinates of the molecules.
+            torch.Tensor: The original coordinates of the molecules (no scaling applied).
         """
-        coords = batch["coords"]
-        mask = coords[:, :, 0] != PADDING_INDEX
-        coords[mask] = coords[mask] * self.scale_factor
-        return coords
+        # Return original coordinates without scaling
+        return batch["coords"]
 
     def _rotate_coords(self, sample, rot_matrix=None) -> torch.Tensor:
         """
@@ -451,16 +452,42 @@ def create_gnf_converter(config: dict, device: str = "cpu") -> GNFConverter:
         'F': 1.2
     }
     
+    # 获取梯度场方法
+    gradient_field_method = gnf_config.get("gradient_field_method", "softmax")
+    
+    # 获取方法特定的配置
+    method_configs = gnf_config.get("method_configs", {})
+    default_config = gnf_config.get("default_config", {})
+    
+    # 根据方法选择参数配置
+    if gradient_field_method in method_configs:
+        method_config = method_configs[gradient_field_method]
+        # 使用方法特定的参数
+        n_query_points = method_config.get("n_query_points", config["dset"]["n_points"])
+        step_size = method_config.get("step_size", gnf_config.get("step_size", 0.003))
+        sig_sf = method_config.get("sig_sf", gnf_config.get("sig_sf", 0.1))
+        sig_mag = method_config.get("sig_mag", gnf_config.get("sig_mag", 0.45))
+    else:
+        # 使用默认配置
+        n_query_points = default_config.get("n_query_points", config["dset"]["n_points"])
+        step_size = default_config.get("step_size", gnf_config.get("step_size", 0.003))
+        sig_sf = default_config.get("sig_sf", gnf_config.get("sig_sf", 0.1))
+        sig_mag = default_config.get("sig_mag", gnf_config.get("sig_mag", 0.45))
+    
     return GNFConverter(
         sigma=gnf_config.get("sigma", 1.0),
-        n_query_points=config["dset"]["n_points"],
+        n_query_points=n_query_points,
         n_iter=gnf_config.get("n_iter", 2000),
-        step_size=gnf_config.get("step_size", 0.003),
+        step_size=step_size,
         eps=gnf_config.get("eps", 0.01),
         min_samples=gnf_config.get("min_samples", 5),
         sigma_ratios=gnf_config.get("sigma_ratios", default_sigma_ratios),
-        gradient_field_method=gnf_config.get("gradient_field_method", "softmax"),
+        gradient_field_method=gradient_field_method,
         temperature=gnf_config.get("temperature", 0.008),
         logsumexp_eps=gnf_config.get("logsumexp_eps", 1e-8),
+        inverse_square_strength=gnf_config.get("inverse_square_strength", 1.0),
+        gradient_clip_threshold=gnf_config.get("gradient_clip_threshold", 0.3),
+        sig_sf=sig_sf,
+        sig_mag=sig_mag,
         device=device
     ) 

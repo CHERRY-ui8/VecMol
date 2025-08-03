@@ -210,14 +210,10 @@ class GNFVisualizer(MoleculeVisualizer):
         ax3.set_title("Comparison")
         ax3.legend(loc='upper right', bbox_to_anchor=(1.0, 1.0))
         
+        # 使用动态坐标轴范围设置
+        coords_list = [orig_coords_np, recon_coords_np]
         for ax in [ax1, ax2, ax3]:
-            ax.set_xlabel('X')
-            ax.set_ylabel('Y')
-            ax.set_zlabel('Z')
-            ax.grid(True)
-            ax.set_xlim([-1, 1])
-            ax.set_ylim([-1, 1])
-            ax.set_zlim([-1, 1])
+            self._setup_3d_axis(ax, coords_list, margin=1.0)
         
         plt.suptitle(title, fontsize=16)
         plt.tight_layout()
@@ -265,13 +261,10 @@ class GNFVisualizer(MoleculeVisualizer):
             ax.scatter(points_np[:, 0], points_np[:, 1], points_np[:, 2], 
                       c='red', marker='.', s=5, label='Current Points', alpha=0.4)
         
-        ax.set_xlabel('X')
-        ax.set_ylabel('Y')
-        ax.set_zlabel('Z')
-        ax.grid(True)
-        ax.set_xlim([-1, 1])
-        ax.set_ylim([-1, 1])
-        ax.set_zlim([-1, 1])
+        # 使用动态坐标轴范围设置
+        coords_list = [coords_np, points_np]
+        self._setup_3d_axis(ax, coords_list, margin=1.0)
+        
         ax.set_title(f"Iteration {iteration}")
         ax.legend(loc='upper right', bbox_to_anchor=(1.0, 1.0))
         
@@ -301,9 +294,21 @@ class GNFVisualizer(MoleculeVisualizer):
         
         all_atom_types = list(range(5))
         
+        # 根据实际数据范围计算初始点的分布范围
+        coords_min = gt_valid_coords.min(dim=0)[0]
+        coords_max = gt_valid_coords.max(dim=0)[0]
+        coords_range = coords_max - coords_min
+        margin = coords_range * 0.5  # TODO：添加50%的边距
+        
+        init_min = coords_min - margin
+        init_max = coords_max + margin
+        
+        print(f"初始点范围: X[{init_min[0]:.3f}, {init_max[0]:.3f}], Y[{init_min[1]:.3f}, {init_max[1]:.3f}], Z[{init_min[2]:.3f}, {init_max[2]:.3f}]")
+        
         z_dict = {}
         for atom_type in all_atom_types:
-            z_dict[atom_type] = torch.rand(converter.n_query_points, 3, device=device) * 2 - 1
+            # 在数据范围内随机初始化点
+            z_dict[atom_type] = torch.rand(converter.n_query_points, 3, device=device) * (init_max - init_min) + init_min
         
         def gnf_func(points):
             """一次性计算所有原子类型的梯度场"""
@@ -339,7 +344,7 @@ class GNFVisualizer(MoleculeVisualizer):
                         grad_norm = torch.norm(type_gradients, dim=1).mean().item()
                         print(f"Iteration {i}, Atom type {atom_type}: grad norm = {grad_norm:.6f}")
                     
-                    z_dict[atom_type] = z + converter.step_size * type_gradients
+                    z_dict[atom_type] = z + torch.tensor(converter.step_size, device=z.device) * type_gradients
             
             if i % save_interval == 0 or i == converter.n_iter - 1:
                 frame_path = os.path.join(self.output_dir, f"frame_sample_{sample_idx}_{i:04d}.png")
@@ -379,7 +384,10 @@ class GNFVisualizer(MoleculeVisualizer):
                     metrics_history['kl_1to2'].append(kl_1to2)
                     metrics_history['kl_2to1'].append(kl_2to1)
         
-        gif_path = os.path.join(self.output_dir, f"{animation_name}.gif")
+        # 获取gradient_field_method参数
+        gradient_field_method = getattr(converter, 'gradient_field_method', 'unknown')
+        
+        gif_path = os.path.join(self.output_dir, f"{animation_name}_{field_option}_{gradient_field_method}.gif")
         with imageio.get_writer(gif_path, mode='I', duration=0.3) as writer:
             for frame_path in frame_paths:
                 writer.append_data(imageio.imread(frame_path))
@@ -402,7 +410,7 @@ class GNFVisualizer(MoleculeVisualizer):
             final_points = torch.empty((0, 3), device=device)
             final_types = torch.empty((0,), device=device)
         
-        comparison_path = os.path.join(self.output_dir, f"{animation_name}_final.png")
+        comparison_path = os.path.join(self.output_dir, f"{animation_name}_{field_option}_{gradient_field_method}_final.png")
         self.visualize_molecule_comparison(
             gt_valid_coords,
             final_points,
@@ -448,11 +456,12 @@ def visualize_1d_gradient_field_comparison(
     codes: torch.Tensor,
     sample_idx: int = 0,
     atom_type: int = 0,  # 0=C, 1=H, 2=O, 3=N, 4=F
-    x_range: tuple = (-1, 1),
+    x_range: Optional[tuple] = None,  # 如果为None，将根据数据自动计算
     n_points: int = 3000,
     y_coord: float = 0.0,  # y坐标固定值
     z_coord: float = 0.0,  # z坐标固定值
-    save_path: Optional[str] = None
+    save_path: Optional[str] = None,
+    field_option: str = "predicted_field"
 ):
     """
     可视化一维方向上的梯度场对比
@@ -468,8 +477,8 @@ def visualize_1d_gradient_field_comparison(
         codes: 编码器输出的codes [batch, code_dim]
         sample_idx: 要可视化的样本索引
         atom_type: 要可视化的原子类型 (0=C, 1=H, 2=O, 3=N, 4=F)
-        x_range: x轴范围，默认(-1, 1)
-        n_points: 采样点数，默认1000
+        x_range: x轴范围，如果为None则根据数据自动计算
+        n_points: 采样点数，默认3000
         y_coord: y坐标固定值，默认0.0
         z_coord: z坐标固定值，默认0.0
         save_path: 保存图片的路径，如果为None则显示图片
@@ -486,6 +495,14 @@ def visualize_1d_gradient_field_comparison(
     if target_atoms.sum() == 0:
         print(f"警告：样本 {sample_idx} 中没有类型为 {['C', 'H', 'O', 'N', 'F'][atom_type]} 的原子")
         return None
+    
+    # 如果x_range为None，根据数据自动计算合适的范围
+    if x_range is None:
+        x_min = gt_valid_coords[:, 0].min().item()
+        x_max = gt_valid_coords[:, 0].max().item()
+        margin = (x_max - x_min) * 0.2  # 添加20%的边距
+        x_range = (x_min - margin, x_max + margin)
+        print(f"自动计算x轴范围: {x_range}")
     
     # 创建采样点：所有点都在同一条直线上
     x = torch.linspace(x_range[0], x_range[1], n_points, device=device)
@@ -544,7 +561,7 @@ def visualize_1d_gradient_field_comparison(
                    rotation=90, verticalalignment='top', fontsize=8)
     
     ax1.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
-    ax1.set_xlabel('X Position (normalized)', fontsize=12)
+    ax1.set_xlabel('X Position (Å)', fontsize=12)
     ax1.set_ylabel('Gradient Field Magnitude', fontsize=12)
     ax1.set_title(f'Gradient Field Magnitude - {["C", "H", "O", "N", "F"][atom_type]} Atoms\n'
                 f'Sample {sample_idx}, Line: y={y_coord:.2f}, z={z_coord:.2f}', fontsize=14)
@@ -573,7 +590,7 @@ def visualize_1d_gradient_field_comparison(
             ax2.axvline(x=pos, color='green', linestyle=':', alpha=0.7, linewidth=1.5)
     
     ax2.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
-    ax2.set_xlabel('X Position (normalized)', fontsize=12)
+    ax2.set_xlabel('X Position (Å)', fontsize=12)
     ax2.set_ylabel('X Component of Gradient Field', fontsize=12)
     ax2.set_title(f'X Direction Component - {["C", "H", "O", "N", "F"][atom_type]} Atoms\n'
                 f'(Positive = Right, Negative = Left)', fontsize=14)
@@ -602,7 +619,7 @@ def visualize_1d_gradient_field_comparison(
             ax3.axvline(x=pos, color='green', linestyle=':', alpha=0.7, linewidth=1.5)
     
     ax3.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
-    ax3.set_xlabel('X Position (normalized)', fontsize=12)
+    ax3.set_xlabel('X Position (Å)', fontsize=12)
     ax3.set_ylabel('Y Component of Gradient Field', fontsize=12)
     ax3.set_title(f'Y Direction Component - {["C", "H", "O", "N", "F"][atom_type]} Atoms\n'
                 f'(Positive = Up, Negative = Down)', fontsize=14)
@@ -631,7 +648,7 @@ def visualize_1d_gradient_field_comparison(
             ax4.axvline(x=pos, color='green', linestyle=':', alpha=0.7, linewidth=1.5)
     
     ax4.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
-    ax4.set_xlabel('X Position (normalized)', fontsize=12)
+    ax4.set_xlabel('X Position (Å)', fontsize=12)
     ax4.set_ylabel('Z Component of Gradient Field', fontsize=12)
     ax4.set_title(f'Z Direction Component - {["C", "H", "O", "N", "F"][atom_type]} Atoms\n'
                 f'(Positive = Forward, Negative = Backward)', fontsize=14)
@@ -657,7 +674,7 @@ def visualize_1d_gradient_field_comparison(
             ax5.axvline(x=pos, color='green', linestyle=':', alpha=0.7, linewidth=1.5)
     
     ax5.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
-    ax5.set_xlabel('X Position (normalized)', fontsize=12)
+    ax5.set_xlabel('X Position (Å)', fontsize=12)
     ax5.set_ylabel('Magnitude Error', fontsize=12)
     ax5.set_title(f'Magnitude Error Analysis - {["C", "H", "O", "N", "F"][atom_type]} Atoms', fontsize=14)
     ax5.grid(True, alpha=0.3)
@@ -681,7 +698,7 @@ def visualize_1d_gradient_field_comparison(
             ax6.axvline(x=pos, color='green', linestyle=':', alpha=0.7, linewidth=1.5)
     
     ax6.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
-    ax6.set_xlabel('X Position (normalized)', fontsize=12)
+    ax6.set_xlabel('X Position (Å)', fontsize=12)
     ax6.set_ylabel('X Component Error', fontsize=12)
     ax6.set_title(f'X Direction Error Analysis - {["C", "H", "O", "N", "F"][atom_type]} Atoms', fontsize=14)
     ax6.grid(True, alpha=0.3)
@@ -705,7 +722,7 @@ def visualize_1d_gradient_field_comparison(
             ax7.axvline(x=pos, color='green', linestyle=':', alpha=0.7, linewidth=1.5)
     
     ax7.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
-    ax7.set_xlabel('X Position (normalized)', fontsize=12)
+    ax7.set_xlabel('X Position (Å)', fontsize=12)
     ax7.set_ylabel('Y Component Error', fontsize=12)
     ax7.set_title(f'Y Direction Error Analysis - {["C", "H", "O", "N", "F"][atom_type]} Atoms', fontsize=14)
     ax7.grid(True, alpha=0.3)
@@ -729,7 +746,7 @@ def visualize_1d_gradient_field_comparison(
             ax8.axvline(x=pos, color='green', linestyle=':', alpha=0.7, linewidth=1.5)
     
     ax8.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
-    ax8.set_xlabel('X Position (normalized)', fontsize=12)
+    ax8.set_xlabel('X Position (Å)', fontsize=12)
     ax8.set_ylabel('Z Component Error', fontsize=12)
     ax8.set_title(f'Z Direction Error Analysis - {["C", "H", "O", "N", "F"][atom_type]} Atoms', fontsize=14)
     ax8.grid(True, alpha=0.3)
@@ -865,18 +882,44 @@ def main():
         if sigma_ratios is not None and not isinstance(sigma_ratios, dict):
             sigma_ratios = OmegaConf.to_container(sigma_ratios, resolve=True)
         
+        # 获取梯度场方法
+        gradient_field_method = gnf_config.get("gradient_field_method", "softmax")
+        
+        # 获取方法特定的配置
+        method_configs = gnf_config.get("method_configs", {})
+        default_config = gnf_config.get("default_config", {})
+        
+        # 根据方法选择参数配置
+        if gradient_field_method in method_configs:
+            method_config = method_configs[gradient_field_method]
+            # 使用方法特定的参数
+            n_query_points = method_config.get("n_query_points", gnf_config.get("n_query_points", 1000))
+            step_size = method_config.get("step_size", gnf_config.get("step_size", 0.002))
+            sig_sf = method_config.get("sig_sf", gnf_config.get("sig_sf", 0.1))
+            sig_mag = method_config.get("sig_mag", gnf_config.get("sig_mag", 0.45))
+        else:
+            # 使用默认配置
+            n_query_points = default_config.get("n_query_points", gnf_config.get("n_query_points", 1000))
+            step_size = default_config.get("step_size", gnf_config.get("step_size", 0.002))
+            sig_sf = default_config.get("sig_sf", gnf_config.get("sig_sf", 0.1))
+            sig_mag = default_config.get("sig_mag", gnf_config.get("sig_mag", 0.45))
+        
         return GNFConverter(
             sigma=gnf_config.get("sigma", 1),
-            n_query_points=gnf_config.get("n_query_points", 1000),
+            n_query_points=n_query_points,
             n_iter=gnf_config.get("n_iter", 2000),
-            step_size=gnf_config.get("step_size", 0.002),
+            step_size=step_size,
             eps=gnf_config.get("eps", 0.1),
             min_samples=gnf_config.get("min_samples", 5),
             device=device,
             sigma_ratios=sigma_ratios,
-            gradient_field_method=gnf_config.get("gradient_field_method", "softmax"),
+            gradient_field_method=gradient_field_method,
             temperature=gnf_config.get("temperature", 0.008),
-            logsumexp_eps=gnf_config.get("logsumexp_eps", 1e-8)
+            logsumexp_eps=gnf_config.get("logsumexp_eps", 1e-8),
+            inverse_square_strength=gnf_config.get("inverse_square_strength", 1.0),
+            gradient_clip_threshold=gnf_config.get("gradient_clip_threshold", 0.3),
+            sig_sf=sig_sf,
+            sig_mag=sig_mag
         )
     
     def prepare_data(fabric, config, device):
