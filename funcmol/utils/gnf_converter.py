@@ -172,11 +172,11 @@ class GNFConverter(nn.Module):
                         weighted_gradients = diff * weighted_weights  # (n_type_atoms, n_points, 3)
                         type_gradients = torch.sum(weighted_gradients, dim=0)  # (n_points, 3)
                     
-                    elif self.gradient_field_method == "sigmoid":  # sigmoid版本：使用tanh作为magnitude权重
+                    elif self.gradient_field_method == "tanh":  # tanh版本：使用tanh作为magnitude权重
                         distances = torch.sqrt(dist_sq.squeeze(-1))  # (n_type_atoms, n_points)
                         # softmax权重
                         w_softmax = torch.softmax(-distances / self.sig_sf, dim=0)  # (n_type_atoms, n_points)
-                        # sigmoid magnitude权重
+                        # tanh magnitude权重
                         w_mag = torch.tanh(distances / self.sig_mag)  # (n_type_atoms, n_points)
                         # 归一化方向
                         diff_normed = diff / (torch.norm(diff, dim=-1, keepdim=True) + 1e-8)  # (n_type_atoms, n_points, 3)
@@ -241,7 +241,7 @@ class GNFConverter(nn.Module):
                 # 1. 初始化采样点 - 智能梯度场采样策略
                 # 不再在整个空间随机洒点，而是优先在梯度场强度大的位置采样
                 # 这样可以提高采样效率，减少在无意义区域的采样
-                init_min, init_max = -6.0, 6.0  # 使用更大的默认范围
+                init_min, init_max = -7.0, 7.0
                 n_candidates = n_query_points * self.gradient_sampling_candidate_multiplier  # 生成候选点
                 candidate_points = torch.rand(n_candidates, 3, device=device) * (init_max - init_min) + init_min
                 

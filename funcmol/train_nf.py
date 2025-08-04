@@ -15,7 +15,7 @@ import numpy as np
 
 # 在导入torch之前设置GPU
 # TODO：手动指定要使用的GPU（0, 1, 或 2）
-gpu_id = 2  # 修改这里来选择GPU：0, 1, 或 2
+gpu_id = 1  # 修改这里来选择GPU：0, 1, 或 2
 os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
 print(f"Setting CUDA_VISIBLE_DEVICES={gpu_id}")
 
@@ -152,7 +152,33 @@ def main(config):
     if isinstance(gnf_config, list):
         gnf_config = gnf_config[0]
     assert isinstance(gnf_config, dict), f"gnf_config should be dict, got {type(gnf_config)}"
-    gnf_converter = GNFConverter(**gnf_config)
+    
+    # 获取方法特定参数
+    method = gnf_config.get("gradient_field_method", "softmax")
+    method_config = gnf_config.get("method_configs", {}).get(method, gnf_config.get("default_config", {}))
+    
+    # 构建参数，优先使用方法特定配置
+    gnf_converter_params = {
+        'sigma': gnf_config.get("sigma", 1.0),
+        'n_query_points': method_config.get("n_query_points", 2500),
+        'n_iter': gnf_config.get("n_iter", 2000),
+        'step_size': method_config.get("step_size", 0.01),
+        'eps': gnf_config.get("eps", 0.01),
+        'min_samples': gnf_config.get("min_samples", 10),
+        'sigma_ratios': gnf_config.get("sigma_ratios", {'C': 0.9, 'H': 1.3, 'O': 1.1, 'N': 1.0, 'F': 1.2}),
+        'gradient_field_method': method,
+        'temperature': gnf_config.get("temperature", 0.01),
+        'logsumexp_eps': gnf_config.get("logsumexp_eps", 1e-8),
+        'inverse_square_strength': gnf_config.get("inverse_square_strength", 1.0),
+        'gradient_clip_threshold': gnf_config.get("gradient_clip_threshold", 0.3),
+        'sig_sf': method_config.get("sig_sf", 0.1),
+        'sig_mag': method_config.get("sig_mag", 0.45),
+        'gradient_sampling_candidate_multiplier': gnf_config.get("gradient_sampling_candidate_multiplier", 10),
+        'gradient_sampling_temperature': gnf_config.get("gradient_sampling_temperature", 0.1),
+        'device': "cuda" if torch.cuda.is_available() else "cpu"
+    }
+    
+    gnf_converter = GNFConverter(**gnf_converter_params)
     
     fabric.print(f">> Training loop will start from epoch {start_epoch}")
     
