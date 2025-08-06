@@ -3,7 +3,15 @@ import plotly.graph_objects as go
 import seaborn as sns
 import torch
 import plotly.io as pio
-pio.kaleido.scope.mathjax = None
+import plotly.graph_objects as go
+import plotly.express as px
+
+# 安全地设置 kaleido 配置
+try:
+    pio.kaleido.scope.mathjax = None
+except AttributeError:
+    # 如果属性不存在，跳过设置
+    pass
 
 
 COLORS_SPARSE = [

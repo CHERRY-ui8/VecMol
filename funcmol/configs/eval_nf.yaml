@@ -4,7 +4,7 @@ defaults:
 
 wandb: False
 seed: 1234
-nf_pretrained_path: exps/neural_field/nf_qm9
+nf_pretrained_path: ../exps/neural_field/nf_qm9
 dirname: ${nf_pretrained_path}/eval
 eval_metric: sampling  # miou | sampling
 save_grids_png: False

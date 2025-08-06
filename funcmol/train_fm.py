@@ -25,30 +25,16 @@ def main(config):
     exp_name, dirname = config["exp_name"], config["dirname"]
     if not config["on_the_fly"]:
         codes_dir = config["codes_dir"]
+
     config = OmegaConf.to_container(config)
     config["exp_name"], config["dirname"] = exp_name, dirname  # TODO: make this better
+    
     if not config["on_the_fly"]:
-        config["codes_dir"] = codes_dir
+        config["codes_dir"] = codes_dir # 保护codes_dir，确保在配置对象转换过程中不会丢失关键参数
     fabric.print(">> saving experiments in:", config["dirname"])
 
     ##############################
     # load pretrained neural field
-    # 自动检测模型路径
-    if not os.path.exists(config["nf_pretrained_path"]):
-        # 尝试自动找到最新的模型
-        try:
-            if config["dset"]["dset_name"] == "drugs":
-                config["nf_pretrained_path"] = get_latest_model_path("exps/neural_field", "nf_drugs_")
-            elif config["dset"]["dset_name"] == "qm9":
-                config["nf_pretrained_path"] = get_latest_model_path("exps/neural_field", "nf_qm9_")
-            else:
-                config["nf_pretrained_path"] = get_latest_model_path("exps/neural_field", "nf_")
-            fabric.print(f">> Using auto-detected model path: {config['nf_pretrained_path']}")
-        except FileNotFoundError as e:
-            fabric.print(f">> Error: {e}")
-            fabric.print(">> Please ensure you have a trained neural field model in exps/neural_field/")
-            return
-    
     nf_checkpoint = fabric.load(os.path.join(config["nf_pretrained_path"], "model.pt"))
     enc, dec = load_neural_field(nf_checkpoint, fabric)
     dec_module = dec.module if hasattr(dec, "module") else dec
@@ -149,17 +135,24 @@ def main(config):
                 if fabric.global_rank == 0:
                     try:
                         sample(funcmol_ema, dec_module, config, fabric)
+                        fabric.print(f">> Sampling completed successfully at epoch {epoch + 1}")
                     except Exception as e:
                         fabric.print(f"Error during sampling: {e}")
+                        fabric.print(">> Continuing training without saving samples")
             # save
-            state = {
-                "epoch": epoch + 1,
-                "config": config,
-                "state_dict_ema": funcmol_ema.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "code_stats": dec_module.code_stats
-            }
-            fabric.save(os.path.join(config["dirname"], "checkpoint.pth.tar"), state)
+            try:
+                state = {
+                    "epoch": epoch + 1,
+                    "config": config,
+                    "state_dict_ema": funcmol_ema.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "code_stats": dec_module.code_stats
+                }
+                fabric.save(os.path.join(config["dirname"], "checkpoint.pth.tar"), state)
+                fabric.print(f">> Checkpoint saved successfully at epoch {epoch + 1}")
+            except Exception as e:
+                fabric.print(f"Error saving checkpoint: {e}")
+                fabric.print(">> Training will continue but checkpoint was not saved")
 
 
         # log metrics

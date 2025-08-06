@@ -463,13 +463,13 @@ def create_gnf_converter(config: dict, device: str = "cpu") -> GNFConverter:
     if gradient_field_method in method_configs:
         method_config = method_configs[gradient_field_method]
         # 使用方法特定的参数
-        n_query_points = method_config.get("n_query_points", config["dset"]["n_points"])
+        n_query_points = method_config["n_query_points"]
         step_size = method_config.get("step_size", gnf_config.get("step_size", 0.003))
         sig_sf = method_config.get("sig_sf", gnf_config.get("sig_sf", 0.1))
         sig_mag = method_config.get("sig_mag", gnf_config.get("sig_mag", 0.45))
     else:
         # 使用默认配置
-        n_query_points = default_config.get("n_query_points", config["dset"]["n_points"])
+        n_query_points = default_config["n_query_points"]
         step_size = default_config.get("step_size", gnf_config.get("step_size", 0.003))
         sig_sf = default_config.get("sig_sf", gnf_config.get("sig_sf", 0.1))
         sig_mag = default_config.get("sig_mag", gnf_config.get("sig_mag", 0.45))

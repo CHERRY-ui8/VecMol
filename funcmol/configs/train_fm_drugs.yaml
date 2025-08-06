@@ -10,8 +10,8 @@ defaults:
 debug: False
 wandb: True
 seed: 1234
-nf_pretrained_path: exps/neural_field/nf_drugs
-exp_dir: exps/funcmol
+nf_pretrained_path: ../exps/neural_field/nf_drugs
+exp_dir: ../exps/funcmol
 exp_name: "fm_${dset.dset_name}_${now:%Y%m%d}_${now:%H%M%S}_${now:%f}"
 dirname: "${exp_dir}/${exp_name}"
 reload_model_path: null

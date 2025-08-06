@@ -112,13 +112,14 @@ hydra:
     hydra:
     - hydra.mode=RUN
     task:
-    - split=train
+    - split=val
     - nf_pretrained_path=
+    - split=train
     - n_dataset_iterations=30
   job:
     name: infer_codes
     chdir: null
-    override_dirname: n_dataset_iterations30_nf_pretrained_path_splittrain
+    override_dirname: n_dataset_iterations30_nf_pretrained_path_splittrain_splitval
     id: ???
     num: ???
     config_name: infer_codes
@@ -133,18 +134,18 @@ hydra:
   runtime:
     version: 1.3.2
     version_base: '1.3'
-    cwd: /home/huayuchen/funcmol-main-neuralfield/funcmol
+    cwd: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/funcmol
     config_sources:
     - path: hydra.conf
       schema: pkg
       provider: hydra
-    - path: /home/huayuchen/funcmol-main-neuralfield/funcmol/configs
+    - path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/funcmol/configs
       schema: file
       provider: main
     - path: ''
       schema: structured
       provider: schema
-    output_dir: /home/huayuchen/funcmol-main-neuralfield/funcmol/codes/train
+    output_dir: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/funcmol/codes/train
     choices:
       hydra/env: default
       hydra/callbacks: null

@@ -25,7 +25,7 @@ except ImportError:
     SummaryWriter = None
 
 
-def get_latest_model_path(base_exp_dir: str = "exps/neural_field", model_prefix: str = "nf_qm9_") -> str:
+def get_latest_model_path(base_exp_dir: str = "../exps/neural_field", model_prefix: str = "nf_qm9_") -> str:
     """
     自动获取最新的模型路径
     
@@ -43,7 +43,7 @@ def get_latest_model_path(base_exp_dir: str = "exps/neural_field", model_prefix:
     # 查找所有以指定前缀开头的目录
     exp_dirs = [d for d in exp_dir.iterdir() if d.is_dir() and d.name.startswith(model_prefix)]
     if not exp_dirs:
-        raise FileNotFoundError(f"No experiment directories found with prefix '{model_prefix}'")
+        raise FileNotFoundError(f"No experiment directories found with prefix '{model_prefix}' in {exp_dir}")
     
     # 选择最新的目录（按修改时间排序）
     latest_exp_dir = max(exp_dirs, key=lambda x: x.stat().st_mtime)
@@ -540,9 +540,9 @@ def auto_load_latest_checkpoint(
     """
     try:
         # 查找所有以nf_qm9_开头的目录
-        exp_dir = Path("exps/neural_field")
+        exp_dir = Path("../exps/neural_field")
         if not exp_dir.exists():
-            fabric.print(">> No exps/neural_field directory found, starting fresh training")
+            fabric.print(">> No ../exps/neural_field directory found, starting fresh training")
             return enc, dec, optim_enc, optim_dec, 0, [], [], float("inf")
         
         # 查找所有以nf_qm9_开头的目录

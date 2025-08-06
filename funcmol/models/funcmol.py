@@ -199,19 +199,28 @@ class FuncMol(nn.Module):
         #  sample codes with WJS
         codes_all = []
         fabric.print(f">> Sample codes with WJS (n_chains: {config['wjs']['n_chains']})")
-        for rep in tqdm(range(config["wjs"]["repeats_wjs"])):
-            # initialize y and v
-            y, v = self.initialize_y_v(
-                n_chains=config["wjs"]["n_chains"],
-                code_dim=config["decoder"]["code_dim"],
-                code_stats=dec.code_stats,
-            )
+        try:
+            for rep in tqdm(range(config["wjs"]["repeats_wjs"])):
+                # initialize y and v
+                y, v = self.initialize_y_v(
+                    n_chains=config["wjs"]["n_chains"],
+                    code_dim=config["decoder"]["code_dim"],
+                    code_stats=dec.code_stats,
+                )
 
-            # walk and jump
-            for _ in range(0, config["wjs"]["max_steps_wjs"], config["wjs"]["steps_wjs"]):
-                y, v = self.wjs_walk_steps(y, v, config["wjs"]["steps_wjs"], delta=config["wjs"]["delta_wjs"], friction=config["wjs"]["friction_wjs"])  # walk
-                code_hats = self.wjs_jump_step(y)  # jump
-                codes_all.append(code_hats.cpu())
+                # walk and jump
+                for _ in range(0, config["wjs"]["max_steps_wjs"], config["wjs"]["steps_wjs"]):
+                    y, v = self.wjs_walk_steps(y, v, config["wjs"]["steps_wjs"], delta=config["wjs"]["delta_wjs"], friction=config["wjs"]["friction_wjs"])  # walk
+                    code_hats = self.wjs_jump_step(y)  # jump
+                    codes_all.append(code_hats.cpu())
+                    
+                # 清理GPU内存
+                del y, v
+                torch.cuda.empty_cache()
+                
+        except Exception as e:
+            fabric.print(f"Error during WJS sampling: {e}")
+            raise e
 
         # generate (render) molecules from codes
         if delete_net:
@@ -219,7 +228,8 @@ class FuncMol(nn.Module):
             torch.cuda.empty_cache()
 
         codes = torch.cat(codes_all, dim=0)
-        # mols = dec_module.codes_to_molecules(codes, unnormalize=False, fabric=fabric, config=config)  # No longer normalize
+        fabric.print(f">> Generated {codes.size(0)} codes")
+        
         # need to batch the codes to avoid OOM
         if config["dset"]["grid_dim"] >= 96 and codes.size(0) >= 2000:
             batch_size_render_codes = 2000
@@ -230,14 +240,30 @@ class FuncMol(nn.Module):
         batched_codes = torch.split(codes, batch_size_render_codes, dim=0)
         mols = []
         fabric.print(f">> Splitting codes for rendering in batches of {batch_size_render_codes}")
-        for batched_code in tqdm(batched_codes):
-            mols += dec.codes_to_molecules(batched_code, unnormalize=False, fabric=fabric, config=config)  # No longer normalize
+        
+        try:
+            for batched_code in tqdm(batched_codes):
+                batch_mols = dec.codes_to_molecules(batched_code, unnormalize=False, fabric=fabric, config=config)
+                mols += batch_mols
+                # 清理批次内存
+                del batch_mols
+                torch.cuda.empty_cache()
+        except Exception as e:
+            fabric.print(f"Error during molecule generation: {e}")
+            raise e
 
         # save the molecules in sdf file
         save_dir = os.path.join(os.getcwd(), save_dir)
-        molecules_xyz = save_xyz(mols, save_dir, fabric, atom_elements=config["dset"]["elements"])
-        convert_xyzs_to_sdf(save_dir, fabric=fabric)
+        try:
+            molecules_xyz = save_xyz(mols, save_dir, fabric, atom_elements=config["dset"]["elements"])
+            convert_xyzs_to_sdf(save_dir, fabric=fabric)
+            fabric.print(f">> Successfully saved {len(molecules_xyz)} molecules")
+        except Exception as e:
+            fabric.print(f"Error saving molecules: {e}")
+            raise e
 
+        # 清理内存
         del mols, codes, batched_codes, codes_all
+        torch.cuda.empty_cache()
 
         return molecules_xyz

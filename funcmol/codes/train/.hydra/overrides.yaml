@@ -1,3 +1,4 @@
-- split=train
+- split=val
 - nf_pretrained_path=
+- split=train
 - n_dataset_iterations=30

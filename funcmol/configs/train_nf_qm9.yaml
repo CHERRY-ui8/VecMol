@@ -11,7 +11,7 @@ debug_one_mol: False
 debug_subset: False
 wandb: False
 seed: 1234
-exp_dir: exps/neural_field
+exp_dir: ../exps/neural_field
 exp_name: "nf_${dset.dset_name}_${now:%Y%m%d}_${now:%H%M%S}_${now:%f}"
 dirname: "${exp_dir}/${exp_name}"
 reload_model_path: null

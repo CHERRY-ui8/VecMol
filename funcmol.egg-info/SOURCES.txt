@@ -3,6 +3,7 @@ LICENSE_LGPLv3.txt
 README.md
 setup.py
 funcmol/__init__.py
+funcmol/analyze_dist.py
 funcmol/eval_nf.py
 funcmol/gnf_visualizer.py
 funcmol/infer_codes.py
@@ -16,6 +17,7 @@ funcmol.egg-info/top_level.txt
 funcmol/dataset/__init__.py
 funcmol/dataset/create_data_cremp.py
 funcmol/dataset/create_data_geomdrugs.py
+funcmol/dataset/create_data_geomdrugs_streaming.py
 funcmol/dataset/create_data_qm9.py
 funcmol/dataset/dataset_code.py
 funcmol/dataset/dataset_field.py
