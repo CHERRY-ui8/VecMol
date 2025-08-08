@@ -35,7 +35,8 @@ class Decoder(nn.Module):
             code_dim=config["code_dim"],
             cutoff=config.get("cutoff", None),  # Add cutoff parameter with default None
             anchor_spacing=config.get("anchor_spacing", 2.0),  # Add anchor_spacing parameter with default 2.0
-            device=device
+            device=device,
+            k_neighbors=config.get("k_neighbors", 32)  # Add k_neighbors parameter with default 32
         )
 
     def forward(self, x, codes):

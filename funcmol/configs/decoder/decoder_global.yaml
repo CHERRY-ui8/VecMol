@@ -7,3 +7,4 @@ n_layers: 4
 input_scale: 32
 radius: 0.5
 cutoff: 0.5
+k_neighbors: 32  # 添加k_neighbors参数

@@ -12,7 +12,7 @@ except ImportError:
         return fn
 
 class EGNNLayer(MessagePassing):
-    def __init__(self, in_channels, hidden_channels, out_channels, radius=2.0, out_x_dim=1, cutoff=None):
+    def __init__(self, in_channels, hidden_channels, out_channels, radius=2.0, out_x_dim=1, cutoff=None, k_neighbors=32):
         """
             EGNN等变层实现：
             - 只用h_i, h_j, ||x_i-x_j||作为边特征输入
@@ -25,9 +25,11 @@ class EGNNLayer(MessagePassing):
         self.in_channels = in_channels
         self.hidden_channels = hidden_channels
         self.out_channels = out_channels
-        self.radius = radius
+        # self.radius = radius  # 注释掉radius参数
+        self.radius = radius  # 保留但不使用
         self.out_x_dim = out_x_dim
         self.cutoff = cutoff
+        self.k_neighbors = k_neighbors  # 添加k_neighbors参数
 
         # 用于message计算的MLP，输入[h_i, h_j, ||x_i-x_j||]，输出hidden_channels
         self.edge_mlp = nn.Sequential(
@@ -109,7 +111,8 @@ class EGNNVectorField(nn.Module):
                  code_dim: int = 128,
                  cutoff: float = None,
                  anchor_spacing: float = 2.0,
-                 device=None):
+                 device=None,
+                 k_neighbors: int = 32):  # 添加k_neighbors参数
         """
         Initialize the EGNN Vector Field model.
         Each query point predicts a 3D vector for every atom type.
@@ -130,11 +133,13 @@ class EGNNVectorField(nn.Module):
         self.grid_size = grid_size
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
-        self.radius = radius
+        # self.radius = radius  # 注释掉radius参数
+        self.radius = radius  # 保留但不使用
         self.n_atom_types = n_atom_types
         self.code_dim = code_dim
         # 如果cutoff为None，则使用radius作为cutoff
         self.cutoff = cutoff if cutoff is not None else radius
+        self.k_neighbors = k_neighbors  # 添加k_neighbors参数
 
         # Create learnable grid points and features for G_L
         # 指定batch_size=1：只存储一份网格坐标，而不是为每个可能的 batch_size 都存储一份
@@ -151,7 +156,8 @@ class EGNNVectorField(nn.Module):
                 hidden_channels=hidden_dim,
                 out_channels=code_dim,
                 radius=radius,
-                cutoff=cutoff
+                cutoff=cutoff,
+                k_neighbors=k_neighbors  # 添加k_neighbors参数
             ) for _ in range(num_layers)
         ])
         
@@ -162,7 +168,8 @@ class EGNNVectorField(nn.Module):
             out_channels=code_dim,
             radius=radius,
             out_x_dim=n_atom_types,
-            cutoff=cutoff
+            cutoff=cutoff,
+            k_neighbors=k_neighbors  # 添加k_neighbors参数
         )
         
     def forward(self, query_points, codes):
@@ -201,14 +208,23 @@ class EGNNVectorField(nn.Module):
         grid_coords = grid_coords.to(device)
         query_points = query_points.to(device)
 
-        # 使用radius构建 query -> grid edges，确保每个query point都能从指定半径内的grid获取信息
-        edge_grid_query = radius(
+        # 使用knn构建 query -> grid edges，确保每个query point都能从最近的k个grid获取信息
+        # edge_grid_query = radius(  # 注释掉radius实现
+        #     x=grid_coords,
+        #     y=query_points,
+        #     r=self.radius,
+        #     batch_x=grid_batch,
+        #     batch_y=query_batch
+        # ) # [2, E] where E is variable depending on radius
+
+        # 使用knn替代radius
+        edge_grid_query = knn(
             x=grid_coords,
             y=query_points,
-            r=self.radius,
+            k=self.k_neighbors,
             batch_x=grid_batch,
             batch_y=query_batch
-        ) # [2, E] where E is variable depending on radius
+        ) # [2, E] where E = k_neighbors * n_points_total
 
         edge_grid_query[1] += n_points_total # bias
         

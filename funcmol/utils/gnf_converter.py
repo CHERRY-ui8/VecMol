@@ -59,8 +59,10 @@ class GNFConverter(nn.Module):
         self.n_atom_types = n_atom_types  # 保存原子类型数量
         
         # 为不同类型的原子设置不同的 sigma 参数
-        # 原子类型索引映射：0=C, 1=H, 2=O, 3=N, 4=F, 5=S, 6=Cl, 7=Br, 8=P, 9=I, 10=B
-        atom_type_mapping = {0: 'C', 1: 'H', 2: 'O', 3: 'N', 4: 'F', 5: 'S', 6: 'Cl', 7: 'Br', 8: 'P', 9: 'I', 10: 'B'}
+        # We model hydrogen explicitly and consider 5 chemical elements for QM9 (C, H, O, N, F), 
+        # 6 for CREMP (C, H, O, N, F, S) and 8 for GEOM-drugs (C, H, O, N, F, S, Cl and Br)
+        # 原子类型索引映射：0=C, 1=H, 2=O, 3=N, 4=F, 5=S, 6=Cl, 7=Br
+        atom_type_mapping = {0: 'C', 1: 'H', 2: 'O', 3: 'N', 4: 'F', 5: 'S', 6: 'Cl', 7: 'Br'}
         self.sigma_params = {}
         for atom_idx in range(n_atom_types):
             atom_symbol = atom_type_mapping.get(atom_idx, f'Type{atom_idx}')
