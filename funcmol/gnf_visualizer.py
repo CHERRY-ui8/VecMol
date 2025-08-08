@@ -255,6 +255,12 @@ class GNFVisualizer(MoleculeVisualizer):
         plt.tight_layout()
         
         if save_path:
+            # 确保保存目录存在
+            save_dir = os.path.dirname(save_path)
+            if save_dir and not os.path.exists(save_dir):
+                os.makedirs(save_dir, exist_ok=True)
+                print(f"Created directory: {save_dir}")
+            
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
             plt.close()
         
@@ -305,6 +311,12 @@ class GNFVisualizer(MoleculeVisualizer):
         
         ax.set_title(f"Iteration {iteration}")
         ax.legend(loc='upper right', bbox_to_anchor=(1.0, 1.0))
+        
+        # 确保保存目录存在
+        save_dir = os.path.dirname(save_path)
+        if save_dir and not os.path.exists(save_dir):
+            os.makedirs(save_dir, exist_ok=True)
+            print(f"Created directory: {save_dir}")
         
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()
@@ -761,6 +773,13 @@ def visualize_1d_gradient_field_comparison(
             atom_name_clean = atom_name
             base_name = f"field_1d_sample_{sample_idx}_atom_{atom_name_clean}"
             atom_save_path = os.path.join(os.path.dirname(save_path) or '.', f"{base_name}.png")
+            
+            # 确保保存目录存在
+            save_dir = os.path.dirname(atom_save_path)
+            if save_dir and not os.path.exists(save_dir):
+                os.makedirs(save_dir, exist_ok=True)
+                print(f"Created directory: {save_dir}")
+            
             plt.savefig(atom_save_path, dpi=300, bbox_inches='tight')
             plt.close()
             print(f"Field 1D comparison (atom_type={atom_name}) saved to: {atom_save_path}")
@@ -863,6 +882,17 @@ def load_config(config_name: str = "train_nf_qm9") -> OmegaConf:
     
     config["dset"]["data_dir"] = str(PROJECT_ROOT / "funcmol" / "dataset" / "data")
     print(f"Dataset directory: {config['dset']['data_dir']}")
+    
+    # 验证配置加载
+    if "converter" in config:
+        print(f"Config loaded successfully: {config_name}")
+        if "n_iter" in config["converter"]:
+            print(f"n_iter from converter config: {config['converter']['n_iter']}")
+        else:
+            print("WARNING: n_iter not found in converter config!")
+    else:
+        print("WARNING: converter config not found!")
+    
     return config
 
 def load_model(fabric: Fabric, config: OmegaConf, model_dir: Optional[str] = None) -> Tuple[torch.nn.Module, torch.nn.Module]:
@@ -912,42 +942,106 @@ def create_converter(config: OmegaConf, device: torch.device) -> GNFConverter:
         GNFConverter 实例
     """
     gnf_config = config.get("converter", config.get("gnf_converter", {}))
+    
+    # 检查配置是否存在
+    if not gnf_config:
+        raise ValueError("GNF converter configuration not found in config!")
+    
+    # 获取数据集配置中的原子类型数量
+    dset_config = config.get("dset", {})
+    n_atom_types = dset_config.get("n_channels", 5)  # 默认为5以保持向后兼容
+    
+    # 处理 sigma_ratios
     sigma_ratios = gnf_config.get("sigma_ratios", None)
     if sigma_ratios is not None and not isinstance(sigma_ratios, dict):
         sigma_ratios = OmegaConf.to_container(sigma_ratios, resolve=True)
     
-    gradient_field_method = gnf_config.get("gradient_field_method", "softmax")
+    # 获取梯度场方法
+    gradient_field_method = gnf_config.get("gradient_field_method")
+    if gradient_field_method is None:
+        raise ValueError("gradient_field_method not found in converter config!")
+    
     method_configs = gnf_config.get("method_configs", {})
     default_config = gnf_config.get("default_config", {})
     
+    # 根据方法获取参数，移除所有硬编码默认值
     if gradient_field_method in method_configs:
         method_config = method_configs[gradient_field_method]
-        n_query_points = method_config.get("n_query_points", gnf_config.get("n_query_points", 1000))
-        step_size = method_config.get("step_size", gnf_config.get("step_size", 0.01))
-        sig_sf = method_config.get("sig_sf", gnf_config.get("sig_sf", 0.1))
-        sig_mag = method_config.get("sig_mag", gnf_config.get("sig_mag", 0.45))
+        n_query_points = method_config.get("n_query_points")
+        step_size = method_config.get("step_size")
+        sig_sf = method_config.get("sig_sf")
+        sig_mag = method_config.get("sig_mag")
+        
+        if n_query_points is None:
+            raise ValueError(f"n_query_points not found in method_config for {gradient_field_method}")
+        if step_size is None:
+            raise ValueError(f"step_size not found in method_config for {gradient_field_method}")
+        if sig_sf is None:
+            raise ValueError(f"sig_sf not found in method_config for {gradient_field_method}")
+        if sig_mag is None:
+            raise ValueError(f"sig_mag not found in method_config for {gradient_field_method}")
     else:
-        n_query_points = default_config.get("n_query_points", gnf_config.get("n_query_points", 1000))
-        step_size = default_config.get("step_size", gnf_config.get("step_size", 0.01))
-        sig_sf = default_config.get("sig_sf", gnf_config.get("sig_sf", 0.1))
-        sig_mag = default_config.get("sig_mag", gnf_config.get("sig_mag", 0.45))
+        # 使用 default_config
+        n_query_points = default_config.get("n_query_points")
+        step_size = default_config.get("step_size")
+        sig_sf = default_config.get("sig_sf")
+        sig_mag = default_config.get("sig_mag")
+        
+        if n_query_points is None:
+            raise ValueError("n_query_points not found in default_config")
+        if step_size is None:
+            raise ValueError("step_size not found in default_config")
+        if sig_sf is None:
+            raise ValueError("sig_sf not found in default_config")
+        if sig_mag is None:
+            raise ValueError("sig_mag not found in default_config")
+    
+    # 获取其他必需参数，移除所有硬编码默认值
+    sigma = gnf_config.get("sigma")
+    n_iter = gnf_config.get("n_iter")
+    eps = gnf_config.get("eps")
+    min_samples = gnf_config.get("min_samples")
+    temperature = gnf_config.get("temperature")
+    logsumexp_eps = gnf_config.get("logsumexp_eps")
+    inverse_square_strength = gnf_config.get("inverse_square_strength")
+    gradient_clip_threshold = gnf_config.get("gradient_clip_threshold")
+    
+    # 检查所有必需参数是否存在
+    required_params = {
+        "sigma": sigma,
+        "n_iter": n_iter,
+        "eps": eps,
+        "min_samples": min_samples,
+        "temperature": temperature,
+        "logsumexp_eps": logsumexp_eps,
+        "inverse_square_strength": inverse_square_strength,
+        "gradient_clip_threshold": gradient_clip_threshold
+    }
+    
+    missing_params = [param for param, value in required_params.items() if value is None]
+    if missing_params:
+        raise ValueError(f"Missing required parameters in converter config: {missing_params}")
+    
+    # 打印关键配置信息
+    print(f"GNF Converter created with n_iter: {n_iter}, gradient_field_method: {gradient_field_method}, n_atom_types: {n_atom_types}")
     
     return GNFConverter(
-        sigma=gnf_config.get("sigma", 0.5),
+        sigma=sigma,
         n_query_points=n_query_points,
-        n_iter=gnf_config.get("n_iter", 2000),
+        n_iter=n_iter,
         step_size=step_size,
-        eps=gnf_config.get("eps", 0.1),
-        min_samples=gnf_config.get("min_samples", 5),
+        eps=eps,
+        min_samples=min_samples,
         device=device,
         sigma_ratios=sigma_ratios,
         gradient_field_method=gradient_field_method,
-        temperature=gnf_config.get("temperature", 0.004),
-        logsumexp_eps=gnf_config.get("logsumexp_eps", 1e-8),
-        inverse_square_strength=gnf_config.get("inverse_square_strength", 1.0),
-        gradient_clip_threshold=gnf_config.get("gradient_clip_threshold", 0.3),
+        temperature=temperature,
+        logsumexp_eps=logsumexp_eps,
+        inverse_square_strength=inverse_square_strength,
+        gradient_clip_threshold=gradient_clip_threshold,
         sig_sf=sig_sf,
-        sig_mag=sig_mag
+        sig_mag=sig_mag,
+        n_atom_types=n_atom_types  # 添加原子类型数量参数
     )
 
 def prepare_data(fabric: Fabric, config: OmegaConf, device: torch.device) -> Tuple[Any, torch.Tensor, torch.Tensor]:

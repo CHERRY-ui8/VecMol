@@ -36,6 +36,7 @@ class GNFConverter(nn.Module):
                 sig_mag: float = 0.45,  # magnitude的sigma参数
                 gradient_sampling_candidate_multiplier: int = 10,  # 梯度采样候选点倍数
                 gradient_sampling_temperature: float = 0.1,  # 梯度采样温度参数
+                n_atom_types: int = 5,  # 原子类型数量，默认为5以保持向后兼容
                 device: str = "cuda" if torch.cuda.is_available() else "cpu"):  # 原子类型比例系数
         super().__init__()
         self.sigma = sigma
@@ -55,12 +56,14 @@ class GNFConverter(nn.Module):
         self.sig_mag = sig_mag  # 保存magnitude的sigma参数
         self.gradient_sampling_candidate_multiplier = gradient_sampling_candidate_multiplier  # 保存梯度采样候选点倍数
         self.gradient_sampling_temperature = gradient_sampling_temperature  # 保存梯度采样温度参数
+        self.n_atom_types = n_atom_types  # 保存原子类型数量
         
         # 为不同类型的原子设置不同的 sigma 参数
-        # 原子类型索引映射：0=C, 1=H, 2=O, 3=N, 4=F
-        atom_type_mapping = {0: 'C', 1: 'H', 2: 'O', 3: 'N', 4: 'F'}
+        # 原子类型索引映射：0=C, 1=H, 2=O, 3=N, 4=F, 5=S, 6=Cl, 7=Br, 8=P, 9=I, 10=B
+        atom_type_mapping = {0: 'C', 1: 'H', 2: 'O', 3: 'N', 4: 'F', 5: 'S', 6: 'Cl', 7: 'Br', 8: 'P', 9: 'I', 10: 'B'}
         self.sigma_params = {}
-        for atom_idx, atom_symbol in atom_type_mapping.items():
+        for atom_idx in range(n_atom_types):
+            atom_symbol = atom_type_mapping.get(atom_idx, f'Type{atom_idx}')
             ratio = self.sigma_ratios.get(atom_symbol, 1.0)  # 默认比例为1.0
             self.sigma_params[atom_idx] = sigma * ratio
     
@@ -88,7 +91,7 @@ class GNFConverter(nn.Module):
         if query_points.dim() == 2:
             query_points = query_points.unsqueeze(0)  # [1, M, 3]
             
-        n_atom_types = 5  # 默认支持5种原子类型
+        n_atom_types = self.n_atom_types  # 使用初始化时传入的n_atom_types
         batch_size, n_points, _ = query_points.shape
         device = query_points.device  # 使用输入张量的设备，而不是converter的设备
         vector_field = torch.zeros(batch_size, n_points, n_atom_types, 3, device=device)

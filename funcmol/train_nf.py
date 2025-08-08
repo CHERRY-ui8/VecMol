@@ -13,9 +13,9 @@ import hydra
 from pathlib import Path
 import numpy as np
 
-# 在导入torch之前设置GPU
+# 在导入torch之前设置GPU，如果要多卡训练，就注释掉这一段
 # TODO：手动指定要使用的GPU（0, 1, 或 2）
-gpu_id = 1  # 修改这里来选择GPU：0, 1, 或 2
+gpu_id = 1
 os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
 print(f"Setting CUDA_VISIBLE_DEVICES={gpu_id}")
 
@@ -51,7 +51,32 @@ def plot_loss_curve(train_losses, val_losses, save_path, title_suffix=""):
 
 @hydra.main(config_path="configs", config_name="train_nf_qm9", version_base=None)
 def main(config):
-    # 设置CUDA内存分配策略
+    ##### 多卡模式
+    # # 设置CUDA内存分配策略
+    # os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+    
+    # # 设置NCCL环境变量以避免通信问题
+    # os.environ['NCCL_DEBUG'] = 'INFO'
+    # os.environ['NCCL_TIMEOUT'] = '1800'  # 30分钟超时
+    # os.environ['NCCL_IB_DISABLE'] = '1'  # 禁用InfiniBand
+    # os.environ['NCCL_P2P_DISABLE'] = '1'  # 禁用P2P通信
+    # os.environ['NCCL_SOCKET_IFNAME'] = 'lo'  # 使用本地回环接口
+    # os.environ['TORCH_NCCL_BLOCKING_WAIT'] = '1'  # 使用新的推荐设置
+    # os.environ['CUDA_LAUNCH_BLOCKING'] = '0'  # 禁用同步CUDA操作以提高性能
+    
+    # # 获取可用的GPU数量
+    # num_gpus = torch.cuda.device_count()
+    # print(f"Available GPUs: {num_gpus}")
+    
+    # # 初始化fabric，支持多卡训练
+    # fabric = Fabric(
+    #     accelerator="gpu",
+    #     devices=num_gpus,  # 使用所有可用的GPU
+    #     strategy="ddp",    # 使用分布式数据并行策略
+    #     precision="bf16-mixed"
+    # )
+
+    ##### 单卡模式
     os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
     
     # 初始化fabric
@@ -63,17 +88,22 @@ def main(config):
     fabric.launch()
     
     fabric.print(">> start training the neural field", config["exp_name"])
+    ##### 多卡模式
+    # fabric.print(f">> Using {num_gpus} GPUs with DDP strategy")
+    ##### 单卡模式
     fabric.print(f">> Using GPU {gpu_id}")
     
     # 添加调试信息
-    fabric.print(f">> CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'Not set')}")
     fabric.print(f">> Torch device count: {torch.cuda.device_count()}")
     fabric.print(f">> Torch current device: {torch.cuda.current_device()}")
     fabric.print(f">> Fabric device: {fabric.device}")
+    fabric.print(f">> Global rank: {fabric.global_rank}")
+    fabric.print(f">> Local rank: {fabric.local_rank}")
+    fabric.print(f">> World size: {fabric.world_size}")
     
-    # 创建TensorBoard writer
+    # 创建TensorBoard writer（只在主进程中创建）
     tensorboard_writer = None
-    if fabric.global_rank == 0:  # 只在主进程中创建tensorboard writer
+    if fabric.global_rank == 0:
         tensorboard_writer = create_tensorboard_writer(
             log_dir=config["dirname"],
             experiment_name=config["exp_name"]
@@ -84,18 +114,23 @@ def main(config):
     # 创建GNFConverter实例用于数据加载
     data_gnf_converter = create_gnf_converter(config, device="cpu")
     
+    # 为多卡训练设置数据加载器
     loader_train = create_field_loaders(config, data_gnf_converter, split="train", fabric=fabric)
     if isinstance(loader_train, list):
         loader_train = loader_train[0]
-    loader_val = create_field_loaders(config, data_gnf_converter, split="val", fabric=fabric) if fabric.global_rank == 0 else None
-    if isinstance(loader_val, list):
-        loader_val = loader_val[0]
-    # 只有主进程（global_rank == 0）加载验证集
+    
+    # 验证集只在主进程中加载
+    loader_val = None
+    if fabric.global_rank == 0:
+        loader_val = create_field_loaders(config, data_gnf_converter, split="val", fabric=fabric)
+        if isinstance(loader_val, list):
+            loader_val = loader_val[0]
 
     # model
     enc, dec = create_neural_field(config, fabric)
-    print('Num of params in encoder:', sum(p.numel() for p in enc.parameters()))
-    print('Num of params in decoder:', sum(p.numel() for p in dec.parameters()))
+    if fabric.global_rank == 0:
+        print('Num of params in encoder:', sum(p.numel() for p in enc.parameters()))
+        print('Num of params in decoder:', sum(p.numel() for p in dec.parameters()))
     criterion = nn.MSELoss()
 
     # optimizers
@@ -110,7 +145,8 @@ def main(config):
     if config["reload_model_path"] is not None:
         try:
             checkpoint = fabric.load(os.path.join(config["reload_model_path"], "model.pt"))
-            fabric.print(f">> loaded checkpoint: {config['reload_model_path']}")
+            if fabric.global_rank == 0:
+                fabric.print(f">> loaded checkpoint: {config['reload_model_path']}")
 
             dec = load_network(checkpoint, dec, fabric, net_name="dec")
             optim_dec = load_optim_fabric(optim_dec, checkpoint, config, fabric, net_name="dec")
@@ -118,18 +154,21 @@ def main(config):
             enc = load_network(checkpoint, enc, fabric, net_name="enc")
             optim_enc = load_optim_fabric(optim_enc, checkpoint, config, fabric, net_name="enc")
         except Exception as e:
-            fabric.print(f"Error loading checkpoint: {e}")
+            if fabric.global_rank == 0:
+                fabric.print(f"Error loading checkpoint: {e}")
     
     # 自动检测并加载最新的checkpoint（如果启用了auto_resume且没有指定reload_model_path）
     elif config.get("auto_resume", True) and config["reload_model_path"] is None:
-        fabric.print(">> Auto-resume enabled, looking for latest checkpoint...")
+        if fabric.global_rank == 0:
+            fabric.print(">> Auto-resume enabled, looking for latest checkpoint...")
         enc, dec, optim_enc, optim_dec, start_epoch, train_losses, val_losses, best_loss = auto_load_latest_checkpoint(
             config, enc, dec, optim_enc, optim_dec, fabric
         )
     
     # 从头开始训练（如果禁用了auto_resume）
     else:
-        fabric.print(">> Auto-resume disabled, starting fresh training")
+        if fabric.global_rank == 0:
+            fabric.print(">> Auto-resume disabled, starting fresh training")
         start_epoch = 0
         train_losses = []
         val_losses = []
@@ -166,35 +205,70 @@ def main(config):
     method = gnf_config.get("gradient_field_method", "softmax")
     method_config = gnf_config.get("method_configs", {}).get(method, gnf_config.get("default_config", {}))
     
-    # 构建参数，优先使用方法特定配置
+    # 检查必需参数是否存在，移除所有硬编码默认值
+    required_params = {
+        'sigma': gnf_config.get("sigma"),
+        'n_iter': gnf_config.get("n_iter"),
+        'eps': gnf_config.get("eps"),
+        'min_samples': gnf_config.get("min_samples"),
+        'sigma_ratios': gnf_config.get("sigma_ratios"),
+        'temperature': gnf_config.get("temperature"),
+        'logsumexp_eps': gnf_config.get("logsumexp_eps"),
+        'inverse_square_strength': gnf_config.get("inverse_square_strength"),
+        'gradient_clip_threshold': gnf_config.get("gradient_clip_threshold"),
+        'gradient_sampling_candidate_multiplier': gnf_config.get("gradient_sampling_candidate_multiplier"),
+        'gradient_sampling_temperature': gnf_config.get("gradient_sampling_temperature")
+    }
+    
+    # 检查方法特定参数
+    method_required_params = {
+        'n_query_points': method_config.get("n_query_points"),
+        'step_size': method_config.get("step_size"),
+        'sig_sf': method_config.get("sig_sf"),
+        'sig_mag': method_config.get("sig_mag")
+    }
+    
+    # 检查缺失的参数
+    missing_params = [param for param, value in required_params.items() if value is None]
+    missing_method_params = [param for param, value in method_required_params.items() if value is None]
+    
+    if missing_params:
+        raise ValueError(f"Missing required parameters in gnf_config: {missing_params}")
+    if missing_method_params:
+        raise ValueError(f"Missing required parameters in method_config for {method}: {missing_method_params}")
+    
+    # 构建参数，完全依赖配置文件
     gnf_converter_params = {
-        'sigma': gnf_config.get("sigma", 1.0),
-        'n_query_points': method_config.get("n_query_points", 2500),
-        'n_iter': gnf_config.get("n_iter", 2000),
-        'step_size': method_config.get("step_size", 0.01),
-        'eps': gnf_config.get("eps", 0.01),
-        'min_samples': gnf_config.get("min_samples", 10),
-        'sigma_ratios': gnf_config.get("sigma_ratios", {'C': 0.9, 'H': 1.3, 'O': 1.1, 'N': 1.0, 'F': 1.2}),
+        'sigma': required_params['sigma'],
+        'n_query_points': method_required_params['n_query_points'],
+        'n_iter': required_params['n_iter'],
+        'step_size': method_required_params['step_size'],
+        'eps': required_params['eps'],
+        'min_samples': required_params['min_samples'],
+        'sigma_ratios': required_params['sigma_ratios'],
         'gradient_field_method': method,
-        'temperature': gnf_config.get("temperature", 0.01),
-        'logsumexp_eps': gnf_config.get("logsumexp_eps", 1e-8),
-        'inverse_square_strength': gnf_config.get("inverse_square_strength", 1.0),
-        'gradient_clip_threshold': gnf_config.get("gradient_clip_threshold", 0.3),
-        'sig_sf': method_config.get("sig_sf", 0.1),
-        'sig_mag': method_config.get("sig_mag", 0.45),
-        'gradient_sampling_candidate_multiplier': gnf_config.get("gradient_sampling_candidate_multiplier", 10),
-        'gradient_sampling_temperature': gnf_config.get("gradient_sampling_temperature", 0.1),
+        'temperature': required_params['temperature'],
+        'logsumexp_eps': required_params['logsumexp_eps'],
+        'inverse_square_strength': required_params['inverse_square_strength'],
+        'gradient_clip_threshold': required_params['gradient_clip_threshold'],
+        'sig_sf': method_required_params['sig_sf'],
+        'sig_mag': method_required_params['sig_mag'],
+        'gradient_sampling_candidate_multiplier': required_params['gradient_sampling_candidate_multiplier'],
+        'gradient_sampling_temperature': required_params['gradient_sampling_temperature'],
+        'n_atom_types': config["dset"]["n_channels"],  # 从数据集配置获取原子类型数量
         'device': "cuda" if torch.cuda.is_available() else "cpu"
     }
     
     gnf_converter = GNFConverter(**gnf_converter_params)
     
-    fabric.print(f">> Training loop will start from epoch {start_epoch}")
+    if fabric.global_rank == 0:
+        fabric.print(f">> Training loop will start from epoch {start_epoch}")
     
     for epoch in range(start_epoch, config["n_epochs"]):
         start_time = time.time()
         
-        fabric.print(f">> Current epoch in loop: {epoch}")
+        if fabric.global_rank == 0:
+            fabric.print(f">> Current epoch in loop: {epoch}")
 
         adjust_learning_rate(optim_enc, optim_dec, epoch, config)
 
@@ -275,7 +349,8 @@ def main(config):
     # 关闭TensorBoard writer
     if tensorboard_writer is not None:
         tensorboard_writer.close()
-        fabric.print(">> TensorBoard writer closed")
+        if fabric.global_rank == 0:
+            fabric.print(">> TensorBoard writer closed")
 
 
 def adjust_learning_rate(optim_enc, optim_dec, epoch, config):

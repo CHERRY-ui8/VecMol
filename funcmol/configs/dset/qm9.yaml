@@ -8,10 +8,10 @@ anchor_spacing: 1.5  # 锚点间距，单位为埃
 atomic_radius: .5
 elements: ["C", "H", "O", "N", "F"]
 n_channels: 5
-n_points: 2000 # 在 FieldDataset 的 _get_xs 方法中使用。之前训练都设置的是500，可能小了
+n_points: 500 # 在 FieldDataset 的 _get_xs 方法中使用。之前训练都设置的是500，可能小了
 subsampling_ratio: 2
 
 num_workers: 4
-batch_size: 128
+batch_size: 16
 lr_enc: 1e-4
 lr_dec: 5e-4

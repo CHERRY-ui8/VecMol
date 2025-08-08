@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from torch_geometric.nn import MessagePassing, knn_graph, knn
+from torch_geometric.nn import MessagePassing, knn_graph, knn, radius
 from funcmol.models.encoder import create_grid_coords
 import math
 
@@ -12,19 +12,20 @@ except ImportError:
         return fn
 
 class EGNNLayer(MessagePassing):
-    def __init__(self, in_channels, hidden_channels, out_channels, k_neighbors=8, out_x_dim=1, cutoff=None):
+    def __init__(self, in_channels, hidden_channels, out_channels, radius=2.0, out_x_dim=1, cutoff=None):
         """
             EGNN等变层实现：
             - 只用h_i, h_j, ||x_i-x_j||作为边特征输入
             - 用message的标量加权方向向量更新坐标
             - 不用EGNN论文里的a_ij（在这个模型里无化学键信息）
             - 添加cutoff参数进行距离过滤
+            - 使用radius而不是k_neighbors来构建图
         """
         super().__init__(aggr='mean')
         self.in_channels = in_channels
         self.hidden_channels = hidden_channels
         self.out_channels = out_channels
-        self.k_neighbors = k_neighbors
+        self.radius = radius
         self.out_x_dim = out_x_dim
         self.cutoff = cutoff
 
@@ -103,7 +104,7 @@ class EGNNVectorField(nn.Module):
                  grid_size: int = 8,
                  hidden_dim: int = 128,
                  num_layers: int = 3,
-                 k_neighbors: int = 8,
+                 radius: float = 2.0,
                  n_atom_types: int = 5,
                  code_dim: int = 128,
                  cutoff: float = None,
@@ -117,20 +118,23 @@ class EGNNVectorField(nn.Module):
             grid_size (int): Size of the grid for G_L (L in the paper)
             hidden_dim (int): Dimension of hidden layers
             num_layers (int): Number of EGNN layers
-            k_neighbors (int): Number of nearest neighbors for KNN graph
+            radius (float): Radius for building graph connections (replaces k_neighbors)
             n_atom_types (int): Number of atom types
             code_dim (int): Dimension of the latent code and node features
-            cutoff (float, optional): Cutoff distance for edge filtering
+            cutoff (float, optional): Cutoff distance for gradient decay. If None, uses radius.
+                                     When cutoff=radius, gradient decays to 0 at radius distance.
+            anchor_spacing (float): Spacing between anchor points
             device (torch.device, optional): The device to run the model on.
         """
         super().__init__()
         self.grid_size = grid_size
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
-        self.k_neighbors = k_neighbors
+        self.radius = radius
         self.n_atom_types = n_atom_types
         self.code_dim = code_dim
-        self.cutoff = cutoff
+        # 如果cutoff为None，则使用radius作为cutoff
+        self.cutoff = cutoff if cutoff is not None else radius
 
         # Create learnable grid points and features for G_L
         # 指定batch_size=1：只存储一份网格坐标，而不是为每个可能的 batch_size 都存储一份
@@ -146,7 +150,7 @@ class EGNNVectorField(nn.Module):
                 in_channels=code_dim,
                 hidden_channels=hidden_dim,
                 out_channels=code_dim,
-                k_neighbors=k_neighbors,
+                radius=radius,
                 cutoff=cutoff
             ) for _ in range(num_layers)
         ])
@@ -156,7 +160,7 @@ class EGNNVectorField(nn.Module):
             in_channels=code_dim,
             hidden_channels=hidden_dim,
             out_channels=code_dim,
-            k_neighbors=k_neighbors,
+            radius=radius,
             out_x_dim=n_atom_types,
             cutoff=cutoff
         )
@@ -189,18 +193,22 @@ class EGNNVectorField(nn.Module):
         combined_features = torch.cat([query_features, grid_features], dim=0)  # [B*N + B*grid_size**3, code_dim]
         combined_coords = torch.cat([query_points, grid_coords], dim=0)  # [B*N + B*grid_size**3, 3]
 
-        # 5. 构建边
+        # 5. 构建边 - 使用radius而不是knn
         query_batch = torch.arange(batch_size, device=device).repeat_interleave(n_points)
         grid_batch = torch.arange(batch_size, device=device).repeat_interleave(n_grid)
 
-        # 只构建 query -> grid edges，是为了确保每个query point 都能从 grid 获取信息
-        edge_grid_query = knn(
+        # 确保所有输入都在正确的设备上
+        grid_coords = grid_coords.to(device)
+        query_points = query_points.to(device)
+
+        # 使用radius构建 query -> grid edges，确保每个query point都能从指定半径内的grid获取信息
+        edge_grid_query = radius(
             x=grid_coords,
             y=query_points,
-            k=self.k_neighbors, 
+            r=self.radius,
             batch_x=grid_batch,
             batch_y=query_batch
-        ) # [2, E=k_neighbors*n_points]
+        ) # [2, E] where E is variable depending on radius
 
         edge_grid_query[1] += n_points_total # bias
         

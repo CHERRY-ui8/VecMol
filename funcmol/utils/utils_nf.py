@@ -96,7 +96,8 @@ def create_neural_field(config: dict, fabric: object) -> tuple:
         "anchor_spacing": config["dset"]["anchor_spacing"],
         "hidden_dim": config["decoder"]["hidden_dim"],
         "n_layers": config["decoder"]["n_layers"],
-        "k_neighbors": config["decoder"]["k_neighbors"],
+        "radius": config["decoder"]["radius"],
+        "cutoff": config["decoder"].get("cutoff", None),  # 如果是None，则使用radius作为cutoff
         "n_channels": config["dset"]["n_channels"],
         "code_dim": config["decoder"]["code_dim"]
     }, device=fabric.device)
@@ -146,6 +147,12 @@ def train_nf(
     enc.train()
     total_loss = 0.0
     max_grad_norm = 1.0
+    
+    # 清理CUDA缓存
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        fabric.print(f"CUDA memory allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+        fabric.print(f"CUDA memory cached: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
     
     # 创建进度条
     pbar = tqdm(enumerate(loader), total=len(loader), desc=f'Epoch {epoch}')

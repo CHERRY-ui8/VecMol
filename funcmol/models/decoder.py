@@ -30,7 +30,7 @@ class Decoder(nn.Module):
             grid_size=config["grid_size"],
             hidden_dim=config["hidden_dim"],
             num_layers=config["n_layers"],
-            k_neighbors=config["k_neighbors"],
+            radius=config["radius"],
             n_atom_types=config["n_channels"],
             code_dim=config["code_dim"],
             cutoff=config.get("cutoff", None),  # Add cutoff parameter with default None

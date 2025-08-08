@@ -444,50 +444,99 @@ def create_gnf_converter(config: dict, device: str = "cpu") -> GNFConverter:
         GNFConverter: 配置好的GNFConverter实例
     """
     gnf_config = config.get("converter", {}) or config.get("gnf_converter", {})
-    default_sigma_ratios = {
-        'C': 0.9,
-        'H': 1.3,
-        'O': 1.1,
-        'N': 1.0,
-        'F': 1.2
-    }
+    
+    # 检查配置是否存在
+    if not gnf_config:
+        raise ValueError("GNF converter configuration not found in config!")
+    
+    # 获取数据集配置中的原子类型数量
+    dset_config = config.get("dset", {})
+    n_atom_types = dset_config.get("n_channels", 5)  # 默认为5以保持向后兼容
     
     # 获取梯度场方法
-    gradient_field_method = gnf_config.get("gradient_field_method", "softmax")
+    gradient_field_method = gnf_config.get("gradient_field_method")
+    if gradient_field_method is None:
+        raise ValueError("gradient_field_method not found in converter config!")
     
     # 获取方法特定的配置
     method_configs = gnf_config.get("method_configs", {})
     default_config = gnf_config.get("default_config", {})
     
-    # 根据方法选择参数配置
+    # 根据方法选择参数配置，移除所有硬编码默认值
     if gradient_field_method in method_configs:
         method_config = method_configs[gradient_field_method]
         # 使用方法特定的参数
-        n_query_points = method_config["n_query_points"]
-        step_size = method_config.get("step_size", gnf_config.get("step_size", 0.003))
-        sig_sf = method_config.get("sig_sf", gnf_config.get("sig_sf", 0.1))
-        sig_mag = method_config.get("sig_mag", gnf_config.get("sig_mag", 0.45))
+        n_query_points = method_config.get("n_query_points")
+        step_size = method_config.get("step_size")
+        sig_sf = method_config.get("sig_sf")
+        sig_mag = method_config.get("sig_mag")
+        
+        if n_query_points is None:
+            raise ValueError(f"n_query_points not found in method_config for {gradient_field_method}")
+        if step_size is None:
+            raise ValueError(f"step_size not found in method_config for {gradient_field_method}")
+        if sig_sf is None:
+            raise ValueError(f"sig_sf not found in method_config for {gradient_field_method}")
+        if sig_mag is None:
+            raise ValueError(f"sig_mag not found in method_config for {gradient_field_method}")
     else:
         # 使用默认配置
-        n_query_points = default_config["n_query_points"]
-        step_size = default_config.get("step_size", gnf_config.get("step_size", 0.003))
-        sig_sf = default_config.get("sig_sf", gnf_config.get("sig_sf", 0.1))
-        sig_mag = default_config.get("sig_mag", gnf_config.get("sig_mag", 0.45))
+        n_query_points = default_config.get("n_query_points")
+        step_size = default_config.get("step_size")
+        sig_sf = default_config.get("sig_sf")
+        sig_mag = default_config.get("sig_mag")
+        
+        if n_query_points is None:
+            raise ValueError("n_query_points not found in default_config")
+        if step_size is None:
+            raise ValueError("step_size not found in default_config")
+        if sig_sf is None:
+            raise ValueError("sig_sf not found in default_config")
+        if sig_mag is None:
+            raise ValueError("sig_mag not found in default_config")
+    
+    # 获取其他必需参数，移除所有硬编码默认值
+    sigma = gnf_config.get("sigma")
+    n_iter = gnf_config.get("n_iter")
+    eps = gnf_config.get("eps")
+    min_samples = gnf_config.get("min_samples")
+    temperature = gnf_config.get("temperature")
+    logsumexp_eps = gnf_config.get("logsumexp_eps")
+    inverse_square_strength = gnf_config.get("inverse_square_strength")
+    gradient_clip_threshold = gnf_config.get("gradient_clip_threshold")
+    sigma_ratios = gnf_config.get("sigma_ratios")
+    
+    # 检查所有必需参数是否存在
+    required_params = {
+        "sigma": sigma,
+        "n_iter": n_iter,
+        "eps": eps,
+        "min_samples": min_samples,
+        "temperature": temperature,
+        "logsumexp_eps": logsumexp_eps,
+        "inverse_square_strength": inverse_square_strength,
+        "gradient_clip_threshold": gradient_clip_threshold
+    }
+    
+    missing_params = [param for param, value in required_params.items() if value is None]
+    if missing_params:
+        raise ValueError(f"Missing required parameters in converter config: {missing_params}")
     
     return GNFConverter(
-        sigma=gnf_config.get("sigma", 1.0),
+        sigma=sigma,
         n_query_points=n_query_points,
-        n_iter=gnf_config.get("n_iter", 2000),
+        n_iter=n_iter,
         step_size=step_size,
-        eps=gnf_config.get("eps", 0.01),
-        min_samples=gnf_config.get("min_samples", 5),
-        sigma_ratios=gnf_config.get("sigma_ratios", default_sigma_ratios),
+        eps=eps,
+        min_samples=min_samples,
+        sigma_ratios=sigma_ratios,
         gradient_field_method=gradient_field_method,
-        temperature=gnf_config.get("temperature", 0.008),
-        logsumexp_eps=gnf_config.get("logsumexp_eps", 1e-8),
-        inverse_square_strength=gnf_config.get("inverse_square_strength", 1.0),
-        gradient_clip_threshold=gnf_config.get("gradient_clip_threshold", 0.3),
+        temperature=temperature,
+        logsumexp_eps=logsumexp_eps,
+        inverse_square_strength=inverse_square_strength,
+        gradient_clip_threshold=gradient_clip_threshold,
         sig_sf=sig_sf,
         sig_mag=sig_mag,
+        n_atom_types=n_atom_types,  # 添加原子类型数量参数
         device=device
     ) 
