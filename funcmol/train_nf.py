@@ -15,12 +15,13 @@ import numpy as np
 
 # 在导入torch之前设置GPU
 # TODO：手动指定要使用的GPU（0, 1, 或 2）
-gpu_id = 1  # 修改这里来选择GPU：0, 1, 或 2
+gpu_id = 0  # 修改这里来选择GPU：0, 1, 或 2
 os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
 print(f"Setting CUDA_VISIBLE_DEVICES={gpu_id}")
 
 from funcmol.utils.utils_nf import train_nf, create_neural_field, eval_nf
 from funcmol.utils.utils_nf import load_network, load_optim_fabric, save_checkpoint, auto_load_latest_checkpoint
+from funcmol.utils.utils_nf import create_tensorboard_writer
 from funcmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
 from funcmol.utils.gnf_converter import GNFConverter
 
@@ -69,6 +70,14 @@ def main(config):
     fabric.print(f">> Torch device count: {torch.cuda.device_count()}")
     fabric.print(f">> Torch current device: {torch.cuda.current_device()}")
     fabric.print(f">> Fabric device: {fabric.device}")
+    
+    # 创建TensorBoard writer
+    tensorboard_writer = None
+    if fabric.global_rank == 0:  # 只在主进程中创建tensorboard writer
+        tensorboard_writer = create_tensorboard_writer(
+            log_dir=config["dirname"],
+            experiment_name=config["exp_name"]
+        )
     
     ##############################
     # data loaders
@@ -203,7 +212,8 @@ def main(config):
             metrics=metrics,
             epoch=epoch,
             batch_train_losses=batch_losses,  # 记录每个batch的loss
-            global_step=global_step
+            global_step=global_step,
+            tensorboard_writer=tensorboard_writer  # 传递tensorboard_writer
         )
         train_losses.append(loss_train)
         global_step += len(loader_train)
@@ -222,6 +232,11 @@ def main(config):
                     fabric=fabric
                 )
                 val_losses.append(loss_val)
+                
+                # TensorBoard记录验证loss
+                if tensorboard_writer is not None:
+                    tensorboard_writer.add_scalar('Loss/Validation', loss_val, epoch)
+                
                 # 保存checkpoint
                 save_checkpoint(
                     epoch, config, loss_val, best_loss, enc, dec, optim_enc, optim_dec, fabric
@@ -256,6 +271,11 @@ def main(config):
         # log
         elapsed_time = time.time() - start_time
         log_epoch(config, epoch, loss_train, loss_val if loss_val is not None else 0.0, elapsed_time, fabric)
+    
+    # 关闭TensorBoard writer
+    if tensorboard_writer is not None:
+        tensorboard_writer.close()
+        fabric.print(">> TensorBoard writer closed")
 
 
 def adjust_learning_rate(optim_enc, optim_dec, epoch, config):
