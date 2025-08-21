@@ -8,7 +8,7 @@ anchor_spacing: 1.5  # 锚点间距，单位为埃
 atomic_radius: .5
 elements: ["C", "H", "O", "N", "F", "S", "Cl", "Br"]
 n_channels: 8
-n_points: 2000
+n_points: 1500
 subsampling_ratio: 4
 
 num_workers: 2

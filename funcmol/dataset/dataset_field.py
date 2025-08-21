@@ -2,6 +2,8 @@ import itertools
 import math
 import os
 import random
+import pickle
+import lmdb
 from typing import Optional
 
 from lightning import Fabric
@@ -88,15 +90,70 @@ class FieldDataset(Dataset):
         # 使用传入的GNFConverter实例
         self.gnf_converter = gnf_converter
 
+    def __del__(self):
+        """析构函数，确保数据库连接被关闭"""
+        if hasattr(self, 'db') and self.db is not None:
+            self._close_db()
+
     def _read_data(self):
         fname = f"{self.split}_data"
         if self.dset_name == "cremp":
             fname = f"{self.split}_50_data"
-        self.data = torch.load(os.path.join(
-            self.data_dir, self.dset_name, f"{fname}.pth"), weights_only=False
-        )
+        
+        # 检查是否存在LMDB数据库
+        lmdb_path = os.path.join(self.data_dir, self.dset_name, f"{fname}.lmdb")
+        molid2idx_path = os.path.join(self.data_dir, self.dset_name, f"{fname}_molid2idx.pt")
+        
+        if os.path.exists(lmdb_path) and os.path.exists(molid2idx_path):
+            # 使用LMDB数据库
+            self._use_lmdb_database(lmdb_path, molid2idx_path)
+        else:
+            # 使用传统的torch.load方式
+            self.data = torch.load(os.path.join(
+                self.data_dir, self.dset_name, f"{fname}.pth"), weights_only=False
+            )
+            self.use_lmdb = False
+
+    def _use_lmdb_database(self, lmdb_path, molid2idx_path):
+        """使用LMDB数据库加载数据"""
+        self.lmdb_path = lmdb_path
+        self.molid2idx = torch.load(molid2idx_path)
+        self.db = None
+        self.keys = None
+        self.use_lmdb = True
+        print(f"  | Using LMDB database: {lmdb_path}")
+        print(f"  | Database contains {len(self.molid2idx)} molecules")
+
+    def _connect_db(self):
+        """建立只读数据库连接"""
+        if self.db is None:
+            self.db = lmdb.open(
+                self.lmdb_path,
+                map_size=10*(1024*1024*1024),   # 10GB
+                create=False,
+                subdir=False,
+                readonly=True,
+                lock=False,
+                readahead=False,
+                meminit=False,
+            )
+            with self.db.begin() as txn:
+                self.keys = list(txn.cursor().iternext(values=False))
+
+    def _close_db(self):
+        """关闭数据库连接"""
+        if self.db is not None:
+            self.db.close()
+            self.db = None
+            self.keys = None
 
     def _filter_by_elements(self, elements) -> None:
+        if hasattr(self, 'use_lmdb') and self.use_lmdb:
+            # LMDB模式下，过滤在__getitem__中进行
+            self.elements_ids = [ELEMENTS_HASH[element] for element in elements]
+            return
+        
+        # 传统模式下的过滤
         filtered_data = []
         elements_ids = [ELEMENTS_HASH[element] for element in elements]
 
@@ -116,9 +173,75 @@ class FieldDataset(Dataset):
             self.data = filtered_data
 
     def __len__(self):
+        if hasattr(self, 'use_lmdb') and self.use_lmdb:
+            if self.db is None:
+                self._connect_db()
+            return len(self.keys)
         return self.field_idxs.size(0)
 
     def __getitem__(self, index) -> Data:
+        if hasattr(self, 'use_lmdb') and self.use_lmdb:
+            return self._getitem_lmdb(index)
+        else:
+            return self._getitem_traditional(index)
+
+    def _getitem_lmdb(self, index) -> Data:
+        """LMDB模式下的数据获取"""
+        if self.db is None:
+            self._connect_db()
+        
+        key = self.keys[index]
+        sample_raw = pickle.loads(self.db.begin().get(key))
+        
+        # 检查元素过滤
+        if hasattr(self, 'elements_ids'):
+            atoms = sample_raw["atoms_channel"][sample_raw["atoms_channel"] != PADDING_INDEX]
+            include = True
+            for atom_id in atoms.unique():
+                if int(atom_id.item()) not in self.elements_ids:
+                    include = False
+                    break
+            if not include:
+                # 如果不符合元素要求，返回下一个有效的数据
+                return self._getitem_lmdb((index + 1) % len(self))
+        
+        # preprocess molecule (handles rotation and centering)
+        sample = self._preprocess_molecule(sample_raw)
+
+        # sample points for field prediction
+        xs = self._get_xs(sample)
+
+        # get data from preprocessed sample
+        coords = sample["coords"]
+        atoms_channel = sample["atoms_channel"]
+
+        # remove padding to handle variable-sized molecules
+        valid_mask = atoms_channel != PADDING_INDEX
+        coords = coords[valid_mask]
+        atoms_channel = atoms_channel[valid_mask]
+
+        # compute target gradient field (ground truth)
+        # Reshape xs to [1, n_points, 3] for batch processing
+        xs_batch = xs.unsqueeze(0)  # [1, n_points, 3]
+        coords_batch = coords.unsqueeze(0)  # [1, n_atoms, 3]
+        atoms_channel_batch = atoms_channel.unsqueeze(0)  # [1, n_atoms]
+        
+        with torch.no_grad():
+            target_field = self.gnf_converter.mol2gnf(coords_batch, atoms_channel_batch, xs_batch)
+            target_field = target_field.squeeze(0)  # [n_points, n_atom_types, 3]
+
+        # create torch_geometric data object
+        data = Data(
+            pos=coords.float(),
+            x=atoms_channel.long(),
+            xs=xs.float(),
+            target_field=target_field.float(),  # 新增：添加目标梯度场
+            idx=torch.tensor([index], dtype=torch.long)
+        )
+        return data
+
+    def _getitem_traditional(self, index) -> Data:
+        """传统模式下的数据获取"""
         # get raw data
         idx = self.field_idxs[index]
         sample_raw = self.data[idx]

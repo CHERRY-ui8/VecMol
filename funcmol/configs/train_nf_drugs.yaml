@@ -1,6 +1,6 @@
 defaults:
   - dset: drugs
-  - converter: gnf_converter
+  - converter: gnf_converter_drugs
   - encoder: gnn
   - decoder: decoder_global
   - override hydra/job_logging: custom

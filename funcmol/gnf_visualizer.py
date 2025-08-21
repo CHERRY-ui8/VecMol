@@ -426,7 +426,7 @@ class GNFVisualizer(MoleculeVisualizer):
                     metrics_history['kl_2to1'].append(kl_2to1)
         
         gif_path = os.path.join(self.recon_dir, f"{animation_name}.gif")
-        with imageio.get_writer(gif_path, mode='I', duration=0.1, fps=15, loop=0) as writer:
+        with imageio.get_writer(gif_path, mode='I', duration=0.1, fps=15, loop=1) as writer:
             for frame_path in frame_paths:
                 frame = imageio.imread(frame_path)
                 writer.append_data(frame)
@@ -518,7 +518,13 @@ def visualize_1d_gradient_field_comparison(
         if target_atoms.sum() > 0:
             available_atom_types.append(atom_type)
         else:
-            print(f"警告：样本 {sample_idx} 中没有类型为 {['C', 'H', 'O', 'N', 'F'][atom_type]} 的原子")
+            # 扩展原子类型名称列表以支持更多元素
+            atom_names = ['C', 'H', 'O', 'N', 'F', 'S', 'Cl', 'Br']
+            if atom_type < len(atom_names):
+                atom_name = atom_names[atom_type]
+            else:
+                atom_name = f"Type{atom_type}"
+            print(f"警告：样本 {sample_idx} 中没有类型为 {atom_name} 的原子")
     
     if not available_atom_types:
         print("没有找到任何指定的原子类型")
@@ -550,7 +556,12 @@ def visualize_1d_gradient_field_comparison(
     all_results = {}
     
     for atom_type in available_atom_types:
-        atom_name = ["C", "H", "O", "N", "F"][atom_type]
+        # 扩展原子类型名称列表以支持更多元素
+        atom_names = ["C", "H", "O", "N", "F", "S", "Cl", "Br"]
+        if atom_type < len(atom_names):
+            atom_name = atom_names[atom_type]
+        else:
+            atom_name = f"Type{atom_type}"
         
         # 获取梯度场数据
         gt_gradients_3d = gt_field[0, :, atom_type, :]

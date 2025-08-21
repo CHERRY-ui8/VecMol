@@ -1,6 +1,6 @@
 defaults:
   - dset: qm9
-  - converter: gnf_converter
+  - converter: gnf_converter_qm9
   - encoder: gnn
   - decoder: decoder_global
   - override hydra/job_logging: custom
