@@ -4,6 +4,7 @@ import os
 import random
 import pickle
 import lmdb
+import threading
 from typing import Optional
 
 from lightning import Fabric
@@ -15,6 +16,9 @@ from torch_geometric.loader import DataLoader
 from funcmol.models.decoder import get_grid
 from funcmol.utils.constants import ELEMENTS_HASH, PADDING_INDEX
 from funcmol.utils.gnf_converter import GNFConverter
+
+# 进程本地存储，用于在多进程环境下管理LMDB连接
+_thread_local = threading.local()
 
 
 class FieldDataset(Dataset):
@@ -84,7 +88,15 @@ class FieldDataset(Dataset):
         ) * self.resolution  # Scale by resolution to get real distances
         
         self.targeted_sampling_ratio = targeted_sampling_ratio if split == "train" else 0
-        self.field_idxs = torch.arange(len(self.data))
+        
+        # 根据数据加载方式设置field_idxs
+        if hasattr(self, 'use_lmdb') and self.use_lmdb:
+            # LMDB模式下，使用molid2idx的长度
+            self.field_idxs = torch.arange(len(self.molid2idx))
+        else:
+            # 传统模式下，使用data的长度
+            self.field_idxs = torch.arange(len(self.data))
+            
         self.discrete_grid, self.full_grid_high_res = get_grid(self.grid_dim, self.resolution)
         
         # 使用传入的GNFConverter实例
@@ -125,18 +137,30 @@ class FieldDataset(Dataset):
         print(f"  | Database contains {len(self.molid2idx)} molecules")
 
     def _connect_db(self):
-        """建立只读数据库连接"""
+        """建立只读数据库连接 - 进程安全版本"""
         if self.db is None:
-            self.db = lmdb.open(
-                self.lmdb_path,
-                map_size=10*(1024*1024*1024),   # 10GB
-                create=False,
-                subdir=False,
-                readonly=True,
-                lock=False,
-                readahead=False,
-                meminit=False,
-            )
+            import os
+            
+            # 使用线程本地存储确保每个worker进程有独立的连接
+            if not hasattr(_thread_local, 'lmdb_connections'):
+                _thread_local.lmdb_connections = {}
+            
+            # 为每个LMDB路径创建独立的连接
+            if self.lmdb_path not in _thread_local.lmdb_connections:
+                _thread_local.lmdb_connections[self.lmdb_path] = lmdb.open(
+                    self.lmdb_path,
+                    map_size=10*(1024*1024*1024),   # 10GB
+                    create=False,
+                    subdir=False,
+                    readonly=True,
+                    lock=False,
+                    readahead=False,
+                    meminit=False,
+                )
+            
+            self.db = _thread_local.lmdb_connections[self.lmdb_path]
+            
+            # 使用只读事务获取keys
             with self.db.begin() as txn:
                 self.keys = list(txn.cursor().iternext(values=False))
 
@@ -186,12 +210,24 @@ class FieldDataset(Dataset):
             return self._getitem_traditional(index)
 
     def _getitem_lmdb(self, index) -> Data:
-        """LMDB模式下的数据获取"""
+        """LMDB模式下的数据获取 - 进程安全版本"""
+        # 确保数据库连接在worker进程中建立
         if self.db is None:
             self._connect_db()
         
         key = self.keys[index]
-        sample_raw = pickle.loads(self.db.begin().get(key))
+        
+        # 使用更安全的事务处理
+        try:
+            with self.db.begin() as txn:
+                sample_raw = pickle.loads(txn.get(key))
+        except Exception as e:
+            # 如果事务失败，重新连接数据库
+            print(f"LMDB transaction failed, reconnecting: {e}")
+            self._close_db()
+            self._connect_db()
+            with self.db.begin() as txn:
+                sample_raw = pickle.loads(txn.get(key))
         
         # 检查元素过滤
         if hasattr(self, 'elements_ids'):

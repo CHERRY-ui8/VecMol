@@ -158,6 +158,10 @@ def train_nf(
     pbar = tqdm(enumerate(loader), total=len(loader), desc=f'Epoch {epoch}')
     running_loss = 0.0
     
+    # 初始化时间跟踪变量
+    last_time = time.time()
+    last_step = global_step
+    
     for i, data_batch in pbar:
         # 数据预处理
         data_batch = data_batch.to(fabric.device)
@@ -193,44 +197,44 @@ def train_nf(
         #         target_field = target_field[:, :min_points, :, :]
         
         # 调试：输出5个query_point的梯度场大小（每2000个batch输出一次）
-        if i % 2000 == 0 and fabric.global_rank == 0:
-            b_idx = 0  # 只看第一个样本
-            n_points = pred_field.shape[1]
-            
-            max_idx = min(n_points - 1, target_field.shape[1] - 1) if target_field.dim() >= 2 else 0
-            if max_idx < 4:  # 如果点数太少，跳过调试
-                fabric.print(f"[Debug] Not enough points for debugging (max_idx: {max_idx})")
-                continue
-                
-            idxs = random.sample(range(max_idx + 1), min(5, max_idx + 1))
-            norms = []
-            for idx in idxs:
-                # 取该query_point所有原子类型的3D向量，计算范数
-                vec = pred_field[b_idx, idx]  # [n_atom_types, 3]
-                norm = torch.norm(vec, dim=-1)  # [n_atom_types]
-                norms.append(norm.detach().cpu().numpy())
-            fabric.print(f"[Debug] 5个query_point的vector field范数: {norms}")
+        # if i % 2000 == 0 and fabric.global_rank == 0:
+        #     b_idx = 0  # 只看第一个样本
+        #     n_points = pred_field.shape[1]
+        #     
+        #     max_idx = min(n_points - 1, target_field.shape[1] - 1) if target_field.dim() >= 2 else 0
+        #     if max_idx < 4:  # 如果点数太少，跳过调试
+        #         fabric.print(f"[Debug] Not enough points for debugging (max_idx: {max_idx})")
+        #         continue
+        #         
+        #     idxs = random.sample(range(max_idx + 1), min(5, max_idx + 1))
+        #     norms = []
+        #     for idx in idxs:
+        #         # 取该query_point所有原子类型的3D向量，计算范数
+        #         vec = pred_field[b_idx, idx]  # [n_atom_types, 3]
+        #         norm = torch.norm(vec, dim=-1)  # [n_atom_types]
+        #         norms.append(norm.detach().cpu().numpy())
+        #     fabric.print(f"[Debug] 5个query_point的vector field范数: {norms}")
 
-            target_norms = []
-            rmsds = []
-            for idx in idxs:
-                # 确保target_field有正确的维度
-                if target_field.dim() == 4:
-                    target_vec = target_field[b_idx, idx]  # [n_atom_types, 3]
-                elif target_field.dim() == 3:
-                    target_vec = target_field[b_idx, idx]  # [n_atom_types, 3]
-                else:
-                    fabric.print(f"[Debug] Unexpected target_field dimension: {target_field.dim()}")
-                    continue
-                    
-                target_norm = torch.norm(target_vec, dim=-1)  # [n_atom_types]
-                target_norms.append(target_norm.detach().cpu().numpy())
-                # 计算RMSD
-                pred_vec = pred_field[b_idx, idx]  # [n_atom_types, 3]
-                rmsd = compute_rmsd(pred_vec, target_vec)
-                rmsds.append(rmsd.item() if hasattr(rmsd, 'item') else float(rmsd))
-            fabric.print(f"[Debug] 5个query_point的target field标准答案范数: {target_norms}")
-            fabric.print(f"[Debug] 5个query_point的vector field与target field RMSD: {rmsds}")
+        #     target_norms = []
+        #     rmsds = []
+        #     for idx in idxs:
+        #         # 确保target_field有正确的维度
+        #         if target_field.dim() == 4:
+        #             target_vec = target_field[b_idx, idx]  # [n_atom_types, 3]
+        #         elif target_field.dim() == 3:
+        #             target_vec = target_field[b_idx, idx]  # [n_atom_types, 3]
+        #         else:
+        #             fabric.print(f"[Debug] Unexpected target_field dimension: {target_field.dim()}")
+        #             continue
+        #             
+        #         target_norm = torch.norm(target_vec, dim=-1)  # [n_atom_types]
+        #         target_norms.append(target_norm.detach().cpu().numpy())
+        #         # 计算RMSD
+        #         pred_vec = pred_field[b_idx, idx]  # [n_atom_types, 3]
+        #         rmsd = compute_rmsd(pred_vec, target_vec)
+        #         rmsds.append(rmsd.item() if hasattr(rmsd, 'item') else float(rmsd))
+        #     fabric.print(f"[Debug] 5个query_point的target field标准答案范数: {target_norms}")
+        #     fabric.print(f"[Debug] 5个query_point的vector field与target field RMSD: {rmsds}")
 
         # 计算损失
         loss = criterion(pred_field, target_field)
@@ -246,6 +250,25 @@ def train_nf(
                 tensorboard_writer.add_scalar('Learning_Rate/Decoder', optim_dec.param_groups[0]['lr'], current_step)
             if hasattr(optim_enc, 'param_groups') and len(optim_enc.param_groups) > 0:
                 tensorboard_writer.add_scalar('Learning_Rate/Encoder', optim_enc.param_groups[0]['lr'], current_step)
+            
+            # 每10步记录一次训练速度指标
+            if current_step % 10 == 0:
+                # 记录训练速度（样本/秒）
+                time_diff = time.time() - last_time
+                step_diff = current_step - last_step
+                if step_diff > 0 and time_diff > 0:
+                    samples_per_sec = (step_diff * config.get('dset', {}).get('batch_size', 1)) / time_diff
+                    tensorboard_writer.add_scalar('Training/Samples_per_Second', samples_per_sec, current_step)
+                
+                last_time = time.time()
+                last_step = current_step
+                
+                # 记录GPU内存使用（如果可用）
+                if torch.cuda.is_available():
+                    gpu_memory_allocated = torch.cuda.memory_allocated() / (1024**3)  # GB
+                    gpu_memory_cached = torch.cuda.memory_reserved() / (1024**3)  # GB
+                    tensorboard_writer.add_scalar('GPU/Memory_Allocated_GB', gpu_memory_allocated, current_step)
+                    tensorboard_writer.add_scalar('GPU/Memory_Cached_GB', gpu_memory_cached, current_step)
             
             # 每100步记录一次更详细的指标
             if current_step % 100 == 0:
@@ -265,6 +288,14 @@ def train_nf(
                     if param.grad is not None:
                         tensorboard_writer.add_histogram(f'Encoder_Params/{name}', param.data, current_step)
                         tensorboard_writer.add_histogram(f'Encoder_Grads/{name}', param.grad.data, current_step)
+                
+                # 记录loss分布统计
+                if len(batch_train_losses) > 0:
+                    recent_losses = [l["total_loss"] for l in batch_train_losses[-100:]]
+                    if recent_losses:
+                        tensorboard_writer.add_scalar('Loss/Std_Dev', np.std(recent_losses), current_step)
+                        tensorboard_writer.add_scalar('Loss/Min', np.min(recent_losses), current_step)
+                        tensorboard_writer.add_scalar('Loss/Max', np.max(recent_losses), current_step)
         
         # 反向传播
         optim_dec.zero_grad()
@@ -635,10 +666,13 @@ def load_neural_field(nf_checkpoint: dict, fabric: object, config: dict = None) 
         "n_layers": config["decoder"]["n_layers"],
         "k_neighbors": config["decoder"]["k_neighbors"],
         "n_channels": config["dset"]["n_channels"],
-        "code_dim": config["decoder"]["code_dim"]
+        "code_dim": config["decoder"]["code_dim"],
+        "radius": config["decoder"].get("radius", 3.0),  # Add radius parameter with default
+        "cutoff": config["decoder"].get("cutoff", None)  # Add cutoff parameter with default
     }, device=fabric.device)
     dec = load_network(nf_checkpoint, dec, fabric, net_name="dec")
-    dec = torch.compile(dec)
+    # Disable torch.compile due to compatibility issues with torch_cluster
+    # dec = torch.compile(dec)
     dec.eval()
     
     enc = CrossGraphEncoder(
@@ -779,9 +813,10 @@ def infer_codes(
             if to_cpu:
                 codes = codes.cpu()
             
-            # Gather codes in distributed environment
+            # Gather codes in distributed environment - 保持原始形状
             if fabric is not None:
-                codes = fabric.all_gather(codes).view(-1, config["decoder"]["code_dim"])
+                codes = fabric.all_gather(codes)
+                # 不进行reshape，保持原始形状 [B, n_grid, code_dim]
             
             codes_all.append(codes)
             total_samples += codes.size(0)

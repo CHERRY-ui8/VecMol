@@ -35,6 +35,7 @@ use_lr_schedule: 1
 num_warmup_iter: 4000
 wd: 1e-2
 ema_decay: 0.9999
+max_grad_norm: 1.0  # 梯度裁剪阈值，防止梯度爆炸
 
 # set the running dir
 hydra:

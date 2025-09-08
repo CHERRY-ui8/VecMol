@@ -7,6 +7,7 @@ from tqdm import tqdm
 from funcmol.utils.utils_fm import add_noise_to_code
 from funcmol.utils.utils_base import save_xyz, convert_xyzs_to_sdf
 from funcmol.models.unet1d import MLPResCode
+from funcmol.models.egnn_denoiser import GNNDenoiser
 
 
 ########################################################################################
@@ -28,7 +29,8 @@ def create_funcmol(config: dict, fabric: object):
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     fabric.print(f">> FuncMol has {(n_params/1e6):.02f}M parameters")
 
-    model = torch.compile(model)
+    # Disable torch.compile due to compatibility issues with torch_cluster
+    # model = torch.compile(model)
 
     return model
 
@@ -40,16 +42,34 @@ class FuncMol(nn.Module):
         super().__init__()
         self.device = fabric.device
         self.smooth_sigma = config["smooth_sigma"]
+        self.grid_size = config["dset"]["grid_size"]  # 保存grid_size配置
 
-        # denoiser model
-        self.net = MLPResCode(
-            code_dim=config["decoder"]["code_dim"],
-            n_hidden_units=config["denoiser"]["n_hidden_units"],
-            num_blocks=config["denoiser"]["num_blocks"],
-            n_groups=config["denoiser"]["n_groups"],
-            dropout=config["denoiser"]["dropout"],
-            bias_free=config["denoiser"]["bias_free"],
-        )
+        # 根据配置选择denoiser类型
+        if config.get("denoiser", {}).get("use_gnn", False):
+            # 使用GNN denoiser
+            self.net = GNNDenoiser(
+                code_dim=config["decoder"]["code_dim"],
+                hidden_dim=config["denoiser"]["n_hidden_units"],
+                num_blocks=config["denoiser"]["num_blocks"],
+                k_neighbors=config["denoiser"]["k_neighbors"],
+                cutoff=config["denoiser"]["cutoff"],
+                radius=config["denoiser"]["radius"],
+                dropout=config["denoiser"]["dropout"],
+                grid_size=config["dset"]["grid_size"],
+                anchor_spacing=config["dset"]["anchor_spacing"],
+                use_radius_graph=config["denoiser"]["use_radius_graph"],
+                device=self.device
+            )
+        else:
+            # 使用MLP denoiser (默认)
+            self.net = MLPResCode(
+                code_dim=config["decoder"]["code_dim"],
+                n_hidden_units=config["denoiser"]["n_hidden_units"],
+                num_blocks=config["denoiser"]["num_blocks"],
+                n_groups=config["denoiser"]["n_groups"],
+                dropout=config["denoiser"]["dropout"],
+                bias_free=config["denoiser"]["bias_free"],
+            )
 
     def forward(self, y: torch.Tensor):
         """
@@ -160,11 +180,14 @@ class FuncMol(nn.Module):
 
         Returns:
             tuple: A tuple containing:
-                - y (torch.Tensor): Tensor of shape (n_chains, code_dim) with added Gaussian noise.
+                - y (torch.Tensor): Tensor of shape (n_chains, n_grid, code_dim) with added Gaussian noise.
                 - torch.Tensor: Tensor of zeros with the same shape as `y`.
         """
-        # uniform noise - no longer use normalized bounds
-        y = torch.empty((n_chains, code_dim), device=self.device, dtype=torch.float32).uniform_(-1, 1)
+        # 计算grid维度 - 使用保存的grid_size
+        n_grid = self.grid_size ** 3
+        
+        # uniform noise - 生成包含grid维度的codes
+        y = torch.empty((n_chains, n_grid, code_dim), device=self.device, dtype=torch.float32).uniform_(-1, 1)
 
         # gaussian noise
         y = add_noise_to_code(y, self.smooth_sigma)
@@ -230,6 +253,25 @@ class FuncMol(nn.Module):
         codes = torch.cat(codes_all, dim=0)
         fabric.print(f">> Generated {codes.size(0)} codes")
         
+        # 添加调试信息：检查codes的维度和内容
+        fabric.print(f">> Codes shape: {codes.shape}")
+        fabric.print(f">> Codes dtype: {codes.dtype}")
+        fabric.print(f">> Codes device: {codes.device}")
+        
+        # 检查codes是否包含NaN/Inf
+        if torch.isnan(codes).any():
+            fabric.print(f">> WARNING: codes contains NaN values!")
+            nan_count = torch.isnan(codes).sum().item()
+            fabric.print(f">> NaN count: {nan_count}")
+        
+        if torch.isinf(codes).any():
+            fabric.print(f">> WARNING: codes contains Inf values!")
+            inf_count = torch.isinf(codes).sum().item()
+            fabric.print(f">> Inf count: {inf_count}")
+        
+        # 检查codes的数值范围
+        fabric.print(f">> Codes min: {codes.min().item():.6f}, max: {codes.max().item():.6f}")
+        
         # need to batch the codes to avoid OOM
         if config["dset"]["grid_dim"] >= 96 and codes.size(0) >= 2000:
             batch_size_render_codes = 2000
@@ -242,7 +284,17 @@ class FuncMol(nn.Module):
         fabric.print(f">> Splitting codes for rendering in batches of {batch_size_render_codes}")
         
         try:
-            for batched_code in tqdm(batched_codes):
+            for i, batched_code in enumerate(tqdm(batched_codes)):
+                fabric.print(f">> Processing batch {i+1}/{len(batched_codes)}, batch shape: {batched_code.shape}")
+                
+                # 检查当前batch的codes
+                if torch.isnan(batched_code).any():
+                    fabric.print(f">> ERROR: Batch {i} contains NaN values!")
+                    continue
+                if torch.isinf(batched_code).any():
+                    fabric.print(f">> ERROR: Batch {i} contains Inf values!")
+                    continue
+                    
                 batch_mols = dec.codes_to_molecules(batched_code, unnormalize=False, fabric=fabric, config=config)
                 mols += batch_mols
                 # 清理批次内存
@@ -250,6 +302,8 @@ class FuncMol(nn.Module):
                 torch.cuda.empty_cache()
         except Exception as e:
             fabric.print(f"Error during molecule generation: {e}")
+            fabric.print(f"Current batch index: {i}")
+            fabric.print(f"Current batch shape: {batched_code.shape}")
             raise e
 
         # save the molecules in sdf file

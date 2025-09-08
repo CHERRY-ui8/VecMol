@@ -69,31 +69,111 @@ class Decoder(nn.Module):
         Returns:
             torch.Tensor: A tensor representing the rendered molecules in a grid format.
         """
+        # 添加调试信息
+        fabric.print(f">> render_code - input codes shape: {codes.shape}")
+        fabric.print(f">> render_code - batch_size_render: {batch_size_render}")
+        
+        # 检查输入
+        if torch.isnan(codes).any():
+            fabric.print(f">> ERROR: Input codes contains NaN values!")
+            raise ValueError("Input codes contains NaN values")
+        
+        if torch.isinf(codes).any():
+            fabric.print(f">> ERROR: Input codes contains Inf values!")
+            raise ValueError("Input codes contains Inf values")
+        
         # PS: code need to be unnormealized before rendering
         with torch.no_grad():
             if fabric:
                 fabric.print(f">> Rendering molecules - batches of {batch_size_render}")
             if codes.device != self.device:
                 codes = codes.to(self.device)
+            
+            # 添加调试信息：检查coords的维度
+            if fabric:
+                fabric.print(f">> self.coords shape: {self.coords.shape}")
+                fabric.print(f">> self.grid_dim: {self.grid_dim}")
+                fabric.print(f">> Expected coords size: {self.grid_dim**3}")
+            
+            # 检查coords维度是否正确
+            expected_coords_size = self.grid_dim ** 3
+            if self.coords.numel() != expected_coords_size * 3:
+                fabric.print(f">> ERROR: coords size mismatch! Expected {expected_coords_size * 3}, got {self.coords.numel()}")
+                raise ValueError(f"coords size mismatch: expected {expected_coords_size * 3}, got {self.coords.numel()}")
+            
+            # 检查并调整batch_size_render，确保不会超过xs的大小
+            if batch_size_render > expected_coords_size:
+                if fabric:
+                    fabric.print(f">> WARNING: batch_size_render ({batch_size_render}) > expected_coords_size ({expected_coords_size})")
+                    fabric.print(f">> Adjusting batch_size_render to {expected_coords_size}")
+                batch_size_render = expected_coords_size
+            
             xs = self.coords.reshape(1, -1, 3)
-            pred = self.forward_batched(xs, codes, batch_size_render=batch_size_render, threshold=0.2)
-            grid = pred.permute(0, 2, 1).reshape(-1, self.n_channels, self.grid_dim, self.grid_dim, self.grid_dim)
+            if fabric:
+                fabric.print(f">> xs shape after reshape: {xs.shape}")
+                fabric.print(f">> Final batch_size_render: {batch_size_render}")
+            
+            # 检查codes的batch大小，如果超过batch_size_render则分批处理
+            codes_batch_size = codes.size(0)
+            if codes_batch_size > batch_size_render:
+                # 分批处理codes
+                codes_batches = torch.split(codes, batch_size_render, dim=0)
+                if fabric:
+                    fabric.print(f">> Splitting codes into {len(codes_batches)} batches for rendering")
+                
+                pred_list = []
+                for i, codes_batch in enumerate(codes_batches):
+                    if fabric:
+                        fabric.print(f">> Processing codes batch {i+1}/{len(codes_batches)}, codes shape: {codes_batch.shape}")
+                    
+                    # 为每个codes batch创建对应的xs
+                    xs_batch = xs.expand(codes_batch.size(0), -1, -1)  # [batch_size, 729, 3]
+                    if fabric:
+                        fabric.print(f">> xs_batch shape: {xs_batch.shape}")
+                    
+                    pred_batch = self.forward_batched(xs_batch, codes_batch, batch_size_render=batch_size_render, threshold=0.2, fabric=fabric)
+                    pred_list.append(pred_batch)
+                
+                pred = torch.cat(pred_list, dim=0)  # 在batch维度上拼接
+            else:
+                # 直接处理，确保xs和codes的batch维度匹配
+                xs_expanded = xs.expand(codes.size(0), -1, -1)  # [batch_size, 729, 3]
+                if fabric:
+                    fabric.print(f">> xs_expanded shape: {xs_expanded.shape}")
+                pred = self.forward_batched(xs_expanded, codes, batch_size_render=batch_size_render, threshold=0.2, fabric=fabric)
+            
+            # pred的形状是[B, N, T, 3]，需要转换为[B, T, N, 3]然后reshape
+            if pred.dim() == 4:  # [B, N, T, 3]
+                pred = pred.permute(0, 2, 1, 3)  # [B, T, N, 3]
+                grid = pred.reshape(-1, self.n_channels, self.grid_dim, self.grid_dim, self.grid_dim)
+            else:  # [B, N, T, 3] -> [B, T, N, 3]
+                grid = pred.permute(0, 2, 1).reshape(-1, self.n_channels, self.grid_dim, self.grid_dim, self.grid_dim)
         return grid
 
-    def forward_batched(self, xs, codes, batch_size_render=100_000, threshold=None, to_cpu=True):
+    def forward_batched(self, xs, codes, batch_size_render=100_000, threshold=None, to_cpu=True, fabric=None):
         """
         When memory is limited, render the grid in batches.
         """
-        pred_list = []
-        batched_xs = torch.split(xs, batch_size_render, dim=1)
-        for x in tqdm(batched_xs):
-            pred_batched = self(x, codes)
+        # 添加调试信息
+        if fabric:
+            fabric.print(f">> forward_batched - xs shape: {xs.shape}")
+            fabric.print(f">> forward_batched - codes shape: {codes.shape}")
+            fabric.print(f">> forward_batched - batch_size_render: {batch_size_render}")
+        
+        # 现在xs和codes的batch维度应该匹配，直接调用decoder
+        try:
+            pred = self(xs, codes)
             if to_cpu:
-                pred_batched = pred_batched.cpu()
+                pred = pred.cpu()
             if threshold is not None:
-                pred_batched[pred_batched < threshold] = 0
-            pred_list.append(pred_batched)
-        pred = torch.cat(pred_list, dim=1)
+                pred[pred < threshold] = 0
+        except Exception as e:
+            if fabric:
+                fabric.print(f">> ERROR in forward_batched: {e}")
+                fabric.print(f">>   xs shape: {xs.shape}")
+                fabric.print(f">>   codes shape: {codes.shape}")
+            raise e
+        
         return pred
 
     def codes_to_molecules(
@@ -118,6 +198,21 @@ class Decoder(nn.Module):
         mols_dict = defaultdict(list)
         codes_dict = defaultdict(list)
 
+        # 添加输入验证和调试信息
+        fabric.print(f">> codes_to_molecules input - codes shape: {codes.shape}")
+        fabric.print(f">> codes_to_molecules input - codes device: {codes.device}")
+        
+        # 检查输入codes
+        if torch.isnan(codes).any():
+            fabric.print(f">> ERROR: Input codes contains NaN values!")
+            fabric.print(f">> NaN positions: {torch.where(torch.isnan(codes))}")
+            raise ValueError("Input codes contains NaN values")
+        
+        if torch.isinf(codes).any():
+            fabric.print(f">> ERROR: Input codes contains Inf values!")
+            fabric.print(f">> Inf positions: {torch.where(torch.isinf(codes))}")
+            raise ValueError("Input codes contains Inf values")
+        
         codes = codes.detach()
         # No longer unnormalize codes
         # if unnormalize:
@@ -166,17 +261,37 @@ class Decoder(nn.Module):
         Returns:
             tuple: A tuple containing the grid shape, molecule objects, dictionaries of molecule objects, codes, and indices.
         """
+        fabric.print(f">> codes_to_grid - input codes shape: {codes.shape}")
+        
         # 1. render grid
+        fabric.print(f">> Rendering grid with batch_size_render: {config['wjs']['batch_size_render']}")
         grids = self.render_code(codes, config["wjs"]["batch_size_render"], fabric)
+        fabric.print(f">> Rendered grids: {len(grids)} grids")
+        
+        # 检查grids的内容
+        for i, grid in enumerate(grids):
+            if grid is not None:
+                fabric.print(f">> Grid {i} shape: {grid.shape}")
+                if torch.isnan(grid).any():
+                    fabric.print(f">> WARNING: Grid {i} contains NaN values!")
+                if torch.isinf(grid).any():
+                    fabric.print(f">> WARNING: Grid {i} contains Inf values!")
+            else:
+                fabric.print(f">> Grid {i} is None")
 
         # 2. find peaks (atom coordinates)
         fabric.print(">> Finding peaks")
         for idx, grid in tqdm(enumerate(grids)):
+            if grid is None:
+                fabric.print(f">> Skipping None grid at index {idx}")
+                continue
+                
             mol_init = get_atom_coords(grid, rad=config["dset"]["atomic_radius"])
             if mol_init is not None:
                 # No longer normalize coordinates
                 # mol_init = _normalize_coords(mol_init, self.grid_dim)
                 num_coords = int(mol_init["coords"].size(1))
+                fabric.print(f">> Grid {idx}: found {num_coords} atoms")
                 if num_coords <= 500:
                     mols_dict[num_coords].append(mol_init)
                     codes_dict[num_coords].append(codes[idx].cpu())
@@ -184,6 +299,12 @@ class Decoder(nn.Module):
                     fabric.print(f"Molecule {idx} has more than 500 atoms")
             else:
                 fabric.print(f"No atoms found in grid {idx}")
+        
+        # 添加调试信息
+        fabric.print(f">> After codes_to_grid - mols_dict keys: {list(mols_dict.keys())}")
+        for key, value in mols_dict.items():
+            fabric.print(f">>   Key {key}: {len(value)} molecules")
+        
         return mols_dict, codes_dict
 
     def _refine_coords(

@@ -15,8 +15,8 @@ import numpy as np
 
 # 在导入torch之前设置GPU，如果要多卡训练，就注释掉这一段
 # TODO：手动指定要使用的GPU（0, 1, 或 2）
-gpu_id = 5  # 修改这里的数字来指定GPU编号
-os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+gpu_id = "0,1,2,3,4,5,6,7"  # 修改这里的数字来指定GPU编号，使用字符串格式，多卡用逗号分隔
+os.environ['CUDA_VISIBLE_DEVICES'] = gpu_id
 print(f"Setting CUDA_VISIBLE_DEVICES={gpu_id}")
 
 from funcmol.utils.utils_nf import train_nf, create_neural_field, eval_nf
@@ -52,46 +52,58 @@ def plot_loss_curve(train_losses, val_losses, save_path, title_suffix=""):
 @hydra.main(config_path="configs", config_name="train_nf_qm9", version_base=None)
 def main(config):
     ##### 多卡模式
-    # # 设置CUDA内存分配策略
-    # os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
-    
-    # # 设置NCCL环境变量以避免通信问题
-    # os.environ['NCCL_DEBUG'] = 'INFO'
-    # os.environ['NCCL_TIMEOUT'] = '1800'  # 30分钟超时
-    # os.environ['NCCL_IB_DISABLE'] = '1'  # 禁用InfiniBand
-    # os.environ['NCCL_P2P_DISABLE'] = '1'  # 禁用P2P通信
-    # os.environ['NCCL_SOCKET_IFNAME'] = 'lo'  # 使用本地回环接口
-    # os.environ['TORCH_NCCL_BLOCKING_WAIT'] = '1'  # 使用新的推荐设置
-    # os.environ['CUDA_LAUNCH_BLOCKING'] = '0'  # 禁用同步CUDA操作以提高性能
-    
-    # # 获取可用的GPU数量
-    # num_gpus = torch.cuda.device_count()
-    # print(f"Available GPUs: {num_gpus}")
-    
-    # # 初始化fabric，支持多卡训练
-    # fabric = Fabric(
-    #     accelerator="gpu",
-    #     devices=num_gpus,  # 使用所有可用的GPU
-    #     strategy="ddp",    # 使用分布式数据并行策略
-    #     precision="bf16-mixed"
-    # )
-
-    ##### 单卡模式
+    # 设置CUDA内存分配策略
     os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
     
-    # 初始化fabric
+    # 减少PyTorch和Lightning的详细输出
+    os.environ['TORCH_DISTRIBUTED_DEBUG'] = 'OFF'  # 关闭分布式调试信息
+    os.environ['LIGHTNING_CLI_USAGE'] = 'OFF'  # 关闭Lightning CLI使用信息
+    
+    # 设置NCCL环境变量以避免通信问题
+    os.environ['NCCL_DEBUG'] = 'WARN'  # 只显示警告和错误，不显示INFO
+    os.environ['NCCL_TIMEOUT'] = '1800'  # 30分钟超时
+    os.environ['NCCL_IB_DISABLE'] = '1'  # 禁用InfiniBand
+    os.environ['NCCL_P2P_DISABLE'] = '1'  # 禁用P2P通信
+    os.environ['NCCL_SOCKET_IFNAME'] = 'lo'  # 使用本地回环接口
+    os.environ['TORCH_NCCL_BLOCKING_WAIT'] = '1'  # 使用新的推荐设置
+    os.environ['CUDA_LAUNCH_BLOCKING'] = '0'  # 禁用同步CUDA操作以提高性能
+    
+    # 添加更多NCCL稳定性设置
+    os.environ['NCCL_ASYNC_ERROR_HANDLING'] = '1'  # 启用异步错误处理
+    os.environ['NCCL_BUFFSIZE'] = '2097152'  # 增加缓冲区大小
+    os.environ['NCCL_NTHREADS'] = '4'  # 设置线程数
+    
+    # 获取可用的GPU数量
+    num_gpus = torch.cuda.device_count()
+    print(f"Available GPUs: {num_gpus}")
+    
+    # 初始化fabric，支持多卡训练
+    from lightning.fabric.strategies import DDPStrategy
+    ddp_strategy = DDPStrategy(find_unused_parameters=True)  # 必须设置为True，因为有未使用的参数
+    
     fabric = Fabric(
         accelerator="gpu",
-        devices=1,  # 使用cuda:0（通过CUDA_VISIBLE_DEVICES设置）
+        devices=num_gpus,  # 使用所有可用的GPU
+        strategy=ddp_strategy,    # 使用分布式数据并行策略
         precision="bf16-mixed"
     )
+
+    ##### 单卡模式
+    # os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+    
+    # # 初始化fabric
+    # fabric = Fabric(
+    #     accelerator="gpu",
+    #     devices=1,  # 使用cuda:0（通过CUDA_VISIBLE_DEVICES设置）
+    #     precision="bf16-mixed"
+    # )
     fabric.launch()
     
     fabric.print(">> start training the neural field", config["exp_name"])
     ##### 多卡模式
-    # fabric.print(f">> Using {num_gpus} GPUs with DDP strategy")
+    fabric.print(f">> Using {num_gpus} GPUs with DDP strategy")
     ##### 单卡模式
-    fabric.print(f">> Using GPU {gpu_id}")
+    # fabric.print(f">> Using GPU {gpu_id}")
     
     # 添加调试信息
     fabric.print(f">> Torch device count: {torch.cuda.device_count()}")
@@ -340,7 +352,22 @@ def main(config):
                         np.array([l["total_loss"] for l in batch_losses])
                     )
             else:
-                fabric.barrier()
+                try:
+                    # 添加超时处理，避免NCCL超时
+                    import signal
+                    
+                    def timeout_handler(signum, frame):
+                        raise TimeoutError("Barrier operation timed out")
+                    
+                    # 设置30秒超时
+                    signal.signal(signal.SIGALRM, timeout_handler)
+                    signal.alarm(30)
+                    
+                    fabric.barrier()
+                    signal.alarm(0)  # 取消超时
+                except (TimeoutError, Exception) as e:
+                    print(f"Warning: Barrier operation failed: {e}")
+                    signal.alarm(0)  # 确保取消超时
         
         # log
         elapsed_time = time.time() - start_time

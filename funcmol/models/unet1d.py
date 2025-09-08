@@ -87,27 +87,43 @@ class MLPResCode(nn.Module):
             self.final.bias.data.zero_()
 
     def forward(self, x: torch.Tensor):
-        x = x.squeeze(1)
-        x = self.projection(x)
+        # 处理输入维度 - 现在只支持3D输入 [batch_size, n_grid, code_dim]
+        if x.dim() == 4:  # [batch_size, 1, n_grid, code_dim]
+            x = x.squeeze(1)  # [batch_size, n_grid, code_dim]
+        elif x.dim() == 3:  # [batch_size, n_grid, code_dim]
+            pass
+        else:
+            raise ValueError(f"Expected 3D or 4D input, got {x.dim()}D: {x.shape}")
+        
+        batch_size, n_grid, code_dim = x.shape
+        
+        # 重塑为2D进行处理
+        x_reshaped = x.view(batch_size * n_grid, code_dim)
+        
+        # 投影
+        x_reshaped = self.projection(x_reshaped)
 
         # encoder
-        hidden = [x]
+        hidden = [x_reshaped]
         for m in self.enc:
-            x = m(x)
-            hidden.append(x)
+            x_reshaped = m(x_reshaped)
+            hidden.append(x_reshaped)
 
         # bottleneck
-        x = self.middle(x)
+        x_reshaped = self.middle(x_reshaped)
 
         # decoder
         for dec in self.dec:
             hid = hidden.pop()
-            x = torch.add(x, hid)
-            x = dec(x)
+            x_reshaped = torch.add(x_reshaped, hid)
+            x_reshaped = dec(x_reshaped)
 
         if hasattr(self, "norm"):
-            x = self.norm(x)
-        x = self.act(x)
-        x = self.final(x)
+            x_reshaped = self.norm(x_reshaped)
+        x_reshaped = self.act(x_reshaped)
+        x_reshaped = self.final(x_reshaped)
+        
+        # 重塑回原始维度
+        x = x_reshaped.view(batch_size, n_grid, code_dim)
 
         return x

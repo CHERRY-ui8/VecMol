@@ -220,7 +220,8 @@ class GNFConverter(nn.Module):
     def gnf2mol(self, grad_field: torch.Tensor, 
                 decoder: nn.Module,
                 codes: torch.Tensor,
-                atom_types: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+                atom_types: Optional[torch.Tensor] = None,
+                fabric: object = None) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         直接用梯度场重建分子坐标。
         Args:
@@ -233,12 +234,63 @@ class GNFConverter(nn.Module):
         """
         device = grad_field.device
         batch_size, n_points, n_atom_types, _ = grad_field.shape
+        
+        # 添加详细的输入验证
+        if fabric:
+            fabric.print(f">> gnf2mol input validation:")
+            fabric.print(f">>   grad_field shape: {grad_field.shape}")
+            fabric.print(f">>   codes shape: {codes.shape}")
+            fabric.print(f">>   batch_size from grad_field: {batch_size}")
+            fabric.print(f">>   codes batch_size: {codes.size(0)}")
+            
+            # 检查维度匹配
+            if batch_size != codes.size(0):
+                fabric.print(f">> WARNING: Dimension mismatch! grad_field batch_size ({batch_size}) != codes batch_size ({codes.size(0)})")
+                # 使用较小的batch_size
+                batch_size = min(batch_size, codes.size(0))
+                fabric.print(f">> Adjusted batch_size to: {batch_size}")
+            
+            fabric.print(f">> Using n_query_points: {n_query_points}")
+        else:
+            # 如果没有fabric，仍然进行维度检查但不打印
+            if batch_size != codes.size(0):
+                batch_size = min(batch_size, codes.size(0))
+        
         n_query_points = min(self.n_query_points, n_points)
 
         all_coords = []
         all_types = []
         # 对每个batch分别处理
         for b in range(batch_size):
+            if fabric:
+                fabric.print(f">> Processing batch {b}/{batch_size}")
+            
+            # 检查索引边界
+            if b >= codes.size(0):
+                if fabric:
+                    fabric.print(f">> ERROR: Index {b} out of bounds for codes with size {codes.size(0)}")
+                break
+            
+            # 检查当前batch的codes
+            current_codes = codes[b:b+1]
+            if fabric:
+                fabric.print(f">>   Current codes shape: {current_codes.shape}")
+            
+            if current_codes.numel() == 0:
+                if fabric:
+                    fabric.print(f">> WARNING: Empty codes at batch {b}")
+                continue
+            
+            if torch.isnan(current_codes).any():
+                if fabric:
+                    fabric.print(f">> ERROR: codes at batch {b} contains NaN values!")
+                continue
+            
+            if torch.isinf(current_codes).any():
+                if fabric:
+                    fabric.print(f">> ERROR: codes at batch {b} contains Inf values!")
+                continue
+            
             coords_list = []
             types_list = []
             # 对每个原子类型分别做流动和聚类
@@ -252,8 +304,26 @@ class GNFConverter(nn.Module):
                 
                 # 计算候选点的梯度场强度
                 candidate_batch = candidate_points.unsqueeze(0)  # [1, n_candidates, 3]
-                candidate_field = decoder(candidate_batch, codes[b:b+1])  # [1, n_candidates, n_atom_types, 3]
-                candidate_grad = candidate_field[0, :, t, :]  # [n_candidates, 3]
+                
+                try:
+                    if fabric:
+                        fabric.print(f">>     Calling decoder with candidate_batch shape: {candidate_batch.shape}")
+                        fabric.print(f">>     Using codes[b:b+1] shape: {current_codes.shape}")
+                    
+                    candidate_field = decoder(candidate_batch, current_codes)  # [1, n_candidates, n_atom_types, 3]
+                    if fabric:
+                        fabric.print(f">>     Decoder output shape: {candidate_field.shape}")
+                    
+                    candidate_grad = candidate_field[0, :, t, :]  # [n_candidates, 3]
+                    
+                except Exception as e:
+                    if fabric:
+                        fabric.print(f">> ERROR in atom type {t}: {e}")
+                        fabric.print(f">>   candidate_batch shape: {candidate_batch.shape}")
+                        fabric.print(f">>   current_codes shape: {current_codes.shape}")
+                        fabric.print(f">>   current_codes device: {current_codes.device}")
+                        fabric.print(f">>   candidate_batch device: {candidate_batch.device}")
+                    raise e
                 
                 # 计算梯度场强度（模长）
                 grad_magnitudes = torch.norm(candidate_grad, dim=1)  # [n_candidates]
@@ -267,18 +337,31 @@ class GNFConverter(nn.Module):
                 z = candidate_points[sampled_indices]  # [n_query_points, 3]
                 
                 # 2. 梯度上升（每次迭代都重新计算梯度！）
-                for _ in range(self.n_iter):
+                for iter_idx in range(self.n_iter):
                     # 在新位置计算梯度场
                     z_batch = z.unsqueeze(0)  # [1, n_query_points, 3]
-                    current_field = decoder(z_batch, codes[b:b+1])  # [1, n_query_points, n_atom_types, 3]
-                    grad = current_field[0, :, t, :]  # [n_query_points, 3]
                     
-                    # 使用原子类型特定的sigma调整步长，保持与训练时的一致性
-                    sigma_ratio = self.sigma_params.get(t, self.sigma) / self.sigma
-                    adjusted_step_size = self.step_size * sigma_ratio
-                    
-                    # 更新采样点位置
-                    z = z + adjusted_step_size * grad
+                    try:
+                        current_field = decoder(z_batch, current_codes)  # [1, n_query_points, n_atom_types, 3]
+                        grad = current_field[0, :, t, :]  # [n_query_points, 3]
+                        
+                        # 检查梯度是否包含NaN/Inf
+                        if torch.isnan(grad).any() or torch.isinf(grad).any():
+                            if fabric:
+                                fabric.print(f">>     WARNING: Gradient contains NaN/Inf at iteration {iter_idx}")
+                            break
+                        
+                        # 使用原子类型特定的sigma调整步长，保持与训练时的一致性
+                        sigma_ratio = self.sigma_params.get(t, self.sigma) / self.sigma
+                        adjusted_step_size = self.step_size * sigma_ratio
+                        
+                        # 更新采样点位置
+                        z = z + adjusted_step_size * grad
+                        
+                    except Exception as e:
+                        if fabric:
+                            fabric.print(f">> ERROR in gradient ascent iteration {iter_idx}: {e}")
+                        break
                                     
                 # 3. 聚类/合并
                 z_np = z.detach().cpu().numpy()

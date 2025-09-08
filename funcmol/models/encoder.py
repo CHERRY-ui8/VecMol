@@ -138,10 +138,10 @@ class CrossGraphEncoder(nn.Module):
         )  # [2, E] 其中 E = k_neighbors * N_total_atoms (22240 = 32 * 695)
         
         # 添加调试信息
-        print(f"DEBUG: grid_to_atom_edges.shape: {grid_to_atom_edges.shape}")
-        print(f"DEBUG: grid_to_atom_edges[0].max(): {grid_to_atom_edges[0].max()}, grid_to_atom_edges[1].max(): {grid_to_atom_edges[1].max()}")
-        print(f"DEBUG: N_total_atoms: {N_total_atoms}, B*n_grid: {B*n_grid}")
-        print(f"DEBUG: atom_coords.shape: {atom_coords.shape}, grid_coords_flat.shape: {grid_coords_flat.shape}")
+        # print(f"DEBUG: grid_to_atom_edges.shape: {grid_to_atom_edges.shape}")
+        # print(f"DEBUG: grid_to_atom_edges[0].max(): {grid_to_atom_edges[0].max()}, grid_to_atom_edges[1].max(): {grid_to_atom_edges[1].max()}")
+        # print(f"DEBUG: N_total_atoms: {N_total_atoms}, B*n_grid: {B*n_grid}")
+        # print(f"DEBUG: atom_coords.shape: {atom_coords.shape}, grid_coords_flat.shape: {grid_coords_flat.shape}")
         
         # 修正边索引：网格节点索引需要加上N_total_atoms的偏移量
         # grid_to_atom_edges[0] 是网格索引，需要加上偏移量
@@ -150,16 +150,16 @@ class CrossGraphEncoder(nn.Module):
         # 交换边的方向
         grid_to_atom_edges = torch.stack([grid_to_atom_edges[1], grid_to_atom_edges[0]], dim=0)
         
-        print(f"DEBUG: After correction - grid_to_atom_edges[0].max(): {grid_to_atom_edges[0].max()}, grid_to_atom_edges[1].max(): {grid_to_atom_edges[1].max()}")
-        print(f"DEBUG: atom_edge_index.shape: {atom_edge_index.shape}")
-        print(f"DEBUG: atom_edge_index[0].max(): {atom_edge_index[0].max()}, atom_edge_index[1].max(): {atom_edge_index[1].max()}")
+        # print(f"DEBUG: After correction - grid_to_atom_edges[0].max(): {grid_to_atom_edges[0].max()}, grid_to_atom_edges[1].max(): {grid_to_atom_edges[1].max()}")
+        # print(f"DEBUG: atom_edge_index.shape: {atom_edge_index.shape}")
+        # print(f"DEBUG: atom_edge_index[0].max(): {atom_edge_index[0].max()}, atom_edge_index[1].max(): {atom_edge_index[1].max()}")
                 
         # 合并所有边
         edge_index = torch.cat([atom_edge_index, grid_to_atom_edges], dim=1)
         
-        print(f"DEBUG: Final edge_index.shape: {edge_index.shape}")
-        print(f"DEBUG: Final edge_index[0].max(): {edge_index[0].max()}, edge_index[1].max(): {edge_index[1].max()}")
-        print(f"DEBUG: node_pos.shape: {node_pos.shape}")
+        # print(f"DEBUG: Final edge_index.shape: {edge_index.shape}")
+        # print(f"DEBUG: Final edge_index[0].max(): {edge_index[0].max()}, edge_index[1].max(): {edge_index[1].max()}")
+        # print(f"DEBUG: node_pos.shape: {node_pos.shape}")
 
         # 6. GNN消息传递
         h = node_feats

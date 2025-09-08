@@ -13,7 +13,7 @@ from funcmol.utils.utils_fm import (
 from funcmol.models.adamw import AdamW
 from funcmol.models.ema import ModelEma
 from funcmol.utils.utils_base import setup_fabric
-from funcmol.utils.utils_nf import infer_codes_occs_batch, load_neural_field, normalize_code, get_latest_model_path
+from funcmol.utils.utils_nf import infer_codes_occs_batch, load_neural_field, normalize_code, get_latest_model_path, create_tensorboard_writer
 from funcmol.dataset.dataset_code import create_code_loaders
 from funcmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
 
@@ -72,7 +72,8 @@ def main(config):
 
     with torch.no_grad():
         funcmol_ema = ModelEma(funcmol, decay=config["ema_decay"])
-        funcmol_ema = torch.compile(funcmol_ema)
+        # Disable torch.compile due to compatibility issues with torch_cluster
+        # funcmol_ema = torch.compile(funcmol_ema)
 
     if config["reload_model_path"] is not None:
         fabric.print(f">> loading checkpoint from {config['reload_model_path']}")
@@ -83,6 +84,15 @@ def main(config):
                 funcmol_ema, _ = load_checkpoint_fm(funcmol_ema, config["reload_model_path"], fabric=fabric)
     funcmol, optimizer = fabric.setup(funcmol, optimizer)
 
+    ##############################
+    # TensorBoard writer
+    tensorboard_writer = None
+    if fabric.global_rank == 0:
+        tensorboard_writer = create_tensorboard_writer(
+            log_dir=config["dirname"],
+            experiment_name=config["exp_name"]
+        )
+    
     ##############################
     # metrics
     metrics = torchmetrics.MeanMetric().to(fabric.device)
@@ -166,12 +176,25 @@ def main(config):
             fabric,
         )
 
+        # TensorBoard logging
+        if tensorboard_writer is not None:
+            tensorboard_writer.add_scalar('Loss/Train', train_loss, epoch)
+            if val_loss is not None:
+                tensorboard_writer.add_scalar('Loss/Validation', val_loss, epoch)
+            tensorboard_writer.add_scalar('Training/Epoch_Time', time.time() - t0, epoch)
+            tensorboard_writer.add_scalar('Training/Learning_Rate', optimizer.param_groups[0]['lr'], epoch)
+            
         if config["wandb"]:
             fabric.log_dict({
                 "trainer/global_step": epoch,
                 "train_loss": train_loss,
                 "val_loss": val_loss,
             })
+    
+    # Close TensorBoard writer
+    if tensorboard_writer is not None:
+        tensorboard_writer.close()
+        fabric.print(">> TensorBoard writer closed")
 
 
 def train_denoiser(
@@ -227,6 +250,11 @@ def train_denoiser(
 
         optimizer.zero_grad()
         fabric.backward(loss)
+        
+        # 梯度裁剪 - 防止梯度爆炸，稳定训练
+        max_grad_norm = config.get("max_grad_norm", 1.0)  # 从配置中获取，默认为1.0
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+        
         optimizer.step()
 
         model_ema.update(model)
