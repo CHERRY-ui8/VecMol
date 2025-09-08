@@ -102,6 +102,10 @@ class FieldDataset(Dataset):
         # 使用传入的GNFConverter实例
         self.gnf_converter = gnf_converter
 
+        # if self.db is None:
+        #     self._connect_db()
+            
+
     def __del__(self):
         """析构函数，确保数据库连接被关闭"""
         if hasattr(self, 'db') and self.db is not None:
@@ -151,7 +155,7 @@ class FieldDataset(Dataset):
                     self.lmdb_path,
                     map_size=10*(1024*1024*1024),   # 10GB
                     create=False,
-                    subdir=False,
+                    subdir=True,
                     readonly=True,
                     lock=False,
                     readahead=False,
@@ -572,11 +576,14 @@ def create_field_loaders(
     )
 
     if config.get("debug_one_mol", False):
-        dset.data = [dset.data[0]]  # 只保留第一个分子，不复制
-        dset.field_idxs = torch.arange(len(dset.data))
+        if hasattr(dset, 'data'):
+            dset.data = [dset.data[0]]  # 只保留第一个分子，不复制
+        dset.field_idxs = torch.arange(1)  # 只保留一个分子
     elif config.get("debug_subset", False):
-        dset.data = dset.data[:128]
-        dset.field_idxs = torch.arange(len(dset.data))
+        if hasattr(dset, 'data'):
+            dset.data = dset.data[:128]
+        # dset.field_idxs = torch.arange(min(128, len(dset.field_idxs)))  # 限制为128个分子
+        dset.keys = torch.arange(min(32, len(dset.keys)))  # 限制为32个分子
 
     loader = DataLoader(
         dset,
@@ -588,7 +595,7 @@ def create_field_loaders(
     )
     fabric.print(f">> {split} set size: {len(dset)}")
 
-    return fabric.setup_dataloaders(loader, use_distributed_sampler=(split == "train"))
+    return fabric.setup_dataloaders(loader, use_distributed_sampler=True)  # 所有split都使用分布式采样器
 
 
 def create_gnf_converter(config: dict, device: str = "cpu") -> GNFConverter:

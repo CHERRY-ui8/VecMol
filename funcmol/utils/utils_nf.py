@@ -10,9 +10,8 @@ from funcmol.utils.constants import PADDING_INDEX
 from funcmol.utils.gnf_converter import GNFConverter
 from torch_geometric.utils import to_dense_batch
 from funcmol.models.encoder import CrossGraphEncoder
-from funcmol.models.decoder import Decoder, get_atom_coords
+from funcmol.models.decoder import Decoder
 from funcmol.utils.utils_base import convert_xyzs_to_sdf, save_xyz
-from funcmol.utils.utils_vis import visualize_voxel_grid
 import time
 from omegaconf import OmegaConf
 import random
@@ -373,6 +372,9 @@ def eval_nf(
         for key in metrics.keys():
             metrics[key].reset()
 
+    total_loss = 0.0
+    num_batches = 0
+
     for i, data_batch in enumerate(loader):
         data_batch = data_batch.to(fabric.device)
 
@@ -399,6 +401,9 @@ def eval_nf(
             # 如果target_field是[n_points, n_atom_types, 3]，需要添加batch维度
             if target_field.shape[0] == n_points:
                 target_field = target_field.unsqueeze(0).expand(B, -1, -1, -1)  # [B, n_points, n_atom_types, 3]
+            elif target_field.shape[0] == B * n_points:
+                # 如果target_field是[B*n_points, n_atom_types, 3]，需要重新整形
+                target_field = target_field.view(B, n_points, -1, 3)
             else:
                 # 如果已经是batch格式，确保维度正确
                 target_field = target_field.view(B, n_points, -1, 3)
@@ -417,9 +422,28 @@ def eval_nf(
         loss = criterion(pred_field, target_field)
         
         # 更新指标
-        metrics["loss"].update(loss)
+        if metrics is not None:
+            metrics["loss"].update(loss)
         
-    return metrics["loss"].compute().item()
+        # 累积损失用于分布式平均
+        total_loss += loss.item()
+        num_batches += 1
+    
+    # 分布式平均损失
+    if fabric is not None:
+        # 收集所有GPU的损失和批次数量
+        loss_tensor = torch.tensor([total_loss, num_batches], device=fabric.device)
+        gathered = fabric.all_gather(loss_tensor)
+        
+        # 计算全局平均损失
+        total_loss_all = gathered[:, 0].sum().item()
+        num_batches_all = gathered[:, 1].sum().item()
+        avg_loss = total_loss_all / num_batches_all if num_batches_all > 0 else 0.0
+        
+        return avg_loss
+    else:
+        # 单GPU情况
+        return total_loss / num_batches if num_batches > 0 else 0.0
 
 
 def set_requires_grad(module: nn.Module, tf: bool = False) -> None:

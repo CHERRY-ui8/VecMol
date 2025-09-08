@@ -10,14 +10,15 @@ defaults:
 debug: False
 wandb: False
 seed: 1234
-nf_pretrained_path: ../exps/neural_field/nf_qm9
+# nf_pretrained_path: ../exps/neural_field/nf_qm9
+nf_pretrained_path: ../exps/neural_field/nf_qm9_20250812_181425_750832
 exp_dir: ../exps/funcmol
 exp_name: "fm_${dset.dset_name}_${now:%Y%m%d}_${now:%H%M%S}_${now:%f}"
 dirname: "${exp_dir}/${exp_name}"
 reload_model_path: null
 
 # data params
-smooth_sigma: 2.0
+smooth_sigma: 0.5 # 2.0, 1.0
 normalize_codes: 1
 on_the_fly: False  # use False if codes are computed offline.
 codes_dir: "${nf_pretrained_path}/codes/"
@@ -25,7 +26,7 @@ codes_dir: "${nf_pretrained_path}/codes/"
 # training params
 num_epochs: 50000
 dset:
-  batch_size: 8
+  batch_size: 2 
 sample_every: 1
 decoder:
   code_dim: 128

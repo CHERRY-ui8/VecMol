@@ -1,13 +1,76 @@
 import math
-import os
 
 import torch
 from torch import nn
 from tqdm import tqdm
 from funcmol.utils.utils_fm import add_noise_to_code
-from funcmol.utils.utils_base import save_xyz, convert_xyzs_to_sdf
 from funcmol.models.unet1d import MLPResCode
-from funcmol.models.egnn_denoiser import GNNDenoiser
+from funcmol.models.egnn import EGNNVectorField
+
+
+########################################################################################
+# Simple EGNN-based denoiser using functions
+def create_egnn_denoiser(config, device):
+    """
+    Create a simple EGNN-based denoiser using EGNNVectorField.
+    
+    Args:
+        config: Configuration dictionary
+        device: Device to run on
+        
+    Returns:
+        A simple denoiser function
+    """
+    # Create EGNNVectorField
+    egnn = EGNNVectorField(
+        grid_size=config["dset"]["grid_size"],
+        hidden_dim=config["denoiser"]["n_hidden_units"],
+        num_layers=config["denoiser"]["num_blocks"],
+        radius=config["denoiser"]["radius"],
+        n_atom_types=config["dset"]["n_channels"],
+        code_dim=config["decoder"]["code_dim"],
+        cutoff=config["denoiser"]["cutoff"],
+        anchor_spacing=config["dset"]["anchor_spacing"],
+        device=device,
+        k_neighbors=config["denoiser"]["k_neighbors"]
+    )
+    
+    # Simple MLP for output projection
+    output_projection = nn.Sequential(
+        nn.Linear(config["decoder"]["code_dim"], config["denoiser"]["n_hidden_units"]),
+        nn.SiLU(),
+        nn.Dropout(config["denoiser"]["dropout"]),
+        nn.Linear(config["denoiser"]["n_hidden_units"], config["decoder"]["code_dim"])
+    ).to(device)
+    
+    def denoiser_fn(y):
+        """
+        Simple denoiser function using EGNN.
+        
+        Args:
+            y: Input codes of shape (batch_size, n_grid, code_dim)
+            
+        Returns:
+            Denoised codes of the same shape
+        """
+        batch_size = y.size(0)
+        n_grid = y.size(1)
+        
+        # Create dummy query points for EGNNVectorField
+        dummy_query_points = torch.randn(batch_size, 1, 3, device=y.device)
+        
+        # Use EGNNVectorField to process the codes
+        with torch.no_grad():
+            _ = egnn(dummy_query_points, y)
+        
+        # Apply output projection
+        y_flat = y.view(-1, config["decoder"]["code_dim"])
+        denoised_flat = output_projection(y_flat)
+        denoised = denoised_flat.view(batch_size, n_grid, config["decoder"]["code_dim"])
+        
+        return denoised
+    
+    return denoiser_fn
 
 
 ########################################################################################
@@ -46,20 +109,8 @@ class FuncMol(nn.Module):
 
         # 根据配置选择denoiser类型
         if config.get("denoiser", {}).get("use_gnn", False):
-            # 使用GNN denoiser
-            self.net = GNNDenoiser(
-                code_dim=config["decoder"]["code_dim"],
-                hidden_dim=config["denoiser"]["n_hidden_units"],
-                num_blocks=config["denoiser"]["num_blocks"],
-                k_neighbors=config["denoiser"]["k_neighbors"],
-                cutoff=config["denoiser"]["cutoff"],
-                radius=config["denoiser"]["radius"],
-                dropout=config["denoiser"]["dropout"],
-                grid_size=config["dset"]["grid_size"],
-                anchor_spacing=config["dset"]["anchor_spacing"],
-                use_radius_graph=config["denoiser"]["use_radius_graph"],
-                device=self.device
-            )
+            # 使用EGNN denoiser function
+            self.net = create_egnn_denoiser(config, self.device)
         else:
             # 使用MLP denoiser (默认)
             self.net = MLPResCode(
@@ -166,7 +217,6 @@ class FuncMol(nn.Module):
         self,
         n_chains: int = 25,
         code_dim: int = 1024,
-        code_stats: dict = None,
     ):
         """
         Initializes the latent variable `y` with uniform noise and adds Gaussian noise.
@@ -174,9 +224,6 @@ class FuncMol(nn.Module):
         Args:
             n_chains (int, optional): Number of chains to initialize. Defaults to 25.
             code_dim (int, optional): Dimensionality of the code. Defaults to 1024.
-            code_stats (dict, optional): Dictionary containing the minimum and maximum
-                                         normalized values for the uniform noise.
-                                         Defaults to None.
 
         Returns:
             tuple: A tuple containing:
@@ -191,44 +238,40 @@ class FuncMol(nn.Module):
 
         # gaussian noise
         y = add_noise_to_code(y, self.smooth_sigma)
+        
+        # 确保y在正确的设备上
+        y = y.to(self.device)
 
         return y, torch.zeros_like(y)
 
     def sample(
         self,
-        dec: object,
-        save_dir: str,
         config: dict,
         fabric = None,
         delete_net: bool = False,
     ):
         """
-        Samples molecular modulation codes using the Walk-Jump-Sample (WJS) method,
-        generates molecules from these codes, and saves them in SDF format.
+        Samples molecular modulation codes using the Walk-Jump-Sample (WJS) method.
 
         Args:
-            dec (object): The decoder object used to convert codes to molecules.
-            save_dir (str): The directory where the generated molecules and figures will be saved.
-            config (dict): Configuration dictionary containing parameters for WJS and molecule generation.
+            config (dict): Configuration dictionary containing parameters for WJS.
             fabric (optional): Fabric object for printing and logging.
             delete_net (bool, optional): If True, deletes the network and clears CUDA cache after sampling. Default is False.
 
         Returns:
-            list: List of generated molecules in XYZ format.
+            torch.Tensor: Generated codes tensor of shape (n_samples, n_grid, code_dim).
         """
         self.eval()
-        os.makedirs(f"{save_dir}/figures", exist_ok=True)
 
         #  sample codes with WJS
         codes_all = []
         fabric.print(f">> Sample codes with WJS (n_chains: {config['wjs']['n_chains']})")
         try:
-            for rep in tqdm(range(config["wjs"]["repeats_wjs"])):
+            for _ in tqdm(range(config["wjs"]["repeats_wjs"])):
                 # initialize y and v
                 y, v = self.initialize_y_v(
                     n_chains=config["wjs"]["n_chains"],
                     code_dim=config["decoder"]["code_dim"],
-                    code_stats=dec.code_stats,
                 )
 
                 # walk and jump
@@ -245,11 +288,12 @@ class FuncMol(nn.Module):
             fabric.print(f"Error during WJS sampling: {e}")
             raise e
 
-        # generate (render) molecules from codes
+        # Clean up network if requested
         if delete_net:
             del self.net
             torch.cuda.empty_cache()
 
+        # Concatenate all generated codes
         codes = torch.cat(codes_all, dim=0)
         fabric.print(f">> Generated {codes.size(0)} codes")
         
@@ -260,64 +304,20 @@ class FuncMol(nn.Module):
         
         # 检查codes是否包含NaN/Inf
         if torch.isnan(codes).any():
-            fabric.print(f">> WARNING: codes contains NaN values!")
+            fabric.print(">> WARNING: codes contains NaN values!")
             nan_count = torch.isnan(codes).sum().item()
             fabric.print(f">> NaN count: {nan_count}")
         
         if torch.isinf(codes).any():
-            fabric.print(f">> WARNING: codes contains Inf values!")
+            fabric.print(">> WARNING: codes contains Inf values!")
             inf_count = torch.isinf(codes).sum().item()
             fabric.print(f">> Inf count: {inf_count}")
         
         # 检查codes的数值范围
         fabric.print(f">> Codes min: {codes.min().item():.6f}, max: {codes.max().item():.6f}")
-        
-        # need to batch the codes to avoid OOM
-        if config["dset"]["grid_dim"] >= 96 and codes.size(0) >= 2000:
-            batch_size_render_codes = 2000
-        elif config["dset"]["grid_dim"] >= 64 and codes.size(0) >= 5000:
-            batch_size_render_codes = 5000
-        else:
-            batch_size_render_codes = codes.size(0)
-        batched_codes = torch.split(codes, batch_size_render_codes, dim=0)
-        mols = []
-        fabric.print(f">> Splitting codes for rendering in batches of {batch_size_render_codes}")
-        
-        try:
-            for i, batched_code in enumerate(tqdm(batched_codes)):
-                fabric.print(f">> Processing batch {i+1}/{len(batched_codes)}, batch shape: {batched_code.shape}")
-                
-                # 检查当前batch的codes
-                if torch.isnan(batched_code).any():
-                    fabric.print(f">> ERROR: Batch {i} contains NaN values!")
-                    continue
-                if torch.isinf(batched_code).any():
-                    fabric.print(f">> ERROR: Batch {i} contains Inf values!")
-                    continue
-                    
-                batch_mols = dec.codes_to_molecules(batched_code, unnormalize=False, fabric=fabric, config=config)
-                mols += batch_mols
-                # 清理批次内存
-                del batch_mols
-                torch.cuda.empty_cache()
-        except Exception as e:
-            fabric.print(f"Error during molecule generation: {e}")
-            fabric.print(f"Current batch index: {i}")
-            fabric.print(f"Current batch shape: {batched_code.shape}")
-            raise e
-
-        # save the molecules in sdf file
-        save_dir = os.path.join(os.getcwd(), save_dir)
-        try:
-            molecules_xyz = save_xyz(mols, save_dir, fabric, atom_elements=config["dset"]["elements"])
-            convert_xyzs_to_sdf(save_dir, fabric=fabric)
-            fabric.print(f">> Successfully saved {len(molecules_xyz)} molecules")
-        except Exception as e:
-            fabric.print(f"Error saving molecules: {e}")
-            raise e
 
         # 清理内存
-        del mols, codes, batched_codes, codes_all
+        del codes_all
         torch.cuda.empty_cache()
 
-        return molecules_xyz
+        return codes

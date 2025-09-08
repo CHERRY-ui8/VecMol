@@ -1,4 +1,6 @@
 import os
+
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import time
 import hydra
 from omegaconf import OmegaConf
@@ -66,7 +68,7 @@ def main(config):
     ##############################
     # create Funcmol, optimizer, criterion, EMA, metrics
     funcmol = create_funcmol(config, fabric)
-    criterion = torch.nn.MSELoss(reduction="sum")
+    criterion = torch.nn.MSELoss(reduction="mean")
     optimizer = AdamW(funcmol.parameters(), lr=config["lr"], weight_decay=config["wd"])
     optimizer.zero_grad()
 

@@ -305,8 +305,9 @@ def main(config):
         global_step += len(loader_train)
 
         # val
+        loss_val = None  # 初始化验证损失
         if (epoch % config["eval_every"] == 0 or epoch == config["n_epochs"] - 1):
-            if fabric.global_rank == 0 and loader_val is not None:
+            if loader_val is not None:  # 所有GPU都参与验证
                 loss_val = eval_nf(
                     loader_val,
                     dec,
@@ -317,57 +318,50 @@ def main(config):
                     metrics=metrics_val,
                     fabric=fabric
                 )
-                val_losses.append(loss_val)
                 
-                # TensorBoard记录验证loss
-                if tensorboard_writer is not None:
-                    tensorboard_writer.add_scalar('Loss/Validation', loss_val, epoch)
-                
-                # 保存checkpoint
-                save_checkpoint(
-                    epoch, config, loss_val, best_loss, enc, dec, optim_enc, optim_dec, fabric
-                )
-                # 绘制loss曲线
-                if len(batch_losses) > 0:
-                    # 绘制每个batch的loss曲线
+                # 只在rank 0进行日志记录和保存
+                if fabric.global_rank == 0:
+                    val_losses.append(loss_val)
+                    
+                    # TensorBoard记录验证loss
+                    if tensorboard_writer is not None:
+                        tensorboard_writer.add_scalar('Loss/Validation', loss_val, epoch)
+                    
+                    # 保存checkpoint
+                    save_checkpoint(
+                        epoch, config, loss_val, best_loss, enc, dec, optim_enc, optim_dec, fabric
+                    )
+                    # 绘制loss曲线
+                    if len(batch_losses) > 0:
+                        # 绘制每个batch的loss曲线
+                        plot_loss_curve(
+                            [l["total_loss"] for l in batch_losses],
+                            None,
+                            os.path.join(config["dirname"], f"loss_curve_batches.png"),
+                            "(Batch Level)"
+                        )
+                    # 绘制每个epoch的loss曲线
                     plot_loss_curve(
-                        [l["total_loss"] for l in batch_losses],
-                        None,
-                        os.path.join(config["dirname"], f"loss_curve_batches.png"),
-                        "(Batch Level)"
+                        train_losses,
+                        val_losses,
+                        os.path.join(config["dirname"], f"loss_curve_epochs.png"),
+                        "(Epoch Level)"
                     )
-                # 绘制每个epoch的loss曲线
-                plot_loss_curve(
-                    train_losses,
-                    val_losses,
-                    os.path.join(config["dirname"], f"loss_curve_epochs.png"),
-                    "(Epoch Level)"
-                )
-                # 保存loss数据
-                np.save(os.path.join(config["dirname"], "train_losses.npy"), np.array(train_losses))
-                np.save(os.path.join(config["dirname"], "val_losses.npy"), np.array(val_losses))
-                if len(batch_losses) > 0:
-                    np.save(
-                        os.path.join(config["dirname"], "batch_losses.npy"),
-                        np.array([l["total_loss"] for l in batch_losses])
-                    )
+                    # 保存loss数据
+                    np.save(os.path.join(config["dirname"], "train_losses.npy"), np.array(train_losses))
+                    np.save(os.path.join(config["dirname"], "val_losses.npy"), np.array(val_losses))
+                    if len(batch_losses) > 0:
+                        np.save(
+                            os.path.join(config["dirname"], "batch_losses.npy"),
+                            np.array([l["total_loss"] for l in batch_losses])
+                        )
             else:
+                # 验证完成后，所有GPU同步
                 try:
-                    # 添加超时处理，避免NCCL超时
-                    import signal
-                    
-                    def timeout_handler(signum, frame):
-                        raise TimeoutError("Barrier operation timed out")
-                    
-                    # 设置30秒超时
-                    signal.signal(signal.SIGALRM, timeout_handler)
-                    signal.alarm(30)
-                    
                     fabric.barrier()
-                    signal.alarm(0)  # 取消超时
-                except (TimeoutError, Exception) as e:
+                except Exception as e:
                     print(f"Warning: Barrier operation failed: {e}")
-                    signal.alarm(0)  # 确保取消超时
+                    # 继续训练，不因为barrier失败而停止
         
         # log
         elapsed_time = time.time() - start_time
