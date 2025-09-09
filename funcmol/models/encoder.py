@@ -173,7 +173,7 @@ class CrossGraphEncoder(nn.Module):
     
 
 class MessagePassingGNN(MessagePassing):
-    def __init__(self, atom_feat_dim, code_dim, hidden_dim, edge_dim, dist_version, cutoff=5.0): # TODO
+    def __init__(self, atom_feat_dim, code_dim, hidden_dim, edge_dim, dist_version, cutoff=5.0):
         super().__init__(aggr='mean')
         self.code_dim = code_dim
         self.hidden_dim = hidden_dim

@@ -4,73 +4,9 @@ import torch
 from torch import nn
 from tqdm import tqdm
 from funcmol.utils.utils_fm import add_noise_to_code
+from funcmol.utils.utils_nf import unnormalize_code
 from funcmol.models.unet1d import MLPResCode
-from funcmol.models.egnn import EGNNVectorField
-
-
-########################################################################################
-# Simple EGNN-based denoiser using functions
-def create_egnn_denoiser(config, device):
-    """
-    Create a simple EGNN-based denoiser using EGNNVectorField.
-    
-    Args:
-        config: Configuration dictionary
-        device: Device to run on
-        
-    Returns:
-        A simple denoiser function
-    """
-    # Create EGNNVectorField
-    egnn = EGNNVectorField(
-        grid_size=config["dset"]["grid_size"],
-        hidden_dim=config["denoiser"]["n_hidden_units"],
-        num_layers=config["denoiser"]["num_blocks"],
-        radius=config["denoiser"]["radius"],
-        n_atom_types=config["dset"]["n_channels"],
-        code_dim=config["decoder"]["code_dim"],
-        cutoff=config["denoiser"]["cutoff"],
-        anchor_spacing=config["dset"]["anchor_spacing"],
-        device=device,
-        k_neighbors=config["denoiser"]["k_neighbors"]
-    )
-    
-    # Simple MLP for output projection
-    output_projection = nn.Sequential(
-        nn.Linear(config["decoder"]["code_dim"], config["denoiser"]["n_hidden_units"]),
-        nn.SiLU(),
-        nn.Dropout(config["denoiser"]["dropout"]),
-        nn.Linear(config["denoiser"]["n_hidden_units"], config["decoder"]["code_dim"])
-    ).to(device)
-    
-    def denoiser_fn(y):
-        """
-        Simple denoiser function using EGNN.
-        
-        Args:
-            y: Input codes of shape (batch_size, n_grid, code_dim)
-            
-        Returns:
-            Denoised codes of the same shape
-        """
-        batch_size = y.size(0)
-        n_grid = y.size(1)
-        
-        # Create dummy query points for EGNNVectorField
-        dummy_query_points = torch.randn(batch_size, 1, 3, device=y.device)
-        
-        # Use EGNNVectorField to process the codes
-        with torch.no_grad():
-            _ = egnn(dummy_query_points, y)
-        
-        # Apply output projection
-        y_flat = y.view(-1, config["decoder"]["code_dim"])
-        denoised_flat = output_projection(y_flat)
-        denoised = denoised_flat.view(batch_size, n_grid, config["decoder"]["code_dim"])
-        
-        return denoised
-    
-    return denoiser_fn
+from funcmol.models.egnn_denoiser import GNNDenoiser
 
 
 ########################################################################################
@@ -109,8 +45,20 @@ class FuncMol(nn.Module):
 
         # 根据配置选择denoiser类型
         if config.get("denoiser", {}).get("use_gnn", False):
-            # 使用EGNN denoiser function
-            self.net = create_egnn_denoiser(config, self.device)
+            # 使用GNN denoiser
+            self.net = GNNDenoiser(
+                code_dim=config["decoder"]["code_dim"],
+                hidden_dim=config["denoiser"]["n_hidden_units"],
+                num_blocks=config["denoiser"]["num_blocks"],
+                k_neighbors=config["denoiser"]["k_neighbors"],
+                cutoff=config["denoiser"]["cutoff"],
+                radius=config["denoiser"]["radius"],
+                dropout=config["denoiser"]["dropout"],
+                grid_size=config["dset"]["grid_size"],
+                anchor_spacing=config["dset"]["anchor_spacing"],
+                use_radius_graph=config["denoiser"]["use_radius_graph"],
+                device=self.device
+            )
         else:
             # 使用MLP denoiser (默认)
             self.net = MLPResCode(
@@ -122,30 +70,80 @@ class FuncMol(nn.Module):
                 bias_free=config["denoiser"]["bias_free"],
             )
 
-    def forward(self, y: torch.Tensor):
+    def forward(self, y: torch.Tensor, debug: bool = False):
         """
         Forward pass of the denoiser model.
 
         Args:
             y (torch.Tensor): Input tensor of shape (batch_size, channel_size, c_size).
+            debug (bool): Whether to print debug information.
 
         Returns:
             torch.Tensor: Output tensor after passing through the denoiser model.
         """
-        return self.net(y)
+        if debug:
+            print(f"[DENOISER DEBUG] Input y - min: {y.min().item():.6f}, max: {y.max().item():.6f}, mean: {y.mean().item():.6f}, std: {y.std().item():.6f}")
+            print(f"[DENOISER DEBUG] Input y - shape: {y.shape}, device: {y.device}, dtype: {y.dtype}")
+        
+        xhat = self.net(y)
+        
+        if debug:
+            print(f"[DENOISER DEBUG] Output xhat - min: {xhat.min().item():.6f}, max: {xhat.max().item():.6f}, mean: {xhat.mean().item():.6f}, std: {xhat.std().item():.6f}")
+            print(f"[DENOISER DEBUG] Output xhat - shape: {xhat.shape}")
+            
+            # 检查是否有异常值
+            if torch.isnan(xhat).any():
+                print("[DENOISER DEBUG] WARNING: xhat contains NaN values!")
+            if torch.isinf(xhat).any():
+                print("[DENOISER DEBUG] WARNING: xhat contains Inf values!")
+            
+            # 检查输出范围是否合理
+            if xhat.abs().max().item() > 100.0:
+                print(f"[DENOISER DEBUG] WARNING: xhat has very large values (max abs: {xhat.abs().max().item():.2f})")
+        
+        return xhat
 
-    def score(self, y: torch.Tensor):
+    def score(self, y: torch.Tensor, debug: bool = False):
         """
         Calculates the score of the denoiser model.
 
         Args:
         - y: Input tensor of shape (batch_size, channels, height, width).
+        - debug (bool): Whether to print debug information.
 
         Returns:
         - score: The score tensor of shape (batch_size, channels, height, width).
         """
-        xhat = self.forward(y)
-        return (xhat - y) / (self.smooth_sigma**2)
+        xhat = self.forward(y, debug=debug)
+        score = (xhat - y) / (self.smooth_sigma**2)
+        
+        if debug:
+            print(f"[SCORE DEBUG] xhat - y difference - min: {(xhat-y).min().item():.6f}, max: {(xhat-y).max().item():.6f}, mean: {(xhat-y).mean().item():.6f}")
+            print(f"[SCORE DEBUG] smooth_sigma: {self.smooth_sigma}, smooth_sigma^2: {self.smooth_sigma**2}")
+            print(f"[SCORE DEBUG] Raw score - min: {score.min().item():.6f}, max: {score.max().item():.6f}, mean: {score.mean().item():.6f}, std: {score.std().item():.6f}")
+        
+        # 添加数值稳定性：梯度裁剪
+        max_score_norm = 10.0  # 可调参数
+        score_norm = torch.norm(score, dim=-1, keepdim=True)
+        max_norm = score_norm.max().item()
+        
+        if debug:
+            print(f"[SCORE DEBUG] Score norm - max: {max_norm:.6f}, mean: {score_norm.mean().item():.6f}")
+        
+        if max_norm > max_score_norm:
+            if debug:
+                print(f"[SCORE DEBUG] Clipping score norm from {max_norm:.6f} to {max_score_norm:.6f}")
+            score = torch.where(
+                score_norm > max_score_norm,
+                score * (max_score_norm / score_norm),
+                score
+            )
+        
+        if debug:
+            final_norm = torch.norm(score, dim=-1, keepdim=True).max().item()
+            print(f"[SCORE DEBUG] Final score - min: {score.min().item():.6f}, max: {score.max().item():.6f}, norm: {final_norm:.6f}")
+        
+        return score
 
     @torch.no_grad()
     def wjs_walk_steps(
@@ -157,7 +155,8 @@ class FuncMol(nn.Module):
         friction: float = 1.0,
         lipschitz: float = 1.0,
         scheme: str = "aboba",
-        temperature: float = 1.0
+        temperature: float = 1.0,
+        debug: bool = False
     ):
         """
         Perform a series of steps using the Weighted Jump Stochastic (WJS) method.
@@ -180,22 +179,48 @@ class FuncMol(nn.Module):
         zeta1 = math.exp(-friction * delta)
         zeta2 = math.exp(-2 * friction * delta)
         if scheme == "aboba":
-            for _ in range(n_steps):
+            for step in range(n_steps):
                 q += delta * p / 2  # q_{t+1/2}
-                psi = self.score(q)
+                psi = self.score(q, debug=debug and step % 20 == 0)  # 每20步打印一次debug信息
                 p += u * delta * psi / 2  # p_{t+1}
                 p = (
                     zeta1 * p + u * delta * psi / 2 + math.sqrt(temperature) * math.sqrt(u * (1 - zeta2)) * torch.randn_like(q)
                 )  # p_{t+1}
                 q += delta * p / 2  # q_{t+1}
+                
+                # 数值稳定性检查：每10步检查一次数值范围
+                if step % 10 == 0:
+                    q_norm = torch.norm(q, dim=-1).max().item()
+                    p_norm = torch.norm(p, dim=-1).max().item()
+                    if debug:
+                        print(f"[WJS DEBUG] Step {step}: q_norm={q_norm:.4f}, p_norm={p_norm:.4f}")
+                    if q_norm > 100.0 or p_norm > 100.0:
+                        if debug:
+                            print(f"[WJS DEBUG] Clipping large values at step {step}")
+                        # 如果数值过大，进行裁剪
+                        q = torch.clamp(q, -50.0, 50.0)
+                        p = torch.clamp(p, -50.0, 50.0)
         elif scheme == "baoab":
-            for _ in range(n_steps):
-                p += u * delta * self.score(q) / 2  # p_{t+1/2}
+            for step in range(n_steps):
+                p += u * delta * self.score(q, debug=debug and step % 20 == 0) / 2  # p_{t+1/2}
                 q += delta * p / 2  # q_{t+1/2}
                 phat = zeta1 * p + math.sqrt(temperature) * math.sqrt(u * (1 - zeta2)) * torch.randn_like(q)  # phat_{t+1/2}
                 q += delta * phat / 2  # q_{t+1}
-                psi = self.score(q)
+                psi = self.score(q, debug=debug and step % 20 == 0)
                 p = phat + u * delta * psi / 2  # p_{t+1}
+                
+                # 数值稳定性检查：每10步检查一次数值范围
+                if step % 10 == 0:
+                    q_norm = torch.norm(q, dim=-1).max().item()
+                    p_norm = torch.norm(p, dim=-1).max().item()
+                    if debug:
+                        print(f"[WJS DEBUG] Step {step}: q_norm={q_norm:.4f}, p_norm={p_norm:.4f}")
+                    if q_norm > 100.0 or p_norm > 100.0:
+                        if debug:
+                            print(f"[WJS DEBUG] Clipping large values at step {step}")
+                        # 如果数值过大，进行裁剪
+                        q = torch.clamp(q, -50.0, 50.0)
+                        p = torch.clamp(p, -50.0, 50.0)
         return q, p
 
     @torch.no_grad()
@@ -238,9 +263,6 @@ class FuncMol(nn.Module):
 
         # gaussian noise
         y = add_noise_to_code(y, self.smooth_sigma)
-        
-        # 确保y在正确的设备上
-        y = y.to(self.device)
 
         return y, torch.zeros_like(y)
 
@@ -249,6 +271,8 @@ class FuncMol(nn.Module):
         config: dict,
         fabric = None,
         delete_net: bool = False,
+        code_stats: dict = None,  # noqa: ARG002
+        debug: bool = False,
     ):
         """
         Samples molecular modulation codes using the Walk-Jump-Sample (WJS) method.
@@ -257,6 +281,7 @@ class FuncMol(nn.Module):
             config (dict): Configuration dictionary containing parameters for WJS.
             fabric (optional): Fabric object for printing and logging.
             delete_net (bool, optional): If True, deletes the network and clears CUDA cache after sampling. Default is False.
+            code_stats (dict, optional): Code statistics for unnormalization. If provided, codes will be unnormalized before returning.
 
         Returns:
             torch.Tensor: Generated codes tensor of shape (n_samples, n_grid, code_dim).
@@ -275,8 +300,23 @@ class FuncMol(nn.Module):
                 )
 
                 # walk and jump
-                for _ in range(0, config["wjs"]["max_steps_wjs"], config["wjs"]["steps_wjs"]):
-                    y, v = self.wjs_walk_steps(y, v, config["wjs"]["steps_wjs"], delta=config["wjs"]["delta_wjs"], friction=config["wjs"]["friction_wjs"])  # walk
+                for step_idx in range(0, config["wjs"]["max_steps_wjs"], config["wjs"]["steps_wjs"]):
+                    # 记录walk前的数值范围
+                    y_norm_before = torch.norm(y, dim=-1).max().item()
+                    v_norm_before = torch.norm(v, dim=-1).max().item()
+                    
+                    y, v = self.wjs_walk_steps(y, v, config["wjs"]["steps_wjs"], delta=config["wjs"]["delta_wjs"], friction=config["wjs"]["friction_wjs"], debug=debug)  # walk
+                    
+                    # 记录walk后的数值范围
+                    y_norm_after = torch.norm(y, dim=-1).max().item()
+                    v_norm_after = torch.norm(v, dim=-1).max().item()
+                    
+                    # 如果数值范围异常，打印警告
+                    if y_norm_after > 100.0 or v_norm_after > 100.0:
+                        fabric.print(f">> WARNING: Large values detected at step {step_idx}")
+                        fabric.print(f">> y_norm: {y_norm_before:.2f} -> {y_norm_after:.2f}")
+                        fabric.print(f">> v_norm: {v_norm_before:.2f} -> {v_norm_after:.2f}")
+                    
                     code_hats = self.wjs_jump_step(y)  # jump
                     codes_all.append(code_hats.cpu())
                     
@@ -313,8 +353,16 @@ class FuncMol(nn.Module):
             inf_count = torch.isinf(codes).sum().item()
             fabric.print(f">> Inf count: {inf_count}")
         
-        # 检查codes的数值范围
+        # 检查codes的数值范围（normalized）
         fabric.print(f">> Codes min: {codes.min().item():.6f}, max: {codes.max().item():.6f}")
+
+        # 如果提供了code_stats，进行unnormalization
+        if code_stats is not None:
+            fabric.print(">> Unnormalizing codes...")
+            codes = unnormalize_code(codes, code_stats)
+            fabric.print(f">> Unnormalized codes min: {codes.min().item():.6f}, max: {codes.max().item():.6f}")
+        else:
+            fabric.print(">> No code_stats provided, returning normalized codes")
 
         # 清理内存
         del codes_all

@@ -1,9 +1,3 @@
-#!/usr/bin/env python3
-"""
-FuncMol dataset reconstruction script.
-This script generates molecular codes using FuncMol and reconstructs molecules for the entire dataset using EGNN decoder.
-"""
-
 import os
 import sys
 import torch
@@ -23,13 +17,11 @@ except ImportError:
 project_root = Path(os.getcwd()).parent
 sys.path.insert(0, str(project_root))
 
-from funcmol.utils.constants import PADDING_INDEX
 from funcmol.utils.gnf_visualizer import (
-    load_config_from_exp_dir, create_converter, prepare_data, 
-    visualize_1d_gradient_field_comparison, GNFVisualizer
+    create_converter, visualize_1d_gradient_field_comparison, GNFVisualizer
 )
 from funcmol.models.funcmol import create_funcmol
-from funcmol.models.egnn import EGNNVectorField
+from funcmol.models.decoder import Decoder
 
 
 def create_test_config():
@@ -40,7 +32,8 @@ def create_test_config():
             "n_channels": 5,
             "anchor_spacing": 1.5,
             "elements": ['C', 'H', 'O', 'N', 'F'],
-            "resolution": 0.25
+            "resolution": 0.25,
+            "atomic_radius": 0.5
         },
         "decoder": {
             "code_dim": 128,
@@ -48,7 +41,10 @@ def create_test_config():
             "n_layers": 4,
             "radius": 3.0,
             "cutoff": 3.0,
-            "k_neighbors": 32
+            "k_neighbors": 32,
+            "grid_size": 9,
+            "n_channels": 5,
+            "anchor_spacing": 1.5
         },
         "denoiser": {
             "use_gnn": True,
@@ -58,7 +54,9 @@ def create_test_config():
             "k_neighbors": 8,
             "cutoff": 5.0,
             "radius": 3.0,
-            "use_radius_graph": True
+            "use_radius_graph": True,
+            "n_groups": 8,
+            "bias_free": False
         },
         "wjs": {
             "n_chains": 10,
@@ -66,7 +64,8 @@ def create_test_config():
             "max_steps_wjs": 100,
             "steps_wjs": 100,
             "delta_wjs": 0.5,
-            "friction_wjs": 1.0
+            "friction_wjs": 1.0,
+            "batch_size_render": 100
         },
         "smooth_sigma": 0.5,
         "gnf_converter": {
@@ -97,22 +96,11 @@ def create_test_config():
     return config
 
 
-def create_egnn_decoder(config, device):
-    """Create EGNN decoder for molecular reconstruction."""
-    print(">> Creating EGNN decoder...")
+def create_decoder(config, device):
+    """Create decoder for molecular reconstruction."""
+    print(">> Creating decoder...")
     
-    decoder = EGNNVectorField(
-        grid_size=config["dset"]["grid_size"],
-        hidden_dim=config["decoder"]["hidden_dim"],
-        num_layers=config["decoder"]["n_layers"],
-        radius=config["decoder"]["radius"],
-        n_atom_types=config["dset"]["n_channels"],
-        code_dim=config["decoder"]["code_dim"],
-        cutoff=config["decoder"]["cutoff"],
-        anchor_spacing=config["dset"]["anchor_spacing"],
-        device=device,
-        k_neighbors=config["decoder"]["k_neighbors"]
-    )
+    decoder = Decoder(config["decoder"], device)
     
     return decoder
 
@@ -139,7 +127,7 @@ def create_field_function(decoder, codes, sample_idx):
     return field_func
 
 
-def reconstruct_dataset_with_funcmol(config, fabric, device, output_dir, n_samples=100, batch_size=10):
+def reconstruct_dataset_with_funcmol(config, fabric, device, output_dir, n_samples=100):
     """Reconstruct entire dataset using FuncMol generated codes."""
     print("=== FuncMol Dataset Reconstruction ===")
     
@@ -149,8 +137,8 @@ def reconstruct_dataset_with_funcmol(config, fabric, device, output_dir, n_sampl
     funcmol = funcmol.to(device)
     funcmol.eval()
     
-    # Create EGNN decoder
-    decoder = create_egnn_decoder(config, device)
+    # Create decoder
+    decoder = create_decoder(config, device)
     decoder = decoder.to(device)
     decoder.eval()
     
@@ -212,7 +200,7 @@ def reconstruct_dataset_with_funcmol(config, fabric, device, output_dir, n_sampl
                     z_coord=0.0,
                     save_path=save_path,
                 )
-            except Exception as e:
+            except (ValueError, RuntimeError, IndexError) as e:
                 print(f"Error in gradient field visualization for sample {sample_idx}: {e}")
                 gradient_results = None
             
@@ -245,11 +233,11 @@ def reconstruct_dataset_with_funcmol(config, fabric, device, output_dir, n_sampl
                 if sample_idx % 10 == 0:  # Print progress every 10 samples
                     print(f"Sample {sample_idx}: RMSD={results['final_rmsd']:.4f}, Loss={results['final_loss']:.4f}")
                     
-            except Exception as e:
+            except (ValueError, RuntimeError, IndexError) as e:
                 print(f"Error in reconstruction for sample {sample_idx}: {e}")
                 continue
                 
-        except Exception as e:
+        except (ValueError, RuntimeError, IndexError) as e:
             print(f"Error processing sample {sample_idx}: {e}")
             continue
     
@@ -263,7 +251,7 @@ def reconstruct_dataset_with_funcmol(config, fabric, device, output_dir, n_sampl
         rmsds = [r['rmsd'] for r in all_results]
         losses = [r['reconstruction_loss'] for r in all_results]
         
-        print(f"\n=== Reconstruction Summary ===")
+        print("\n=== Reconstruction Summary ===")
         print(f"Successfully processed: {len(all_results)}/{n_samples} samples")
         print(f"Average RMSD: {np.mean(rmsds):.4f} ± {np.std(rmsds):.4f}")
         print(f"Average Loss: {np.mean(losses):.4f} ± {np.std(losses):.4f}")
@@ -280,11 +268,9 @@ def main():
     # Configuration
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     n_samples = 50  # Number of samples to generate and reconstruct
-    batch_size = 10  # Batch size for processing
     
     print(f"Device: {device}")
     print(f"Number of samples: {n_samples}")
-    print(f"Batch size: {batch_size}")
     
     # Setup Fabric
     fabric = Fabric(
@@ -297,7 +283,7 @@ def main():
     
     # Create configuration
     config = create_test_config()
-    print(f"Configuration created")
+    print("Configuration created")
     
     # Create output directory
     output_dir = "funcmol_dataset_reconstruction"
@@ -309,11 +295,10 @@ def main():
         fabric=fabric,
         device=device,
         output_dir=output_dir,
-        n_samples=n_samples,
-        batch_size=batch_size
+        n_samples=n_samples
     )
     
-    print(f"\n=== Dataset reconstruction completed! ===")
+    print("\n=== Dataset reconstruction completed! ===")
     print(f"Results saved to: {output_dir}")
     print(f"Total samples processed: {len(results) if results else 0}")
 

@@ -1,20 +1,15 @@
 import os
 import numpy as np
 import torch
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict
 from tqdm import tqdm
 from torch import nn
-from typing import cast
-import shutil
 from funcmol.utils.constants import PADDING_INDEX
 from funcmol.utils.gnf_converter import GNFConverter
 from torch_geometric.utils import to_dense_batch
 from funcmol.models.encoder import CrossGraphEncoder
 from funcmol.models.decoder import Decoder
-from funcmol.utils.utils_base import convert_xyzs_to_sdf, save_xyz
 import time
-from omegaconf import OmegaConf
-import random
 from pathlib import Path
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -732,6 +727,22 @@ def normalize_code(codes: torch.Tensor, code_stats: dict) -> torch.Tensor:
         torch.Tensor: The normalized codes.
     """
     codes = (codes - code_stats["mean"]) / code_stats["std"]
+    return codes
+
+
+def unnormalize_code(codes: torch.Tensor, code_stats: dict) -> torch.Tensor:
+    """
+    Unnormalize codes using mean and std from code_stats.
+    This is the inverse operation of normalize_code.
+
+    Args:
+        codes (torch.Tensor): The normalized codes to be unnormalized.
+        code_stats (dict): A dictionary containing 'mean' and 'std' for unnormalization.
+
+    Returns:
+        torch.Tensor: The unnormalized codes.
+    """
+    codes = codes * code_stats["std"] + code_stats["mean"]
     return codes
 
 

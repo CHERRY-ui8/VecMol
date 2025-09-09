@@ -1,8 +1,7 @@
 import torch
 import torch.nn as nn
-from torch_geometric.nn import MessagePassing, knn_graph, knn, radius
+from torch_geometric.nn import MessagePassing, knn_graph, radius_graph
 from funcmol.models.encoder import create_grid_coords
-import math
 
 
 class EGNNDenoiserLayer(MessagePassing):
@@ -35,23 +34,20 @@ class EGNNDenoiserLayer(MessagePassing):
         
         # 安全检查：确保索引在有效范围内
         max_idx = h.size(0)
-        valid_mask = (row < max_idx) & (col < max_idx)
-        
-        if not valid_mask.all():
-            # 过滤掉无效的边
-            valid_edges = valid_mask.nonzero(as_tuple=False).squeeze(-1)
-            if valid_edges.numel() == 0:
-                # 如果没有有效边，返回零更新
-                return torch.zeros_like(h)
-            row = row[valid_edges]
-            col = col[valid_edges]
+        if not ((row < max_idx) & (col < max_idx)).all():
+            raise ValueError(f"Edge indices out of bounds: max_idx={max_idx}, "
+                           f"row_max={row.max().item()}, col_max={col.max().item()}")
         
         rel = x[row] - x[col]
         dist = torch.norm(rel, dim=-1, keepdim=True)
         
+        # Gaussian smearing for distance encoding
+        sigma = 0.5  # 可调参数
+        gaussian_dist = torch.exp(-(dist ** 2) / (2 * sigma ** 2))
+        
         h_i = h[row]
         h_j = h[col]
-        edge_input = torch.cat([h_i, h_j, dist], dim=-1)
+        edge_input = torch.cat([h_i, h_j, gaussian_dist], dim=-1)
         m_ij = self.edge_mlp(edge_input)
         
         if self.cutoff is not None:
@@ -98,19 +94,19 @@ class GNNResBlock(nn.Module):
         # 第一个残差块
         h = self.norm1(h)
         h_updated = self.egnn_layer(x, h, edge_index)
-        h = h_residual + h_updated
+        h = h_residual + h_updated  # TODO 残差连接似乎没有问题：原始输入 + EGNN更新
         
         # 第二个残差块
-        h_residual = h
+        h_residual = h  # 保存第一个残差块的输出
         h = self.norm2(h)
         h_mlp = self.mlp(h)
-        h = h_residual + h_mlp
+        h = h_residual + h_mlp  # 残差连接：第一个残差块输出 + MLP更新
         
         return h
 
 
 class GNNDenoiser(nn.Module):
-    def __init__(self, code_dim=1024, hidden_dim=2048, num_blocks=4, k_neighbors=8, 
+    def __init__(self, code_dim=1024, hidden_dim=128, num_blocks=4, k_neighbors=8, 
                  cutoff=None, radius=None, dropout=0.1, grid_size=8, 
                  anchor_spacing=2.0, use_radius_graph=True, device=None):
         super().__init__()
@@ -146,6 +142,9 @@ class GNNDenoiser(nn.Module):
         # 输出投影层
         self.output_projection = nn.Linear(hidden_dim, code_dim)
         
+        # 预计算网格坐标（在__init__中）
+        self.grid_coords_cache = {}
+        
         self._init_weights()
 
     def _init_weights(self):
@@ -159,30 +158,35 @@ class GNNDenoiser(nn.Module):
                 nn.init.ones_(module.weight)
                 nn.init.zeros_(module.bias)
 
-    def _build_graph(self, batch_size, n_grid):
-        """动态构建图，根据实际的batch_size和n_grid"""
-        # 创建网格坐标
-        grid_coords = create_grid_coords(
-            batch_size=batch_size, 
-            grid_size=self.grid_size, 
-            device=self.device, 
-            anchor_spacing=self.anchor_spacing
-        )
-        
-        # 重塑为 (batch_size * n_grid, 3)
-        grid_coords = grid_coords.reshape(-1, 3)
+    def _build_graph(self, batch_size):
+        """动态构建图，根据实际的batch_size"""
+        # 使用缓存的网格坐标
+        n_grid = self.grid_size ** 3  # 计算网格点数
+        cache_key = (batch_size, n_grid)
+        if cache_key not in self.grid_coords_cache:
+            # 创建网格坐标
+            grid_coords = create_grid_coords(
+                batch_size=batch_size, 
+                grid_size=self.grid_size, 
+                device=self.device, 
+                anchor_spacing=self.anchor_spacing
+            )
+            
+            # 重塑为 (batch_size * n_grid, 3)
+            grid_coords = grid_coords.reshape(-1, 3)
+            self.grid_coords_cache[cache_key] = grid_coords
+        else:
+            grid_coords = self.grid_coords_cache[cache_key]
         
         # 创建batch索引 - 修复：确保batch索引与坐标数量匹配
         actual_n_grid = grid_coords.size(0) // batch_size
         grid_batch = torch.arange(batch_size, device=self.device).repeat_interleave(actual_n_grid)
         
         if self.use_radius_graph and self.radius is not None:
-            edge_index = radius(
+            edge_index = radius_graph(
                 x=grid_coords,
-                y=grid_coords,
                 r=self.radius,
-                batch_x=grid_batch,
-                batch_y=grid_batch,
+                batch=grid_batch,
                 max_num_neighbors=self.k_neighbors
             )
         else:
@@ -208,13 +212,13 @@ class GNNDenoiser(nn.Module):
         n_grid = y.size(1)
         
         # 动态构建图
-        edge_index, grid_coords = self._build_graph(batch_size, n_grid)
+        edge_index, grid_coords = self._build_graph(batch_size)
         
         # 输入投影
         h = self.input_projection(y)  # (batch_size, n_grid, hidden_dim)
         h = h.reshape(-1, self.hidden_dim)  # (batch_size * n_grid, hidden_dim)
         
-        # 通过GNN块
+        # 通过GNN块（现在使用6个blocks和128维hidden_dim）
         for block in self.blocks:
             h = block(grid_coords, h, edge_index)
         

@@ -6,6 +6,7 @@ import hydra
 from omegaconf import OmegaConf
 import torch
 import torchmetrics
+from tqdm import tqdm
 
 from funcmol.models.funcmol import create_funcmol
 from funcmol.utils.utils_fm import (
@@ -15,7 +16,7 @@ from funcmol.utils.utils_fm import (
 from funcmol.models.adamw import AdamW
 from funcmol.models.ema import ModelEma
 from funcmol.utils.utils_base import setup_fabric
-from funcmol.utils.utils_nf import infer_codes_occs_batch, load_neural_field, normalize_code, get_latest_model_path, create_tensorboard_writer
+from funcmol.utils.utils_nf import infer_codes_occs_batch, load_neural_field, normalize_code, create_tensorboard_writer
 from funcmol.dataset.dataset_code import create_code_loaders
 from funcmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
 
@@ -108,6 +109,11 @@ def main(config):
 
     for epoch in range(0, config["num_epochs"]):
         t0 = time.time()
+        
+        # 打印epoch信息
+        fabric.print(f"\n>> Starting Epoch {epoch+1}/{config['num_epochs']}")
+        fabric.print(f">> Total steps per epoch: {len(loader_train)}")
+        fabric.print(f">> Global step range: {acc_iter} to {acc_iter + len(loader_train) - 1}")
 
         # train
         train_loss, acc_iter = train_denoiser(
@@ -141,17 +147,9 @@ def main(config):
                     if val_loss < best_res:
                         best_res = val_loss
 
-        # sample and save
-        if ((epoch + 1) % config["sample_every"] == 0 or epoch == config["num_epochs"] - 1) and epoch != 0:
-            with fabric.rank_zero_first():
-                if fabric.global_rank == 0:
-                    try:
-                        sample(funcmol_ema, dec_module, config, fabric)
-                        fabric.print(f">> Sampling completed successfully at epoch {epoch + 1}")
-                    except Exception as e:
-                        fabric.print(f"Error during sampling: {e}")
-                        fabric.print(">> Continuing training without saving samples")
-            # save
+        # save checkpoint
+        if ((epoch + 1) % config["save_every"] == 0 or epoch == config["num_epochs"] - 1) and epoch != 0:
+            # save checkpoint with epoch number to avoid overwriting
             try:
                 state = {
                     "epoch": epoch + 1,
@@ -160,8 +158,20 @@ def main(config):
                     "optimizer": optimizer.state_dict(),
                     "code_stats": dec_module.code_stats
                 }
-                fabric.save(os.path.join(config["dirname"], "checkpoint.pth.tar"), state)
-                fabric.print(f">> Checkpoint saved successfully at epoch {epoch + 1}")
+                # Create checkpoints directory if it doesn't exist
+                checkpoints_dir = os.path.join(config["dirname"], "checkpoints")
+                os.makedirs(checkpoints_dir, exist_ok=True)
+                
+                # Save with epoch number to avoid overwriting
+                checkpoint_path = os.path.join(checkpoints_dir, f"checkpoint_epoch_{epoch+1:06d}.pth.tar")
+                fabric.save(checkpoint_path, state)
+                fabric.print(f">> Checkpoint saved successfully at epoch {epoch + 1}: {checkpoint_path}")
+                
+                # Also save as latest checkpoint for easy access
+                latest_checkpoint_path = os.path.join(checkpoints_dir, "checkpoint_latest.pth.tar")
+                fabric.save(latest_checkpoint_path, state)
+                fabric.print(f">> Latest checkpoint updated: {latest_checkpoint_path}")
+                
             except Exception as e:
                 fabric.print(f"Error saving checkpoint: {e}")
                 fabric.print(">> Training will continue but checkpoint was not saved")
@@ -233,8 +243,11 @@ def train_denoiser(
     """
     metrics.reset()
     model.train()
-
-    for batch in loader:
+    
+    # 创建tqdm进度条
+    pbar = tqdm(loader, desc="Training", disable=not fabric.global_rank == 0)
+    
+    for batch_idx, batch in enumerate(pbar):
         adjust_learning_rate(optimizer, acc_iter, config)
         acc_iter += 1
 
@@ -248,6 +261,29 @@ def train_denoiser(
             codes = normalize_code(batch, dec_module.code_stats)
 
         smooth_codes = add_noise_to_code(codes, smooth_sigma=config["smooth_sigma"])
+        
+        # 添加denoiser训练调试信息 - 基于epoch内的step数
+        debug_frequency = max(1, len(loader) // 10)  # 每个epoch打印10次调试信息
+        if batch_idx % debug_frequency == 0:
+            fabric.print(f"[TRAIN DEBUG] Global Step {acc_iter}, Epoch Step {batch_idx}/{len(loader)}:")
+            fabric.print(f"  codes - min: {codes.min().item():.6f}, max: {codes.max().item():.6f}, mean: {codes.mean().item():.6f}, std: {codes.std().item():.6f}")
+            fabric.print(f"  smooth_codes - min: {smooth_codes.min().item():.6f}, max: {smooth_codes.max().item():.6f}, mean: {smooth_codes.mean().item():.6f}, std: {smooth_codes.std().item():.6f}")
+            
+            # 检查denoiser输出
+            with torch.no_grad():
+                model.eval()
+                denoiser_output = model(smooth_codes)
+                model.train()
+                fabric.print(f"  denoiser_output - min: {denoiser_output.min().item():.6f}, max: {denoiser_output.max().item():.6f}, mean: {denoiser_output.mean().item():.6f}, std: {denoiser_output.std().item():.6f}")
+                
+                # 检查是否有异常值
+                if torch.isnan(denoiser_output).any():
+                    fabric.print("  WARNING: denoiser_output contains NaN values!")
+                if torch.isinf(denoiser_output).any():
+                    fabric.print("  WARNING: denoiser_output contains Inf values!")
+                if denoiser_output.abs().max().item() > 100.0:
+                    fabric.print(f"  WARNING: denoiser_output has very large values (max abs: {denoiser_output.abs().max().item():.2f})")
+        
         loss = compute_loss(codes, smooth_codes, model, criterion)
 
         optimizer.zero_grad()
@@ -255,13 +291,43 @@ def train_denoiser(
         
         # 梯度裁剪 - 防止梯度爆炸，稳定训练
         max_grad_norm = config.get("max_grad_norm", 1.0)  # 从配置中获取，默认为1.0
+        
+        # 添加梯度监控 - 基于epoch内的step数
+        if batch_idx % debug_frequency == 0:
+            total_grad_norm = 0.0
+            for param in model.parameters():
+                if param.grad is not None:
+                    param_grad_norm = param.grad.data.norm(2).item()
+                    total_grad_norm += param_grad_norm ** 2
+            total_grad_norm = total_grad_norm ** 0.5
+            fabric.print(f"  grad_norm before clipping: {total_grad_norm:.6f}")
+        
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+        
+        # 记录裁剪后的梯度范数
+        if batch_idx % debug_frequency == 0:
+            total_grad_norm_after = 0.0
+            for param in model.parameters():
+                if param.grad is not None:
+                    param_grad_norm = param.grad.data.norm(2).item()
+                    total_grad_norm_after += param_grad_norm ** 2
+            total_grad_norm_after = total_grad_norm_after ** 0.5
+            fabric.print(f"  grad_norm after clipping: {total_grad_norm_after:.6f}")
         
         optimizer.step()
 
         model_ema.update(model)
         metrics.update(loss)
+        
+        # 更新tqdm进度条
+        current_loss = loss.item()
+        pbar.set_postfix({
+            'loss': f'{current_loss:.4f}',
+            'global_step': acc_iter,
+            'lr': f'{optimizer.param_groups[0]["lr"]:.2e}'
+        })
 
+    pbar.close()
     return metrics.compute().item(), acc_iter
 
 
@@ -306,38 +372,6 @@ def val_denoiser(
         loss = compute_loss(codes, smooth_codes, model, criterion)
         metrics.update(loss)
     return metrics.compute().item()
-
-
-def sample(
-    model: torch.nn.Module,
-    dec_module: torch.nn.Module,
-    config: dict,
-    fabric: object,
-) -> None:
-    """
-    Samples from the given model and saves the generated samples to the specified directory.
-
-    Args:
-        model (torch.nn.Module): The model to sample from.
-        dec_module (torch.nn.Module): The decoder module used during sampling.
-        config (dict): Configuration dictionary containing parameters such as 'ema_decay' and 'dirname'.
-        fabric (object): An object providing utility functions such as 'print'.
-
-    Returns:
-        None
-    """
-    if config["ema_decay"] > 0:
-        model = model.module
-    model.eval()
-
-    dirname_out = os.path.join(config["dirname"], "samples")
-    os.makedirs(dirname_out, exist_ok=True)
-
-    t0 = time.time()
-    with torch.no_grad():
-        _ = model.sample(dec=dec_module, save_dir=dirname_out, config=config, fabric=fabric)
-    tf = time.time()
-    fabric.print(f">> done sampling (time ellapsed: {(tf - t0):.2f}s")
 
 
 def compute_loss(

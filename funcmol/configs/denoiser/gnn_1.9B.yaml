@@ -1,9 +1,0 @@
-# GNN Denoiser 1.9B parameters
-use_gnn: True
-n_hidden_units: 4096
-num_blocks: 12
-dropout: 0.1
-k_neighbors: 12
-cutoff: 6.0
-radius: 4.0
-use_radius_graph: True
