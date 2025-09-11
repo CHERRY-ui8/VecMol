@@ -1,6 +1,7 @@
 exps/*
 funcmol/dataset/data/*
 funcmol/wandb/*
+funcmol/outputs/*
 exps/*
 
 # Python
