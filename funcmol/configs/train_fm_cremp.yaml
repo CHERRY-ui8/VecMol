@@ -1,8 +1,8 @@
-on_the_flydefaults:
+defaults:
   - dset: cremp
   - encoder: cnn
   - decoder: decoder_global
-  - denoiser: mlp_1.9B
+  - denoiser: gnn
   - wjs: wjs_training_small
   - override hydra/job_logging: custom
   - _self_
@@ -40,7 +40,7 @@ max_grad_norm: 1.0  # 梯度裁剪阈值，防止梯度爆炸
 # set the running dir
 hydra:
   run:
-    dir: ./${dirname}
+    dir: ${dirname}
   job:
     config:
       override_dirname:

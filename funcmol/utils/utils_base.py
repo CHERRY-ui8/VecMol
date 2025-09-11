@@ -3,7 +3,7 @@ import lightning as L
 from omegaconf import OmegaConf
 import os
 import torch
-from wandb.integration.lightning.fabric import WandbLogger
+# from wandb.integration.lightning.fabric import WandbLogger
 from lightning.fabric.strategies import DDPStrategy
 # import tensorboard
 from torch.utils.tensorboard import SummaryWriter

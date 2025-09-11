@@ -22,7 +22,7 @@ use_ema: False
 # set the running dir
 hydra:
   run:
-    dir: ./${dirname}
+    dir: ${dirname}
   job:
     config:
       override_dirname:

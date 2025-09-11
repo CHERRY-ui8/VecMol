@@ -8,17 +8,19 @@ defaults:
 
 debug: False
 debug_one_mol: False
-debug_subset: True
+debug_subset: False
 wandb: True
 seed: 1234
 exp_dir: ../exps/neural_field
-exp_name: "nf_${dset.dset_name}_${now:%Y%m%d}_${now:%H%M%S}_${now:%f}"
+# exp_name: "nf_${dset.dset_name}/${now:%Y%m%d}/${now:%H%M%S}_${now:%f}"
+exp_name: "testnf_${dset.dset_name}/${now:%Y%m%d}"
 dirname: "${exp_dir}/${exp_name}"
 reload_model_path: null
 auto_resume: False
 n_samples: None
 
 # training params
+ckpt_every_n_epochs: 10  # 每隔多少epoch保存一次ckpt
 n_epochs: 500
 eval_every: 1
 use_ema: False
@@ -27,7 +29,7 @@ lr_decay: False
 # set the running dir
 hydra:
   run:
-    dir: ./${dirname}
+    dir: ${dirname}
   job:
     config:
       override_dirname:

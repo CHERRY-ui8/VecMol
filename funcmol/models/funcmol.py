@@ -10,14 +10,24 @@ from funcmol.models.egnn_denoiser import GNNDenoiser
 
 
 ########################################################################################
+# Helper function for printing
+def _print(fabric, message):
+    """Print message using fabric if available, otherwise use regular print."""
+    if fabric is not None:
+        fabric.print(message)
+    else:
+        print(message)
+
+########################################################################################
 # create funcmol
-def create_funcmol(config: dict, fabric: object):
+def create_funcmol(config: dict, fabric: object = None):
     """
     Create and compile a FuncMol model.
 
     Args:
         config (dict): Configuration dictionary for the FuncMol model.
         fabric (object): An object providing necessary methods and attributes for model creation.
+                        If None, will use single GPU mode.
 
     Returns:
         torch.nn.Module: The compiled FuncMol model.
@@ -26,7 +36,7 @@ def create_funcmol(config: dict, fabric: object):
 
     # n params
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    fabric.print(f">> FuncMol has {(n_params/1e6):.02f}M parameters")
+    _print(fabric, f">> FuncMol has {(n_params/1e6):.02f}M parameters")
 
     # Disable torch.compile due to compatibility issues with torch_cluster
     # model = torch.compile(model)
@@ -37,9 +47,14 @@ def create_funcmol(config: dict, fabric: object):
 ########################################################################################
 # FuncMol class
 class FuncMol(nn.Module):
-    def __init__(self, config: dict, fabric):
+    def __init__(self, config: dict, fabric=None):
         super().__init__()
-        self.device = fabric.device
+        # Handle both fabric and single GPU modes
+        if fabric is not None:
+            self.device = fabric.device
+        else:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
         self.smooth_sigma = config["smooth_sigma"]
         self.grid_size = config["dset"]["grid_size"]  # 保存grid_size配置
 
@@ -290,7 +305,7 @@ class FuncMol(nn.Module):
 
         #  sample codes with WJS
         codes_all = []
-        fabric.print(f">> Sample codes with WJS (n_chains: {config['wjs']['n_chains']})")
+        _print(fabric, f">> Sample codes with WJS (n_chains: {config['wjs']['n_chains']})")
         try:
             for _ in tqdm(range(config["wjs"]["repeats_wjs"])):
                 # initialize y and v
@@ -313,9 +328,9 @@ class FuncMol(nn.Module):
                     
                     # 如果数值范围异常，打印警告
                     if y_norm_after > 100.0 or v_norm_after > 100.0:
-                        fabric.print(f">> WARNING: Large values detected at step {step_idx}")
-                        fabric.print(f">> y_norm: {y_norm_before:.2f} -> {y_norm_after:.2f}")
-                        fabric.print(f">> v_norm: {v_norm_before:.2f} -> {v_norm_after:.2f}")
+                        _print(fabric, f">> WARNING: Large values detected at step {step_idx}")
+                        _print(fabric, f">> y_norm: {y_norm_before:.2f} -> {y_norm_after:.2f}")
+                        _print(fabric, f">> v_norm: {v_norm_before:.2f} -> {v_norm_after:.2f}")
                     
                     code_hats = self.wjs_jump_step(y)  # jump
                     codes_all.append(code_hats.cpu())
@@ -325,7 +340,7 @@ class FuncMol(nn.Module):
                 torch.cuda.empty_cache()
                 
         except Exception as e:
-            fabric.print(f"Error during WJS sampling: {e}")
+            _print(fabric, f"Error during WJS sampling: {e}")
             raise e
 
         # Clean up network if requested
@@ -335,34 +350,34 @@ class FuncMol(nn.Module):
 
         # Concatenate all generated codes
         codes = torch.cat(codes_all, dim=0)
-        fabric.print(f">> Generated {codes.size(0)} codes")
+        _print(fabric, f">> Generated {codes.size(0)} codes")
         
         # 添加调试信息：检查codes的维度和内容
-        fabric.print(f">> Codes shape: {codes.shape}")
-        fabric.print(f">> Codes dtype: {codes.dtype}")
-        fabric.print(f">> Codes device: {codes.device}")
+        _print(fabric, f">> Codes shape: {codes.shape}")
+        _print(fabric, f">> Codes dtype: {codes.dtype}")
+        _print(fabric, f">> Codes device: {codes.device}")
         
         # 检查codes是否包含NaN/Inf
         if torch.isnan(codes).any():
-            fabric.print(">> WARNING: codes contains NaN values!")
+            _print(fabric, ">> WARNING: codes contains NaN values!")
             nan_count = torch.isnan(codes).sum().item()
-            fabric.print(f">> NaN count: {nan_count}")
+            _print(fabric, f">> NaN count: {nan_count}")
         
         if torch.isinf(codes).any():
-            fabric.print(">> WARNING: codes contains Inf values!")
+            _print(fabric, ">> WARNING: codes contains Inf values!")
             inf_count = torch.isinf(codes).sum().item()
-            fabric.print(f">> Inf count: {inf_count}")
+            _print(fabric, f">> Inf count: {inf_count}")
         
         # 检查codes的数值范围（normalized）
-        fabric.print(f">> Codes min: {codes.min().item():.6f}, max: {codes.max().item():.6f}")
+        _print(fabric, f">> Codes min: {codes.min().item():.6f}, max: {codes.max().item():.6f}")
 
         # 如果提供了code_stats，进行unnormalization
         if code_stats is not None:
-            fabric.print(">> Unnormalizing codes...")
+            _print(fabric, ">> Unnormalizing codes...")
             codes = unnormalize_code(codes, code_stats)
-            fabric.print(f">> Unnormalized codes min: {codes.min().item():.6f}, max: {codes.max().item():.6f}")
+            _print(fabric, f">> Unnormalized codes min: {codes.min().item():.6f}, max: {codes.max().item():.6f}")
         else:
-            fabric.print(">> No code_stats provided, returning normalized codes")
+            _print(fabric, ">> No code_stats provided, returning normalized codes")
 
         # 清理内存
         del codes_all

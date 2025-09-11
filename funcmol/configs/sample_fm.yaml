@@ -13,7 +13,7 @@ dirname: ${fm_pretrained_path}/eval_s${wjs.steps_wjs}_ms${wjs.max_steps_wjs}
 # set the running dir
 hydra:
   run:
-    dir: ./${dirname}
+    dir: ${dirname}
   job:
     config:
       override_dirname:

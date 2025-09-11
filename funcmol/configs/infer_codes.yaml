@@ -5,7 +5,6 @@ defaults:
 wandb: False
 seed: 1234
 nf_pretrained_path: null  # 逻辑是让程序自动选择最新模型，如果需要指定，则需要手动设置
-n_dataset_iterations: 10
 
 # debug options
 debug: False
@@ -23,7 +22,7 @@ dset:
 # set the running dir
 hydra:
   run:
-    dir: ./${dirname}
+    dir: ${dirname}
   job:
     config:
       override_dirname:

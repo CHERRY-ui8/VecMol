@@ -30,11 +30,25 @@ def main(config):
         codes_dir = config["codes_dir"]
 
     config = OmegaConf.to_container(config)
-    config["exp_name"], config["dirname"] = exp_name, dirname  # TODO: make this better
+    
+    # 在分布式训练中，只有rank 0创建目录，其他进程使用相同目录
+    if fabric.global_rank == 0:
+        config["exp_name"], config["dirname"] = exp_name, dirname
+        # 确保目录存在
+        os.makedirs(config["dirname"], exist_ok=True)
+        os.makedirs(os.path.join(config["dirname"], "checkpoints"), exist_ok=True)
+        os.makedirs(os.path.join(config["dirname"], "samples"), exist_ok=True)
+    else:
+        # 其他进程使用rank 0的目录
+        config["exp_name"] = exp_name
+        config["dirname"] = dirname
     
     if not config["on_the_fly"]:
         config["codes_dir"] = codes_dir # 保护codes_dir，确保在配置对象转换过程中不会丢失关键参数
-    fabric.print(">> saving experiments in:", config["dirname"])
+    
+    # 只有rank 0打印目录信息
+    if fabric.global_rank == 0:
+        fabric.print(">> saving experiments in:", config["dirname"])
 
     ##############################
     # load pretrained neural field

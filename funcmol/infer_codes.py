@@ -1,6 +1,5 @@
 import sys
 import os
-from pathlib import Path
 # 添加当前目录到Python路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -11,7 +10,7 @@ torch._dynamo.config.suppress_errors = True
 from tqdm import tqdm
 import time
 import hydra
-from funcmol.utils.utils_nf import load_neural_field
+from funcmol.utils.utils_nf import load_neural_field, get_latest_model_path
 from funcmol.utils.utils_base import setup_fabric
 from funcmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
 import omegaconf
@@ -53,38 +52,33 @@ def main(config):
     fabric.print(">> saving codes in", config["dirname"])
     os.makedirs(config["dirname"], exist_ok=True)
 
-    # count number of files on directory
-    n_code_files = len([
-        f for f in os.listdir(config["dirname"])
-        if os.path.isfile(os.path.join(config["dirname"], f)) and \
-        f.startswith("codes") and f.endswith(".pt")
-    ])
-    fabric.print(f">> found {n_code_files} code files")
+    # check if codes already exist
+    codes_file_path = os.path.join(config["dirname"], "codes.pt")
+    if os.path.exists(codes_file_path):
+        fabric.print(f">> codes file already exists: {codes_file_path}")
+        fabric.print(">> skipping code inference")
+        return
 
     # start eval
     fabric.print(f">> start code inference in {config['split']} split")
-    n_dset_iter = config["n_dataset_iterations"] if config["split"] == "train" else 1
-    iter_counter = n_code_files
     enc.eval()
 
     with torch.no_grad():
-        for dataset_iter in range(n_dset_iter):
-            codes = []
-            fabric.print(f">> dataset iteration {dataset_iter}")
-            t0 = time.time()
-            for batch in tqdm(loader):
-                codes_batch = enc(batch)
-                codes.append(codes_batch.detach().cpu())
-            fabric.print(f">> saving chunk {iter_counter}")
-            codes = torch.cat(codes, dim=0)
-            torch.save(codes, os.path.join(config["dirname"], f"codes_{iter_counter:04d}.pt"))
-            iter_counter += 1
-            del codes
+        codes = []
+        t0 = time.time()
+        for batch in tqdm(loader):
+            codes_batch = enc(batch)
+            codes.append(codes_batch.detach().cpu())
+        
+        fabric.print(f">> saving codes to {codes_file_path}")
+        codes = torch.cat(codes, dim=0)
+        torch.save(codes, codes_file_path)
+        del codes
 
-            elapsed_time = time.time() - t0
-            hours, rem = divmod(elapsed_time, 3600)
-            minutes, seconds = divmod(rem, 60)
-            fabric.print(f">> time for iter {dataset_iter}: {int(hours):0>2}h:{int(minutes):0>2}m:{seconds:05.2f}s")
+        elapsed_time = time.time() - t0
+        hours, rem = divmod(elapsed_time, 3600)
+        minutes, seconds = divmod(rem, 60)
+        fabric.print(f">> code inference completed in: {int(hours):0>2}h:{int(minutes):0>2}m:{seconds:05.2f}s")
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ n_channels: 8
 n_points: 500 # TODO：后面可以再调大一些，暂时先保留500
 subsampling_ratio: 4
 
-num_workers: 0  # 暂时禁用多进程以避免Segmentation fault
-batch_size: 32  # 减少批次大小以适应多卡训练
+num_workers: 2  # 可能是导致Segmentation fault的原因
+batch_size: 48
 lr_enc: 1e-4
 lr_dec: 5e-4

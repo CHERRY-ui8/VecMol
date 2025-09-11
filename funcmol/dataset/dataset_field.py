@@ -91,8 +91,8 @@ class FieldDataset(Dataset):
         
         # 根据数据加载方式设置field_idxs
         if hasattr(self, 'use_lmdb') and self.use_lmdb:
-            # LMDB模式下，使用molid2idx的长度
-            self.field_idxs = torch.arange(len(self.molid2idx))
+            # LMDB模式下，使用keys的长度
+            self.field_idxs = torch.arange(len(self.keys))
         else:
             # 传统模式下，使用data的长度
             self.field_idxs = torch.arange(len(self.data))
@@ -118,11 +118,12 @@ class FieldDataset(Dataset):
         
         # 检查是否存在LMDB数据库
         lmdb_path = os.path.join(self.data_dir, self.dset_name, f"{fname}.lmdb")
-        molid2idx_path = os.path.join(self.data_dir, self.dset_name, f"{fname}_molid2idx.pt")
+        # NOTE: remove molid2idx definition
+        keys_path = os.path.join(self.data_dir, self.dset_name, f"{fname}_keys.pt")
         
-        if os.path.exists(lmdb_path) and os.path.exists(molid2idx_path):
+        if os.path.exists(lmdb_path) and os.path.exists(keys_path):
             # 使用LMDB数据库
-            self._use_lmdb_database(lmdb_path, molid2idx_path)
+            self._use_lmdb_database(lmdb_path, keys_path)
         else:
             # 使用传统的torch.load方式
             self.data = torch.load(os.path.join(
@@ -130,21 +131,19 @@ class FieldDataset(Dataset):
             )
             self.use_lmdb = False
 
-    def _use_lmdb_database(self, lmdb_path, molid2idx_path):
+    def _use_lmdb_database(self, lmdb_path, keys_path):
         """使用LMDB数据库加载数据"""
         self.lmdb_path = lmdb_path
-        self.molid2idx = torch.load(molid2idx_path)
+        self.keys = torch.load(keys_path)  # 直接加载keys文件
         self.db = None
-        self.keys = None
         self.use_lmdb = True
+        
         print(f"  | Using LMDB database: {lmdb_path}")
-        print(f"  | Database contains {len(self.molid2idx)} molecules")
+        print(f"  | Database contains {len(self.keys)} molecules")
 
     def _connect_db(self):
         """建立只读数据库连接 - 进程安全版本"""
         if self.db is None:
-            import os
-            
             # 使用线程本地存储确保每个worker进程有独立的连接
             if not hasattr(_thread_local, 'lmdb_connections'):
                 _thread_local.lmdb_connections = {}
@@ -163,10 +162,6 @@ class FieldDataset(Dataset):
                 )
             
             self.db = _thread_local.lmdb_connections[self.lmdb_path]
-            
-            # 使用只读事务获取keys
-            with self.db.begin() as txn:
-                self.keys = list(txn.cursor().iternext(values=False))
 
     def _close_db(self):
         """关闭数据库连接"""
@@ -177,8 +172,7 @@ class FieldDataset(Dataset):
 
     def _filter_by_elements(self, elements) -> None:
         if hasattr(self, 'use_lmdb') and self.use_lmdb:
-            # LMDB模式下，过滤在__getitem__中进行
-            self.elements_ids = [ELEMENTS_HASH[element] for element in elements]
+            # LMDB模式下，元素过滤已在convert_to_lmdb.py中完成
             return
         
         # 传统模式下的过滤
@@ -202,8 +196,6 @@ class FieldDataset(Dataset):
 
     def __len__(self):
         if hasattr(self, 'use_lmdb') and self.use_lmdb:
-            if self.db is None:
-                self._connect_db()
             return len(self.keys)
         return self.field_idxs.size(0)
 
@@ -220,6 +212,9 @@ class FieldDataset(Dataset):
             self._connect_db()
         
         key = self.keys[index]
+        # 确保key是bytes格式，因为LMDB需要bytes
+        if isinstance(key, str):
+            key = key.encode('utf-8')
         
         # 使用更安全的事务处理
         try:
@@ -233,17 +228,7 @@ class FieldDataset(Dataset):
             with self.db.begin() as txn:
                 sample_raw = pickle.loads(txn.get(key))
         
-        # 检查元素过滤
-        if hasattr(self, 'elements_ids'):
-            atoms = sample_raw["atoms_channel"][sample_raw["atoms_channel"] != PADDING_INDEX]
-            include = True
-            for atom_id in atoms.unique():
-                if int(atom_id.item()) not in self.elements_ids:
-                    include = False
-                    break
-            if not include:
-                # 如果不符合元素要求，返回下一个有效的数据
-                return self._getitem_lmdb((index + 1) % len(self))
+        # NOTE: 过滤操作转移到了convert_to_lmdb.py中进行
         
         # preprocess molecule (handles rotation and centering)
         sample = self._preprocess_molecule(sample_raw)
@@ -540,6 +525,7 @@ def create_field_loaders(
     fabric = Fabric(),
     n_samples = None,
     sample_full_grid = False,
+    use_fabric=True,
 ):
     """
     Creates data loaders for training, validation, or testing datasets.
@@ -590,12 +576,16 @@ def create_field_loaders(
         batch_size=min(config["dset"]["batch_size"], len(dset)),
         num_workers=config["dset"]["num_workers"],
         shuffle=True if split == "train" else False,
-        pin_memory=False,
+        pin_memory=True,
         drop_last=True,
     )
-    fabric.print(f">> {split} set size: {len(dset)}")
+    if use_fabric:
+        fabric.print(f">> {split} set size: {len(dset)}")
 
-    return fabric.setup_dataloaders(loader, use_distributed_sampler=True)  # 所有split都使用分布式采样器
+        return fabric.setup_dataloaders(loader, use_distributed_sampler=True)  # 所有split都使用分布式采样器
+    else:
+        print(f">> {split} set size: {len(dset)}")
+        return loader
 
 
 def create_gnf_converter(config: dict, device: str = "cpu") -> GNFConverter:

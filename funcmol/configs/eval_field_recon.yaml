@@ -1,0 +1,60 @@
+# Field Reconstruction Evaluation Configuration
+
+defaults:
+  - dset: qm9  # 或 drugs
+  - converter: gnf_converter_qm9  # 或 gnf_converter_drugs
+  - override hydra/job_logging: custom
+  - _self_
+
+# 评估参数
+max_samples: null  # 要评估的样本数量，null表示使用整个数据集，也可以指定具体数量如100
+n_processes: 4    # 并行进程数
+
+# Field模式设置
+field_mode: gt_field  # 'gt_field' 或 'nf_field'
+
+# Field方法设置
+field_methods: ['gaussian_mag', 'tanh']  # 要比较的field方法
+
+# 模型路径（仅在nf_field模式下需要）
+model_dir: null  # 例如: exps/neural_field/nf_qm9_20250804_153549_358664
+
+# 输出设置
+output_dir: exps/field_evaluation
+
+# 可以覆盖数据集参数
+# dset_name: qm9  # 或 drugs
+# data_dir: dataset/data
+# elements: ['C', 'N', 'O', 'F', 'H']  # QM9数据集
+# elements: ['C', 'N', 'O', 'F', 'H', 'S', 'Cl', 'Br']  # Drugs数据集
+
+# 可以覆盖数据加载参数
+# n_points: 2000
+# resolution: 0.25
+# grid_dim: 32
+# atomic_radius: 0.5
+
+# 可以覆盖GNF转换器参数
+# gradient_field_method: tanh
+# n_iter: 2000
+# sigma: 0.5
+# step_size: 0.01
+# eps: 1e-6
+# min_samples: 5
+# temperature: 0.1
+# logsumexp_eps: 1e-8
+# inverse_square_strength: 1.0
+# gradient_clip_threshold: 1.0
+
+# 可以覆盖方法特定配置
+# method_configs:
+#   gaussian_mag:
+#     n_query_points: 1000
+#     step_size: 0.01
+#     sig_sf: 0.5
+#     sig_mag: 0.1
+#   tanh:
+#     n_query_points: 1000
+#     step_size: 0.01
+#     sig_sf: 0.5
+#     sig_mag: 0.1

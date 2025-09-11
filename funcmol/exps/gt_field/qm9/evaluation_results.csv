@@ -1,0 +1,5 @@
+sample_idx,field_method,rmsd,rmsd_hungarian,reconstruction_loss,reconstruction_time,gt_atoms,recon_atoms,atom_count_mismatch,mol_file
+0,gaussian_mag,0.7285431027412415,0.0001299024443142116,0.0002919733233284205,54.260162353515625,11,11,0,exps/gt_field/qm9/reconstructed_molecules/mol_0_gaussian_mag.npz
+0,tanh,0.00020599979325197637,7.962758536450565e-05,0.0001972268510144204,299.31672954559326,11,11,0,exps/gt_field/qm9/reconstructed_molecules/mol_0_tanh.npz
+1,gaussian_mag,1.0077458620071411,0.00021474409732036293,0.0004624998546205461,64.20061707496643,15,15,0,exps/gt_field/qm9/reconstructed_molecules/mol_1_gaussian_mag.npz
+1,tanh,0.41857969760894775,5.73782563151326e-05,0.00015964324120432138,41.32052230834961,15,15,0,exps/gt_field/qm9/reconstructed_molecules/mol_1_tanh.npz

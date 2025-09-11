@@ -111,7 +111,7 @@ class EGNNVectorField(nn.Module):
                  code_dim: int = 128,
                  cutoff: float = None,
                  anchor_spacing: float = 2.0,
-                 device=None,
+                #  device=None,
                  k_neighbors: int = 32):  # 添加k_neighbors参数
         """
         Initialize the EGNN Vector Field model.
@@ -143,8 +143,12 @@ class EGNNVectorField(nn.Module):
 
         # Create learnable grid points and features for G_L
         # 指定batch_size=1：只存储一份网格坐标，而不是为每个可能的 batch_size 都存储一份
-        self.register_buffer('grid_points', create_grid_coords(batch_size=1, grid_size=self.grid_size, device=device, anchor_spacing=anchor_spacing).squeeze(0))
-        self.grid_features = nn.Parameter(torch.randn(self.grid_size**3, self.code_dim, requires_grad=True) / math.sqrt(self.code_dim)) # TODO: 是否需要初始化？
+        self.register_buffer('grid_points',
+                create_grid_coords(
+                    batch_size=1, grid_size=self.grid_size, device='cpu', anchor_spacing=anchor_spacing
+                ).squeeze(0)
+            )
+        # self.grid_features = nn.Parameter(torch.randn(self.grid_size**3, self.code_dim, requires_grad=True) / math.sqrt(self.code_dim)) # TODO: 是否需要初始化？
 
         # type embedding
         self.type_embed = nn.Embedding(self.n_atom_types, self.code_dim)
@@ -184,12 +188,13 @@ class EGNNVectorField(nn.Module):
         batch_size = query_points.size(0)
         n_points = query_points.size(1)
         device = query_points.device
-        grid_points = self.grid_points.to(device)  # [grid_size**3, 3]
+        grid_points = self.grid_points  #.to(device)  # [grid_size**3, 3]
         n_grid = grid_points.size(0)
 
         # Flatten query_points immediately
         query_points = query_points.reshape(-1, 3).float()  # [B * N, 3]        
-        grid_coords = grid_points.unsqueeze(0).expand(batch_size, -1, -1).reshape(-1, 3)  # [B * grid_size**3, 3]
+        # grid_coords = grid_points.unsqueeze(0).expand(batch_size, -1, -1).reshape(-1, 3)  # [B * grid_size**3, 3]
+        grid_coords = grid_points.repeat(batch_size, 1)  # [B * grid_size**3, 3]
         n_points_total = query_points.size(0)
         
         # 1. 初始化节点特征
@@ -205,8 +210,8 @@ class EGNNVectorField(nn.Module):
         grid_batch = torch.arange(batch_size, device=device).repeat_interleave(n_grid)
 
         # 确保所有输入都在正确的设备上
-        grid_coords = grid_coords.to(device)
-        query_points = query_points.to(device)
+        # grid_coords = grid_coords.to(device)
+        # query_points = query_points.to(device)
 
         # 使用knn构建 query -> grid edges，确保每个query point都能从最近的k个grid获取信息
         # edge_grid_query = radius(  # 注释掉radius实现

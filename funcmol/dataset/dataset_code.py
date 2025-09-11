@@ -25,7 +25,7 @@ class CodeDataset(Dataset):
         dset_name: str = "qm9",
         split: str = "train",
         codes_dir: str = None,
-        num_augmentations = None,
+        num_augmentations = None,  # 保留参数以兼容现有代码，但不再使用
     ):
         self.dset_name = dset_name
         self.split = split
@@ -37,8 +37,15 @@ class CodeDataset(Dataset):
             if os.path.isfile(os.path.join(self.codes_dir, f)) and \
             f.startswith("codes") and f.endswith(".pt")
         ]
-        self.num_augmentations = num_augmentations if (num_augmentations is not None and split == "train") else len(self.list_codes) - 1
-        self.list_codes.sort()
+        # 简化：不再使用数据增强，直接加载codes.pt
+        if "codes.pt" in self.list_codes:
+            self.list_codes = ["codes.pt"]
+        else:
+            # 兼容旧格式：如果有编号的codes文件，使用第一个
+            self.list_codes.sort()
+            if self.list_codes:
+                self.list_codes = [self.list_codes[0]]
+        self.num_augmentations = 0  # 不再使用数据增强
         self.load_codes(0)
 
     def __len__(self):
@@ -49,20 +56,20 @@ class CodeDataset(Dataset):
 
     def load_codes(self, index=None) -> None:
         """
-        Load codes from a specified index or a random index if none is provided.
+        Load codes from the available codes file.
 
         Args:
-            index (int, optional): The index of the code to load. If None, a random index is selected.
+            index (int, optional): The index of the code to load. If None, uses the first (and only) file.
 
         Returns:
             None
 
         Side Effects:
-            - Sets `self.curr_codes` to the loaded codes from the specified or random index.
+            - Sets `self.curr_codes` to the loaded codes from the codes file.
             - Prints the path of the loaded codes.
         """
         if index is None:
-            index = torch.randint(0, self.num_augmentations, [1])[0].item()  # random.randint(0, self.num_augmentations)
+            index = 0
         code_path = os.path.join(self.codes_dir, self.list_codes[index])
         print(">> loading codes: ", code_path)
         self.curr_codes = torch.load(code_path, weights_only=False)

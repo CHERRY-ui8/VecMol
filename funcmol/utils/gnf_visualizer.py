@@ -428,9 +428,34 @@ class GNFVisualizer(MoleculeVisualizer):
         gif_path = os.path.join(self.recon_dir, f"{animation_name}.gif")
         with imageio.get_writer(gif_path, mode='I', duration=0.1, fps=15, loop=1) as writer:
             for frame_path in frame_paths:
-                frame = imageio.imread(frame_path)
-                writer.append_data(frame)
-                os.remove(frame_path)
+                try:
+                    # 检查文件是否存在且大小大于0
+                    if not os.path.exists(frame_path):
+                        print(f"Warning: Frame file {frame_path} does not exist, skipping...")
+                        continue
+                    
+                    # 等待文件完全写入
+                    import time
+                    time.sleep(0.01)  # 短暂等待确保文件写入完成
+                    
+                    # 检查文件大小
+                    if os.path.getsize(frame_path) == 0:
+                        print(f"Warning: Frame file {frame_path} is empty, skipping...")
+                        continue
+                    
+                    frame = imageio.imread(frame_path)
+                    writer.append_data(frame)
+                    
+                except Exception as e:
+                    print(f"Warning: Failed to read frame {frame_path}: {e}")
+                    continue
+                finally:
+                    # 确保清理文件
+                    try:
+                        if os.path.exists(frame_path):
+                            os.remove(frame_path)
+                    except:
+                        pass
         
         final_points = []
         final_types = []
@@ -469,6 +494,259 @@ class GNFVisualizer(MoleculeVisualizer):
             'final_kl_1to2': metrics_history['kl_1to2'][-1] if metrics_history['kl_1to2'] else float('inf'),
             'final_kl_2to1': metrics_history['kl_2to1'][-1] if metrics_history['kl_2to1'] else float('inf')
         }
+
+    def create_generation_animation(self,
+                                   converter: GNFConverter,
+                                   field_func,
+                                   sample_idx: int = 0,
+                                   save_interval: int = 50,
+                                   create_1d_plots: bool = True) -> Dict[str, Any]:
+        """创建分子生成过程的动画
+        
+        从 codes 生成的场函数开始，通过梯度下降找到原子位置，生成完整的分子结构。
+        不需要任何 ground truth 参考。
+        
+        Args:
+            converter: GNF 转换器，用于将场函数转换为原子位置
+            field_func: 场函数，输入查询点 [B, n_points, 3]，输出场信息 [B, n_points, n_atom_types, 3]
+            sample_idx: 样本索引
+            save_interval: 保存帧的间隔
+            
+        Returns:
+            包含动画路径、最终结果和指标历史的字典
+        """
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        print(f"\nStarting generation for molecule {sample_idx}")
+        
+        all_atom_types = list(range(5))
+        
+        # 在合理范围内初始化随机点
+        init_min = torch.tensor([-3.0, -3.0, -3.0], device=device)
+        init_max = torch.tensor([3.0, 3.0, 3.0], device=device)
+        
+        z_dict = {}
+        for atom_type in all_atom_types:
+            z_dict[atom_type] = torch.rand(converter.n_query_points, 3, device=device) * (init_max - init_min) + init_min
+        
+        frame_paths = []
+        metrics_history = {
+            'iterations': [],
+            'convergence': []  # 记录收敛情况
+        }
+        
+        for i in range(converter.n_iter):
+            with torch.no_grad():
+                for atom_type in all_atom_types:
+                    z = z_dict[atom_type]
+                    gradients = field_func(z)
+                    # 确保梯度场形状正确
+                    if gradients.dim() == 4:  # [batch, n_points, n_atom_types, 3]
+                        gradients = gradients[0]  # 取第一个batch
+                    
+                    type_gradients = gradients[:, atom_type, :]
+                    
+                    z_dict[atom_type] = z + torch.tensor(converter.step_size, device=z.device) * type_gradients
+            
+            if i % save_interval == 0 or i == converter.n_iter - 1:
+                frame_path = os.path.join(self.recon_dir, f"frame_gen_sample_{sample_idx}_{i:04d}.png")
+                
+                all_points = []
+                all_types = []
+                for atom_type in all_atom_types:
+                    points = z_dict[atom_type]
+                    if len(points) > 0:
+                        all_points.append(points)
+                        all_types.extend([atom_type] * len(points))
+                
+                if all_points:
+                    current_points = torch.cat(all_points, dim=0)
+                    current_types = torch.tensor(all_types, device=device)
+                else:
+                    current_points = torch.empty((0, 3), device=device)
+                    current_types = torch.empty((0,), device=device)
+                
+                # 只显示生成的分子，不显示"原始分子"
+                self.visualize_generation_step(
+                    current_points, i, frame_path, current_types
+                )
+                frame_paths.append(frame_path)
+                
+                # 计算收敛指标（点之间的平均距离变化）
+                if len(current_points) > 1:
+                    distances = torch.pdist(current_points)
+                    convergence = torch.std(distances).item()
+                    metrics_history['convergence'].append(convergence)
+        
+        gif_path = os.path.join(self.recon_dir, f"funcmol_gen_sample_{sample_idx}.gif")
+        with imageio.get_writer(gif_path, mode='I', duration=0.1, fps=15, loop=1) as writer:
+            for frame_path in frame_paths:
+                try:
+                    # 检查文件是否存在且大小大于0
+                    if not os.path.exists(frame_path):
+                        print(f"Warning: Frame file {frame_path} does not exist, skipping...")
+                        continue
+                    
+                    # 等待文件完全写入
+                    import time
+                    time.sleep(0.01)  # 短暂等待确保文件写入完成
+                    
+                    # 检查文件大小
+                    if os.path.getsize(frame_path) == 0:
+                        print(f"Warning: Frame file {frame_path} is empty, skipping...")
+                        continue
+                    
+                    frame = imageio.imread(frame_path)
+                    writer.append_data(frame)
+                    
+                except Exception as e:
+                    print(f"Warning: Failed to read frame {frame_path}: {e}")
+                    continue
+                finally:
+                    # 确保清理文件
+                    try:
+                        if os.path.exists(frame_path):
+                            os.remove(frame_path)
+                    except:
+                        pass
+        
+        # 生成最终分子结构
+        final_points = []
+        final_types = []
+        for atom_type in all_atom_types:
+            points = z_dict[atom_type].detach().cpu().numpy()
+            if len(points) > 0:
+                merged_points = converter._merge_points(points)
+                if len(merged_points) > 0:
+                    final_points.append(torch.from_numpy(merged_points).to(device))
+                    final_types.extend([atom_type] * len(merged_points))
+        
+        if final_points:
+            final_points = torch.cat(final_points, dim=0)
+            final_types = torch.tensor(final_types, device=device)
+        else:
+            final_points = torch.empty((0, 3), device=device)
+            final_types = torch.empty((0,), device=device)
+        
+        # 保存最终生成的分子
+        final_path = os.path.join(self.recon_dir, f"funcmol_gen_sample_{sample_idx}_final.png")
+        self.visualize_generated_molecule(
+            final_points, final_types, save_path=final_path
+        )
+        
+        # 创建1D场可视化（如果启用）
+        field_1d_results = None
+        if create_1d_plots:
+            try:
+                # 创建1D场可视化目录
+                field_1d_dir = os.path.join(self.recon_dir, "field_1d")
+                os.makedirs(field_1d_dir, exist_ok=True)
+                
+                # 生成1D场可视化
+                field_1d_save_path = os.path.join(field_1d_dir, f"field_1d_sample_{sample_idx}.png")
+                field_1d_results = visualize_1d_gradient_field_generation(
+                    field_func=field_func,
+                    sample_idx=sample_idx,
+                    atom_types=[0, 1, 2, 3, 4],  # C, H, O, N, F
+                    x_range=None,  # 使用默认范围
+                    n_points=3000,
+                    y_coord=0.0,
+                    z_coord=0.0,
+                    save_path=field_1d_save_path
+                )
+                print(f"1D field visualization created for sample {sample_idx}")
+            except Exception as e:
+                print(f"Warning: Failed to create 1D field visualization for sample {sample_idx}: {e}")
+                field_1d_results = None
+
+        return {
+            'gif_path': gif_path,
+            'final_path': final_path,
+            'metrics_history': metrics_history,
+            'final_points': final_points,
+            'final_types': final_types,
+            'final_convergence': metrics_history['convergence'][-1] if metrics_history['convergence'] else float('inf'),
+            'field_1d_results': field_1d_results
+        }
+    
+    def visualize_generation_step(self, 
+                                 current_points: torch.Tensor,
+                                 iteration: int,
+                                 save_path: str,
+                                 current_types: torch.Tensor):
+        """可视化分子生成过程的单个步骤"""
+        fig = plt.figure(figsize=(10, 8))
+        ax = fig.add_subplot(111, projection='3d')
+        
+        points_np = current_points.detach().cpu().numpy()
+        if current_types is not None:
+            types_np = current_types.detach().cpu().numpy()
+            for atom_type in range(5):
+                mask = (types_np == atom_type)
+                if mask.sum() > 0:
+                    ax.scatter(points_np[mask, 0], points_np[mask, 1], points_np[mask, 2], 
+                              c=self.atom_colors[atom_type], marker='o', s=100, 
+                              label=f'{["C", "H", "O", "N", "F"][atom_type]}', alpha=0.8)
+        else:
+            ax.scatter(points_np[:, 0], points_np[:, 1], points_np[:, 2], 
+                      c='blue', marker='o', s=100, label='Generated Points', alpha=0.8)
+        
+        # 设置坐标轴
+        if len(points_np) > 0:
+            self._setup_3d_axis(ax, [points_np], margin=1.0)
+        
+        ax.view_init(elev=30, azim=60)
+        ax.set_box_aspect([1, 1, 1])
+        
+        ax.set_title(f"Generated Molecule - Iteration {iteration}")
+        ax.legend(loc='upper right', bbox_to_anchor=(1.0, 1.0))
+        
+        # 确保保存目录存在
+        save_dir = os.path.dirname(save_path)
+        if save_dir and not os.path.exists(save_dir):
+            os.makedirs(save_dir, exist_ok=True)
+        
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def visualize_generated_molecule(self,
+                                   final_points: torch.Tensor,
+                                   final_types: torch.Tensor,
+                                   save_path: str):
+        """可视化最终生成的分子"""
+        fig = plt.figure(figsize=(12, 10))
+        ax = fig.add_subplot(111, projection='3d')
+        
+        points_np = final_points.detach().cpu().numpy()
+        if final_types is not None and len(final_types) > 0:
+            types_np = final_types.detach().cpu().numpy()
+            for atom_type in range(5):
+                mask = (types_np == atom_type)
+                if mask.sum() > 0:
+                    ax.scatter(points_np[mask, 0], points_np[mask, 1], points_np[mask, 2], 
+                              c=self.atom_colors[atom_type], marker='o', s=150, 
+                              label=f'{["C", "H", "O", "N", "F"][atom_type]}', alpha=0.9)
+        else:
+            ax.scatter(points_np[:, 0], points_np[:, 1], points_np[:, 2], 
+                      c='blue', marker='o', s=150, label='Generated Molecule', alpha=0.9)
+        
+        # 设置坐标轴
+        if len(points_np) > 0:
+            self._setup_3d_axis(ax, [points_np], margin=1.0)
+        
+        ax.view_init(elev=30, azim=60)
+        ax.set_box_aspect([1, 1, 1])
+        
+        ax.set_title("Generated Molecule (Final Result)")
+        ax.legend(loc='upper right', bbox_to_anchor=(1.0, 1.0))
+        
+        # 确保保存目录存在
+        save_dir = os.path.dirname(save_path)
+        if save_dir and not os.path.exists(save_dir):
+            os.makedirs(save_dir, exist_ok=True)
+        
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
 
 def visualize_1d_gradient_field_comparison(
     gt_coords: torch.Tensor,
@@ -837,6 +1115,180 @@ def visualize_1d_gradient_field_comparison(
         'available_atom_types': available_atom_types
     }
 
+def visualize_1d_gradient_field_generation(
+    field_func,
+    sample_idx: int = 0,
+    atom_types: Union[int, List[int]] = 0,
+    x_range: Optional[tuple] = None,
+    n_points: int = 3000,
+    y_coord: float = 0.0,
+    z_coord: float = 0.0,
+    save_path: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """可视化生成任务的一维梯度场（无ground truth对比）。
+    
+    Args:
+        field_func: 梯度场函数
+        sample_idx: 样本索引
+        atom_types: 原子类型列表或单个原子类型（0=C, 1=H, 2=O, 3=N, 4=F）
+        x_range: x 轴范围，None 时使用默认范围
+        n_points: 采样点数
+        y_coord: y 坐标固定值
+        z_coord: z 坐标固定值
+        save_path: 保存路径，None 时显示图像
+
+    Returns:
+        包含梯度场统计信息和数据的字典
+    """
+    device = next(field_func.parameters()).device if hasattr(field_func, 'parameters') else torch.device('cpu')
+    
+    # 确保 atom_types 是列表
+    if isinstance(atom_types, int):
+        atom_types = [atom_types]
+    
+    # 设置默认x范围
+    if x_range is None:
+        x_range = (-5.0, 5.0)  # 默认范围
+        print(f"使用默认 x 轴范围: {x_range}")
+    
+    x = torch.linspace(x_range[0], x_range[1], n_points, device=device)
+    query_points = torch.zeros(n_points, 3, device=device)
+    query_points[:, 0], query_points[:, 1], query_points[:, 2] = x, y_coord, z_coord
+    
+    with torch.no_grad():
+        pred_field = field_func(query_points.unsqueeze(0))
+        # 确保预测场形状正确
+        if pred_field.dim() == 4:  # [batch, n_points, n_atom_types, 3]
+            pred_field = pred_field[0]  # 取第一个batch
+    
+    # 为每个原子类型创建单独的2×4图
+    all_results = {}
+    
+    for atom_type in atom_types:
+        # 扩展原子类型名称列表以支持更多元素
+        atom_names = ["C", "H", "O", "N", "F", "S", "Cl", "Br"]
+        if atom_type < len(atom_names):
+            atom_name = atom_names[atom_type]
+        else:
+            atom_name = f"Type{atom_type}"
+        
+        # 获取梯度场数据
+        pred_gradients_3d = pred_field[:, atom_type, :]
+        pred_gradients = torch.norm(pred_gradients_3d, dim=1)
+        pred_gradients_x, pred_gradients_y, pred_gradients_z = pred_gradients_3d[:, 0], pred_gradients_3d[:, 1], pred_gradients_3d[:, 2]
+        
+        # 创建2×4的子图
+        fig, ((ax1, ax2, ax3, ax4), (ax5, ax6, ax7, ax8)) = plt.subplots(2, 4, figsize=(24, 12))
+        
+        # 子图1: 梯度场幅度
+        ax1.plot(x.cpu().numpy(), pred_gradients.cpu().numpy(), 
+                 label=f'Generated Field ({atom_name})', 
+                 linewidth=2, color='red', alpha=0.8)
+        ax1.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
+        ax1.set_xlabel('X Position (Å)', fontsize=12)
+        ax1.set_ylabel('Gradient Field Magnitude', fontsize=12)
+        ax1.set_title(f'Gradient Field Magnitude - {atom_name} Atoms\n'
+                      f'Sample {sample_idx}, Line: y={y_coord:.2f}, z={z_coord:.2f}', fontsize=14)
+        ax1.grid(True, alpha=0.3)
+        ax1.legend(fontsize=11)
+        
+        # 子图2: X方向分量
+        ax2.plot(x.cpu().numpy(), pred_gradients_x.cpu().numpy(), 
+                 label=f'Generated X ({atom_name})', 
+                 linewidth=2, color='red', alpha=0.8)
+        ax2.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
+        ax2.set_xlabel('X Position (Å)', fontsize=12)
+        ax2.set_ylabel('X Component of Gradient Field', fontsize=12)
+        ax2.set_title(f'X Direction Component - {atom_name} Atoms\n'
+                      f'(Positive = Right, Negative = Left)', fontsize=14)
+        ax2.grid(True, alpha=0.3)
+        ax2.legend(fontsize=11)
+        
+        # 子图3: Y方向分量
+        ax3.plot(x.cpu().numpy(), pred_gradients_y.cpu().numpy(), 
+                 label=f'Generated Y ({atom_name})', 
+                 linewidth=2, color='red', alpha=0.8)
+        ax3.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
+        ax3.set_xlabel('X Position (Å)', fontsize=12)
+        ax3.set_ylabel('Y Component of Gradient Field', fontsize=12)
+        ax3.set_title(f'Y Direction Component - {atom_name} Atoms\n'
+                      f'(Positive = Up, Negative = Down)', fontsize=14)
+        ax3.grid(True, alpha=0.3)
+        ax3.legend(fontsize=11)
+        
+        # 子图4: Z方向分量
+        ax4.plot(x.cpu().numpy(), pred_gradients_z.cpu().numpy(), 
+                 label=f'Generated Z ({atom_name})', 
+                 linewidth=2, color='red', alpha=0.8)
+        ax4.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
+        ax4.set_xlabel('X Position (Å)', fontsize=12)
+        ax4.set_ylabel('Z Component of Gradient Field', fontsize=12)
+        ax4.set_title(f'Z Direction Component - {atom_name} Atoms\n'
+                      f'(Positive = Forward, Negative = Backward)', fontsize=14)
+        ax4.grid(True, alpha=0.3)
+        ax4.legend(fontsize=11)
+        
+        # 第二行子图：统计信息
+        # 子图5: 梯度场幅度分布
+        ax5.hist(pred_gradients.cpu().numpy(), bins=50, alpha=0.7, color='red', edgecolor='black')
+        ax5.set_xlabel('Gradient Field Magnitude', fontsize=12)
+        ax5.set_ylabel('Frequency', fontsize=12)
+        ax5.set_title(f'Magnitude Distribution - {atom_name}', fontsize=14)
+        ax5.grid(True, alpha=0.3)
+        
+        # 子图6: X分量分布
+        ax6.hist(pred_gradients_x.cpu().numpy(), bins=50, alpha=0.7, color='red', edgecolor='black')
+        ax6.set_xlabel('X Component Value', fontsize=12)
+        ax6.set_ylabel('Frequency', fontsize=12)
+        ax6.set_title(f'X Component Distribution - {atom_name}', fontsize=14)
+        ax6.grid(True, alpha=0.3)
+        
+        # 子图7: Y分量分布
+        ax7.hist(pred_gradients_y.cpu().numpy(), bins=50, alpha=0.7, color='red', edgecolor='black')
+        ax7.set_xlabel('Y Component Value', fontsize=12)
+        ax7.set_ylabel('Frequency', fontsize=12)
+        ax7.set_title(f'Y Component Distribution - {atom_name}', fontsize=14)
+        ax7.grid(True, alpha=0.3)
+        
+        # 子图8: Z分量分布
+        ax8.hist(pred_gradients_z.cpu().numpy(), bins=50, alpha=0.7, color='red', edgecolor='black')
+        ax8.set_xlabel('Z Component Value', fontsize=12)
+        ax8.set_ylabel('Frequency', fontsize=12)
+        ax8.set_title(f'Z Component Distribution - {atom_name}', fontsize=14)
+        ax8.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        # 保存图像
+        if save_path:
+            atom_save_path = save_path.replace('.png', f'_{atom_name}.png')
+            plt.savefig(atom_save_path, dpi=300, bbox_inches='tight')
+            print(f"1D field visualization saved: {atom_save_path}")
+        else:
+            plt.show()
+        
+        # 保存该原子类型的统计信息
+        all_results[atom_name] = {
+            'save_path': atom_save_path if save_path else None,
+            'pred_gradients': pred_gradients.cpu().numpy(),
+            'pred_gradients_x': pred_gradients_x.cpu().numpy(),
+            'pred_gradients_y': pred_gradients_y.cpu().numpy(),
+            'pred_gradients_z': pred_gradients_z.cpu().numpy(),
+            'x_positions': x.cpu().numpy(),
+            'magnitude_mean': pred_gradients.mean().item(),
+            'magnitude_std': pred_gradients.std().item(),
+            'magnitude_max': pred_gradients.max().item(),
+            'magnitude_min': pred_gradients.min().item()
+        }
+        
+        # 关闭图形以释放内存
+        plt.close(fig)
+    
+    return {
+        'all_results': all_results,
+        'available_atom_types': atom_types
+    }
+
 def setup_environment(devices: str = "1", accelerator: str = "cpu", precision: str = "32-true") -> Tuple[Fabric, torch.device]:
     """初始化运行环境。
 
@@ -871,7 +1323,7 @@ def load_config_from_exp_dir(exp_dir: str) -> OmegaConf:
         raise FileNotFoundError(f"Config file not found: {config_file}")
     
     config = OmegaConf.load(config_file)
-    config["dset"]["data_dir"] = str(PROJECT_ROOT / "funcmol" / "dataset" / "data")
+    config["dset"]["data_dir"] = str(PROJECT_ROOT / "dataset" / "data")
     print(f"Dataset directory: {config['dset']['data_dir']}")
     return config
 
@@ -891,7 +1343,7 @@ def load_config(config_name: str = "train_nf_qm9") -> OmegaConf:
     with hydra.initialize_config_dir(config_dir=str(config_path.parent), version_base=None):
         config = hydra.compose(config_name=config_name)
     
-    config["dset"]["data_dir"] = str(PROJECT_ROOT / "funcmol" / "dataset" / "data")
+    config["dset"]["data_dir"] = str(PROJECT_ROOT / "dataset" / "data")
     print(f"Dataset directory: {config['dset']['data_dir']}")
     
     # 验证配置加载

@@ -1,2 +1,13 @@
 {
+    "compareFolders.includeFilter": [
+        "*.py",
+        "*.ipynb",
+        "*.yaml",
+        "*.yml",
+        "*.json",
+        "*.md",
+        "*.txt",
+        "*.csv",
+        "*.tsv",
+    ]
 }

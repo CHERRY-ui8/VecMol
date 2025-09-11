@@ -1,0 +1,38 @@
+defaults:
+  - dset: drugs
+  - encoder: cnn
+  - decoder: decoder_global
+  - denoiser: gnn
+  - wjs: wjs_sampling
+  - converter: gnf_converter_drugs
+  - override hydra/job_logging: custom
+  - _self_
+
+# 分子生成相关参数
+n_samples: 200  # Drugs数据集样本较多，使用较大的数量
+smooth_sigma: 1.0
+
+# 实验设置
+debug: False
+wandb: False
+seed: 1234
+
+# 模型路径
+nf_pretrained_path: ../exps/neural_field/nf_drugs
+fm_pretrained_path: ../exps/funcmol/fm_drugs
+
+# 输出设置
+exp_dir: ../exps/funcmol
+exp_name: "generation_${dset.dset_name}_${now:%Y%m%d}_${now:%H%M%S}_${now:%f}"
+dirname: "${exp_dir}/${exp_name}"
+
+# set the running dir
+hydra:
+  run:
+    dir: ${dirname}
+  job:
+    config:
+      override_dirname:
+        kv_sep: ""
+        item_sep: "_"
+        exclude_keys: ["exp_dir"]

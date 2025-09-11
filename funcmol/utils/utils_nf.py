@@ -90,11 +90,11 @@ def create_neural_field(config: dict, fabric: object) -> tuple:
         "anchor_spacing": config["dset"]["anchor_spacing"],
         "hidden_dim": config["decoder"]["hidden_dim"],
         "n_layers": config["decoder"]["n_layers"],
-        "radius": config["decoder"]["radius"],
+        "radius": config["decoder"].get("radius", 3.0),
         "cutoff": config["decoder"].get("cutoff", None),  # 如果是None，则使用radius作为cutoff
         "n_channels": config["dset"]["n_channels"],
         "code_dim": config["decoder"]["code_dim"]
-    }, device=fabric.device)
+    })
 
     return enc, dec
 

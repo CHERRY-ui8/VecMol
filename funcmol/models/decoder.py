@@ -5,7 +5,7 @@ from typing import Optional, Dict, Any
 from funcmol.models.egnn import EGNNVectorField
 
 class Decoder(nn.Module):
-    def __init__(self, config, device):
+    def __init__(self, config):
         """
         Initializes the Decoder class.
 
@@ -14,14 +14,14 @@ class Decoder(nn.Module):
             device (torch.device): The device to run the model on.
         """
         super().__init__()
-        self.device = device
-        self.grid_dim = config["grid_size"]  # Add grid_dim attribute
-        self.n_channels = config["n_channels"]  # Add n_channels attribute
-        self.code_stats: Optional[Dict[str, Any]] = None  # Initialize code_stats attribute
+        # self.device = device
+        # self.grid_dim = config["grid_size"]  # Add grid_dim attribute
+        # self.n_channels = config["n_channels"]  # Add n_channels attribute
+        # self.code_stats: Optional[Dict[str, Any]] = None  # Initialize code_stats attribute
         
         # Initialize coords using get_grid function
-        _, self.coords = get_grid(self.grid_dim, resolution=0.25)
-        self.coords = self.coords.to(device)
+        # _, self.coords = get_grid(self.grid_dim, resolution=0.25)
+        # self.coords = self.coords.to(device)
         
         self.net = EGNNVectorField(
             grid_size=config["grid_size"],
@@ -32,7 +32,7 @@ class Decoder(nn.Module):
             code_dim=config["code_dim"],
             cutoff=config.get("cutoff", None),  # Add cutoff parameter with default None
             anchor_spacing=config.get("anchor_spacing", 2.0),  # Add anchor_spacing parameter with default 2.0
-            device=device,
+            # device=device,
             k_neighbors=config.get("k_neighbors", 32)  # Add k_neighbors parameter with default 32
         )
 
@@ -47,6 +47,8 @@ class Decoder(nn.Module):
         # The output from EGNN is already in the correct shape: [B, n_points, n_atom_types, 3]
         return vector_field
 
+
+class CommentedDecoder(Decoder):
     def render_code(
         self,
         codes: torch.Tensor,

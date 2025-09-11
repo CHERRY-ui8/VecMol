@@ -1,0 +1,28 @@
+{
+  "gaussian_mag": {
+    "count": 2,
+    "rmsd_mean": 0.8681444823741913,
+    "rmsd_std": 0.1974261644029128,
+    "rmsd_hungarian_mean": 0.00017232327081728727,
+    "rmsd_hungarian_std": 5.9992108167725635e-05,
+    "reconstruction_loss_mean": 0.0003772365889744833,
+    "reconstruction_loss_std": 0.000120580466648882,
+    "reconstruction_time_mean": 59.23038971424103,
+    "reconstruction_time_std": 7.028962941615698,
+    "atom_count_mismatch_mean": 0.0,
+    "atom_count_mismatch_std": 0.0
+  },
+  "tanh": {
+    "count": 2,
+    "rmsd_mean": 0.20939284870109987,
+    "rmsd_std": 0.29583487879556997,
+    "rmsd_hungarian_mean": 6.850292083981913e-05,
+    "rmsd_hungarian_std": 1.5732651447662522e-05,
+    "reconstruction_loss_mean": 0.0001784350461093709,
+    "reconstruction_loss_std": 2.657562535819026e-05,
+    "reconstruction_time_mean": 170.31862592697144,
+    "reconstruction_time_std": 182.4308676578648,
+    "atom_count_mismatch_mean": 0.0,
+    "atom_count_mismatch_std": 0.0
+  }
+}

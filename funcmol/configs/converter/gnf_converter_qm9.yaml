@@ -1,7 +1,7 @@
 sigma: 1
-n_iter: 1500
+n_iter: 2000
 # DBSCAN聚类参数
-eps: 0.01      # 邻域半径，单位为Å。越小越严格（原子密集度高就设小），目前调得很小，但是如果使用预测的梯度场，需要适当放大
+eps: 0.03 # 邻域半径，单位为Å。越小越严格（原子密集度高就设小），目前较小，可能需要适当放大（已经从0.01改为0.03了）
 min_samples: 10 # 至少多少个点才能形成一个"原子簇" TODO：这个参数可能需要调整（5的时候感觉有点小）
 sigma_ratios:
   C: 0.9    # 碳原子，较小的 sigma 使梯度场更集中
@@ -22,13 +22,13 @@ gradient_sampling_temperature: 0.1  # 梯度采样温度参数
 method_configs:
   gaussian_mag:
     n_query_points: 2000  # gaussian_mag版本需要更多点，因为很多点都不会动，是死点
-    step_size: 0.005
+    step_size: 0.01
     sig_sf: 0.1
     sig_mag: 0.45
 
   tanh:
     n_query_points: 1000
-    step_size: 0.005
+    step_size: 0.01
     sig_sf: 0.1
     sig_mag: 2
   

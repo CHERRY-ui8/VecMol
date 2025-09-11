@@ -1,0 +1,38 @@
+defaults:
+  - dset: qm9
+  - encoder: gnn
+  - decoder: decoder_global
+  - denoiser: gnn
+  - wjs: wjs_sampling
+  - converter: gnf_converter_qm9
+  - override hydra/job_logging: custom
+  - _self_
+
+# 分子生成相关参数
+n_samples: 100  # 要生成的分子数量
+smooth_sigma: 0.5
+
+# 实验设置
+debug: False
+wandb: False
+seed: 1234
+
+# 模型路径
+nf_pretrained_path: ../exps/neural_field/nf_qm9_20250812_181425_750832
+fm_pretrained_path: ../exps/funcmol/fm_qm9
+
+# 输出设置
+exp_dir: ../exps/funcmol
+exp_name: "generation_${dset.dset_name}_${now:%Y%m%d}_${now:%H%M%S}_${now:%f}"
+dirname: "${exp_dir}/${exp_name}"
+
+# set the running dir
+hydra:
+  run:
+    dir: ${dirname}
+  job:
+    config:
+      override_dirname:
+        kv_sep: ""
+        item_sep: "_"
+        exclude_keys: ["exp_dir"]
