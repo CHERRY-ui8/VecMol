@@ -11,13 +11,16 @@ max_samples: null  # 要评估的样本数量，null表示使用整个数据集�
 n_processes: 4    # 并行进程数
 
 # Field模式设置
-field_mode: gt_field  # 'gt_field' 或 'nf_field'
+field_mode: gt_field  # 'gt_field', 'nf_field', 或 'denoiser_field'
 
 # Field方法设置
 field_methods: ['gaussian_mag', 'tanh']  # 要比较的field方法
 
-# 模型路径（仅在nf_field模式下需要）
+# 模型路径（仅在nf_field或denoiser_field模式下需要）
 model_dir: null  # 例如: exps/neural_field/nf_qm9_20250804_153549_358664
+
+# FuncMol denoiser路径（仅在denoiser_field模式下需要）
+fm_pretrained_path: null  # 例如: exps/funcmol/fm_qm9_20250804_153549_358664
 
 # 输出设置
 output_dir: exps/field_evaluation

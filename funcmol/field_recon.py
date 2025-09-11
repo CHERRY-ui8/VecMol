@@ -10,15 +10,16 @@ This script can be used for both field type evaluation (stage1) and neural field
 
 1. Set data config, load dataset
    - Load FieldDataset with appropriate parameters
-   - Support both gt_field and nf_field modes
+   - Support gt_field, nf_field, and denoiser_field modes
 
 2. Loop for data (Pool.map and pool.imap_unordered):
-   2.1 Convert to field using gt_field function (also can change to mode: using trained nf decoder of encoded gt_mol)
+   2.1 Convert to field using different field generation methods:
        - gt_field mode: Use ground truth coordinates to generate field via mol2gnf
        - nf_field mode: Use trained neural field encoder/decoder to generate field
+       - denoiser_field mode: Use FuncMol denoiser to process codes and generate field via decoder
    2.2 Reconstruct mol
        - Use gnf2mol method with appropriate decoder and codes
-       - Support both ground truth field and neural field reconstruction
+       - Support ground truth field, neural field, and denoiser field reconstruction
    2.3 Save mol (if use gt_field, save in /exps/gt_field; if use predicted_field, save in the nf path under /exps/neural_field)
        - Currently saves results to CSV format
        - Can be extended to save individual molecular files
@@ -40,8 +41,9 @@ from omegaconf import DictConfig
 from lightning import Fabric
 from funcmol.utils.gnf_visualizer import create_gnf_converter, load_model
 from funcmol.dataset.dataset_field import FieldDataset
+from funcmol.models.funcmol import create_funcmol
+from funcmol.utils.utils_fm import load_checkpoint_fm
         
-
 
 def compute_rmsd(coords1: torch.Tensor, coords2: torch.Tensor) -> float:
     """Compute RMSD using Hungarian algorithm."""
@@ -54,7 +56,7 @@ def compute_rmsd(coords1: torch.Tensor, coords2: torch.Tensor) -> float:
     return float(rmsd.item())
 
 
-@hydra.main(version_base=None, config_path="configs", config_name="eval_field_recon")
+@hydra.main(version_base=None, config_path="configs", config_name="field_recon")
 def main(config: DictConfig) -> None:
     # 0. Define field method (converter), save path (gt_field version, dataset name, )
     config_dict = dict(config)
@@ -91,11 +93,23 @@ def main(config: DictConfig) -> None:
     
     print(f"Evaluating {max_samples} molecules with field_mode: {field_mode}, methods: {field_methods}")
     
-    # Load encoder/decoder if using neural field mode
+    # Load models based on field mode
     if field_mode == 'nf_field':
         fabric = Fabric()
         encoder, decoder = load_model(fabric, config)
         print("Loaded neural field encoder/decoder")
+    elif field_mode == 'denoiser_field':
+        fabric = Fabric()
+        # Load neural field encoder/decoder for denoiser input/output
+        encoder, decoder = load_model(fabric, config)
+        # Load FuncMol denoiser
+        if config.get("fm_pretrained_path") is None:
+            raise ValueError("fm_pretrained_path must be specified for denoiser_field mode")
+        funcmol = create_funcmol(config, fabric)
+        funcmol, code_stats = load_checkpoint_fm(funcmol, config["fm_pretrained_path"], fabric=fabric)
+        funcmol = fabric.setup_module(funcmol)
+        funcmol.eval()
+        print("Loaded neural field encoder/decoder and FuncMol denoiser")
     
     # 2. Loop for data (Pool.map and pool.imap_unordered)
     # Initialize CSV file with headers
@@ -168,6 +182,25 @@ def main(config: DictConfig) -> None:
                     
                     field_data = decoder(query_points, codes)
                 
+                elif field_mode == 'denoiser_field':
+                    # 2.1 Convert to field using denoiser-processed codes
+                    # First encode with neural field encoder
+                    raw_codes = encoder(gt_coords.unsqueeze(0), gt_types.unsqueeze(0))
+                    
+                    # Process codes through denoiser
+                    with torch.no_grad():
+                        denoised_codes = funcmol(raw_codes)
+                    
+                    # Use neural field decoder to get field data
+                    n_query_points = converter.n_query_points
+                    coords_min = gt_coords.min(dim=0)[0] - 2.0
+                    coords_max = gt_coords.max(dim=0)[0] + 2.0
+                    query_points = torch.rand(n_query_points, 3, device=gt_coords.device)
+                    query_points = query_points * (coords_max - coords_min) + coords_min
+                    query_points = query_points.unsqueeze(0)
+                    
+                    field_data = decoder(query_points, denoised_codes)
+                
                 # 2.2 Reconstruct mol
                 if field_mode == 'gt_field':
                     # Reconstruct mol using gnf2mol with dummy decoder (gt_field mode)
@@ -177,12 +210,20 @@ def main(config: DictConfig) -> None:
                         codes=dummy_codes,
                         atom_types=gt_types.unsqueeze(0)
                     )
-                else:  # nf_field mode
+                elif field_mode == 'nf_field':
                     # Reconstruct mol using gnf2mol (nf_field mode)
                     recon_coords, _ = converter.gnf2mol(
                         field_data, 
                         decoder=decoder,
                         codes=codes,
+                        atom_types=gt_types.unsqueeze(0)
+                    )
+                else:  # denoiser_field mode
+                    # Reconstruct mol using gnf2mol (denoiser_field mode)
+                    recon_coords, _ = converter.gnf2mol(
+                        field_data, 
+                        decoder=decoder,
+                        codes=denoised_codes,
                         atom_types=gt_types.unsqueeze(0)
                     )
                 
@@ -207,7 +248,7 @@ def main(config: DictConfig) -> None:
                 result_df = pd.DataFrame([result_row])
                 result_df.to_csv(csv_path, mode='a', header=False, index=False)
                 
-                # Save molecular coordinates and types
+                # Save molecular coordinates and types(NOTE: sdf/xyz/mol?)
                 mol_file = mol_save_dir / f"sample_{sample_idx:04d}_{field_method}.npz"
                 np.savez(mol_file, 
                         coords=recon_coords[0].cpu().numpy(),

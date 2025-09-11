@@ -13,7 +13,7 @@ wandb: False
 seed: 1234
 exp_dir: ../exps/neural_field
 # exp_name: "nf_${dset.dset_name}/${now:%Y%m%d}/${now:%H%M%S}_${now:%f}"
-exp_name: "testnf_${dset.dset_name}/${now:%Y%m%d}"
+exp_name: "nf_${dset.dset_name}/${now:%Y%m%d}"
 dirname: "${exp_dir}/${exp_name}"
 reload_model_path: null
 auto_resume: False  # 是否自动加载最新的checkpoint继续训练
