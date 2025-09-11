@@ -205,7 +205,6 @@ def main(config: DictConfig) -> None:
                 if field_mode == 'gt_field':
                     # Reconstruct mol using gnf2mol with dummy decoder (gt_field mode)
                     recon_coords, _ = converter.gnf2mol(
-                        field_data,  # result of converter.mol2gnf
                         decoder=dummy_decoder,
                         codes=dummy_codes,
                         atom_types=gt_types.unsqueeze(0)
@@ -213,7 +212,6 @@ def main(config: DictConfig) -> None:
                 elif field_mode == 'nf_field':
                     # Reconstruct mol using gnf2mol (nf_field mode)
                     recon_coords, _ = converter.gnf2mol(
-                        field_data, 
                         decoder=decoder,
                         codes=codes,
                         atom_types=gt_types.unsqueeze(0)

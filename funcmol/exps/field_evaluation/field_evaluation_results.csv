@@ -1,5 +1,2 @@
 sample_idx,field_mode,field_method,rmsd,size,atom_count_mismatch
-0,gt_field,gaussian_mag,0.001109703560359776,3,False
-0,gt_field,tanh,7.10243039065972e-05,3,False
-1,gt_field,gaussian_mag,0.0008406604756601155,10,False
-1,gt_field,tanh,0.0006842169095762074,10,False
+0,gt_field,gaussian_mag,7.685252057854086e-06,3,False

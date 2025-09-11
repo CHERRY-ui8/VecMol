@@ -4,6 +4,7 @@ defaults:
   - decoder: decoder_global
   - denoiser: gnn
   - wjs: wjs_training_small
+  - converter: gnf_converter_qm9
   - override hydra/job_logging: custom
   - _self_
 
@@ -11,16 +12,17 @@ debug: False
 wandb: False
 seed: 1234
 # nf_pretrained_path: ../exps/neural_field/nf_qm9
-nf_pretrained_path: ../exps/neural_field/nf_qm9_20250812_181425_750832
+# nf_pretrained_path: ../exps/neural_field/nf_qm9_20250812_181425_750832
+nf_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20250911/lightning_logs/version_1/checkpoints/model-epoch=09.ckpt
 exp_dir: ../exps/funcmol
-exp_name: "fm_${dset.dset_name}_${now:%Y%m%d}_${now:%H%M%S}_${now:%f}"
+exp_name: "fm_${dset.dset_name}/${now:%Y%m%d}" # NOTE: in lightning, no time stamp needed
 dirname: "${exp_dir}/${exp_name}"
 reload_model_path: null
 
 # data params
 smooth_sigma: 0.5 # 2.0, 1.0, 0.5
 normalize_codes: 1
-on_the_fly: False  # use False if codes are computed offline.
+on_the_fly: True  # use True to compute codes on the fly from neural field
 codes_dir: "${nf_pretrained_path}/codes/"
 
 # training params

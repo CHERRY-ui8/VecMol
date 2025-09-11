@@ -362,8 +362,8 @@ class NeuralFieldLightningModule(pl.LightningModule):
         return items
 
 
-# @hydra.main(config_path="configs", config_name="train_nf_qm9", version_base=None)
-@hydra.main(config_path="configs", config_name="train_nf_drugs", version_base=None)
+@hydra.main(config_path="configs", config_name="train_nf_qm9", version_base=None)
+# @hydra.main(config_path="configs", config_name="train_nf_drugs", version_base=None)
 def main_hydra(config):
     """Entry point for Hydra configuration system"""
     main(config)
@@ -489,7 +489,8 @@ def main(config):
             every_n_epochs=config["ckpt_every_n_epochs"],
             monitor="val_loss",
             mode="min",
-            save_last=True
+            save_last=True,
+            save_top_k=-1  # 保存所有checkpoint，不限制数量
         ),
         LearningRateMonitor(logging_interval="epoch"),
         # ProgressBarCallback()

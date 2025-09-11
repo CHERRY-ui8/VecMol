@@ -4,6 +4,7 @@ defaults:
   - decoder: decoder_global
   - denoiser: gnn
   - wjs: wjs_training
+  - converter: gnf_converter_drugs
   - override hydra/job_logging: custom
   - _self_
 
@@ -12,7 +13,7 @@ wandb: True
 seed: 1234
 nf_pretrained_path: ../exps/neural_field/nf_drugs
 exp_dir: ../exps/funcmol
-exp_name: "fm_${dset.dset_name}_${now:%Y%m%d}_${now:%H%M%S}_${now:%f}"
+exp_name: "fm_${dset.dset_name}/${now:%Y%m%d}" # NOTE: in lightning, no time stamp needed
 dirname: "${exp_dir}/${exp_name}"
 reload_model_path: null
 

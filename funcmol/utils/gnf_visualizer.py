@@ -5,13 +5,12 @@ import torch
 import hydra
 import numpy as np
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
 import imageio.v2 as imageio
 from omegaconf import OmegaConf
 from lightning import Fabric
 from torch_geometric.utils import to_dense_batch
 from funcmol.utils.constants import PADDING_INDEX
-from funcmol.utils.utils_nf import create_neural_field, load_neural_field, get_latest_model_path
+from funcmol.utils.utils_nf import create_neural_field
 from funcmol.utils.gnf_converter import GNFConverter
 from funcmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
 
@@ -155,8 +154,8 @@ class GNFVisualizer(MoleculeVisualizer):
         """
         super().__init__()
         if output_dir is None:
-            # 默认输出到../exps/neural_field/下
-            self.output_dir = str(PROJECT_ROOT / "exps" / "neural_field" / "gnf_reconstruction_results")
+            # 默认输出到../exps/neural_field/下，与训练脚本保持一致
+            self.output_dir = str(PROJECT_ROOT.parent / "exps" / "neural_field" / "gnf_reconstruction_results")
         else:
             self.output_dir = output_dir
         
@@ -1358,28 +1357,22 @@ def load_config(config_name: str = "train_nf_qm9") -> OmegaConf:
     
     return config
 
-def load_model(fabric: Fabric, config: OmegaConf, model_dir: Optional[str] = None) -> Tuple[torch.nn.Module, torch.nn.Module]:
+def load_model(fabric: Fabric, config: OmegaConf, model_path: str) -> Tuple[torch.nn.Module, torch.nn.Module]:
     """加载预训练模型。
 
     Args:
         fabric: Fabric 实例
         config: 配置对象
-        model_dir: 模型检查点所在的文件夹路径，若为 None 则自动选择最新的模型
+        model_path: Lightning checkpoint 文件完整路径（如：/path/to/model-epoch=09.ckpt）
 
     Returns:
         Tuple[encoder, decoder]，编码器和解码器模型
     """
-    if model_dir is None:
-        dset_name = config["dset"]["dset_name"]
-        model_prefix = f"nf_{dset_name}_" if dset_name in ["drugs", "qm9"] else "nf_"
-        latest_exp_dir = get_latest_model_path("../exps/neural_field", model_prefix)
-        model_path = Path(latest_exp_dir) / "model.pt"
-    else:
-        model_path = Path(model_dir) / "model.pt"
-        if not model_path.exists():
-            raise FileNotFoundError(f"Model file not found: {model_path}")
+    model_path = Path(model_path)
+    if not model_path.exists():
+        raise FileNotFoundError(f"Model file not found: {model_path}")
     
-    print(f"Loading model from: {model_path}")
+    print(f"Loading Lightning checkpoint from: {model_path}")
     enc, dec = create_neural_field(config, fabric)
     
     if hasattr(enc, '_orig_mod'):
@@ -1387,9 +1380,16 @@ def load_model(fabric: Fabric, config: OmegaConf, model_dir: Optional[str] = Non
     if hasattr(dec, '_orig_mod'):
         dec = dec._orig_mod
     
-    checkpoint = fabric.load(str(model_path))
-    enc = load_neural_field(checkpoint, fabric, config)[0]
-    dec = load_neural_field(checkpoint, fabric, config)[1]
+    # 加载 Lightning checkpoint
+    checkpoint = torch.load(str(model_path), map_location='cpu', weights_only=False)
+    
+    # 从 Lightning checkpoint 中提取状态字典
+    enc_state_dict = checkpoint["enc_state_dict"]
+    dec_state_dict = checkpoint["dec_state_dict"]
+
+    enc.load_state_dict(enc_state_dict)
+    dec.load_state_dict(dec_state_dict)
+
     print("Model loaded successfully!")
     
     return enc, dec

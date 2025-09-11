@@ -10,7 +10,7 @@ torch._dynamo.config.suppress_errors = True
 from tqdm import tqdm
 import time
 import hydra
-from funcmol.utils.utils_nf import load_neural_field, get_latest_model_path
+from funcmol.utils.utils_nf import load_neural_field
 from funcmol.utils.utils_base import setup_fabric
 from funcmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
 import omegaconf
@@ -19,16 +19,34 @@ import torch
 
 @hydra.main(config_path="configs", config_name="infer_codes", version_base=None)
 def main(config):
-    # 自动获取最新的模型路径
+    # 检查是否指定了模型路径
     if "nf_pretrained_path" not in config or config["nf_pretrained_path"] is None:
-        config["nf_pretrained_path"] = get_latest_model_path()
+        raise ValueError("必须指定 nf_pretrained_path 参数来指定Lightning checkpoint路径")
+    
+    # 验证checkpoint文件是否存在
+    if not os.path.exists(config["nf_pretrained_path"]):
+        raise FileNotFoundError(f"指定的checkpoint文件不存在: {config['nf_pretrained_path']}")
+    
+    # 验证是否为.ckpt文件
+    if not config["nf_pretrained_path"].endswith('.ckpt'):
+        raise ValueError(f"指定的文件不是Lightning checkpoint格式(.ckpt): {config['nf_pretrained_path']}")
     
     # initial setup
     fabric = setup_fabric(config)
 
-    # load checkpoint and update config
-    checkpoint = fabric.load(os.path.join(config["nf_pretrained_path"], "model.pt"))
-    config_model = checkpoint["config"]
+    # load Lightning checkpoint and update config
+    model_path = config["nf_pretrained_path"]
+    
+    # 加载Lightning checkpoint
+    checkpoint = torch.load(model_path, map_location='cpu')
+    
+    # 从Lightning checkpoint中提取配置
+    if 'hyper_parameters' in checkpoint:
+        config_model = checkpoint['hyper_parameters']
+    else:
+        config_model = checkpoint.get('config', {})
+    
+    # 更新配置
     for key in config.keys():
         if key in config_model and \
             isinstance(config_model[key], omegaconf.dictconfig.DictConfig):

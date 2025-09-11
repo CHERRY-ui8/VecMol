@@ -19,35 +19,6 @@ except ImportError:
     SummaryWriter = None
 
 
-def get_latest_model_path(base_exp_dir: str = "../exps/neural_field", model_prefix: str = "nf_qm9_") -> str:
-    """
-    自动获取最新的模型路径
-    
-    Args:
-        base_exp_dir: 实验目录的基础路径
-        model_prefix: 模型文件夹的前缀
-        
-    Returns:
-        str: 最新模型的完整路径
-    """
-    exp_dir = Path(base_exp_dir)
-    if not exp_dir.exists():
-        raise FileNotFoundError(f"Experiment directory not found: {exp_dir}")
-    
-    # 查找所有以指定前缀开头的目录
-    exp_dirs = [d for d in exp_dir.iterdir() if d.is_dir() and d.name.startswith(model_prefix)]
-    if not exp_dirs:
-        raise FileNotFoundError(f"No experiment directories found with prefix '{model_prefix}' in {exp_dir}")
-    
-    # 选择最新的目录（按修改时间排序）
-    latest_exp_dir = max(exp_dirs, key=lambda x: x.stat().st_mtime)
-    model_path = latest_exp_dir / "model.pt"
-    
-    if not model_path.exists():
-        raise FileNotFoundError(f"Model file not found: {model_path}")
-    
-    print(f"Using latest model from: {latest_exp_dir}")
-    return str(latest_exp_dir)
 
 def create_neural_field(config: dict, fabric: object) -> tuple:
     """
@@ -468,7 +439,7 @@ def load_network(
     Args:
         checkpoint (dict): A dictionary containing the checkpoint data.
         net (nn.Module): The neural network model to load the state dictionary into.
-        fabric (object): An object with a print method for logging.
+        fabric (object): An object with a print method for logging (can be Lightning module or Fabric).
         net_name (str, optional): The key name for the network's state dictionary in the checkpoint. Defaults to "dec".
         is_compile (bool, optional): A flag indicating whether the network is compiled. Defaults to True.
         sd (str, optional): A specific key for the state dictionary in the checkpoint. If None, defaults to using net_name.
@@ -494,7 +465,12 @@ def load_network(
     # weight_first_layer_after = next(iter(net_dict.values())).sum()
     # assert (weight_first_layer_before != weight_first_layer_after).item(), "loading did not work"
     # 现在的 net_dict 是一个dict，net_dict.keys()的第0个元素是"layers.0.weight"，对应的是grid_coords，它本来就不会更新，所以这里的assert一定会报错
-    fabric.print(f">> loaded {net_name}")
+    
+    # Handle both Lightning module and Fabric
+    if hasattr(fabric, 'print'):
+        fabric.print(f">> loaded {net_name}")
+    else:
+        print(f">> loaded {net_name}")
 
     return net
 
@@ -661,21 +637,51 @@ def auto_load_latest_checkpoint(
         return enc, dec, optim_enc, optim_dec, 0, [], [], float("inf")
 
 
+
 def load_neural_field(nf_checkpoint: dict, fabric: object, config: dict = None) -> tuple:
     """
-    Load and initialize the neural field encoder and decoder from a checkpoint.
+    Load and initialize the neural field encoder and decoder from a Lightning checkpoint.
 
     Args:
-        nf_checkpoint (dict): The checkpoint containing the saved state of the neural field model.
-        fabric (object): The fabric object used for setting up the modules.
+        nf_checkpoint (dict): The Lightning checkpoint containing the saved state of the neural field model.
+        fabric (object): The fabric object used for setting up the modules (can be Lightning module or Fabric).
         config (dict, optional): Configuration dictionary for initializing the encoder and decoder.
                                  If None, the configuration from the checkpoint will be used.
 
     Returns:
         tuple: A tuple containing the initialized encoder and decoder modules.
     """
-    if config is None:
-        config = nf_checkpoint["config"]
+    # 处理Lightning checkpoint格式
+    if 'state_dict' in nf_checkpoint:
+        # Lightning checkpoint格式
+        state_dict = nf_checkpoint['state_dict']
+        if config is None:
+            config = nf_checkpoint.get('hyper_parameters', {})
+        
+        # 分离encoder和decoder的state dict
+        enc_state_dict = {}
+        dec_state_dict = {}
+        
+        for key, value in state_dict.items():
+            if key.startswith('enc.'):
+                # 移除'enc.'前缀
+                new_key = key[4:]  # 去掉'enc.'
+                enc_state_dict[new_key] = value
+            elif key.startswith('dec.'):
+                # 移除'dec.'前缀
+                new_key = key[4:]  # 去掉'dec.'
+                dec_state_dict[new_key] = value
+        
+        # 构建兼容格式
+        nf_checkpoint = {
+            'enc_state_dict': enc_state_dict,
+            'dec_state_dict': dec_state_dict,
+            'config': config
+        }
+    else:
+        # 旧格式checkpoint（向后兼容）
+        if config is None:
+            config = nf_checkpoint["config"]
     
     # Initialize the decoder
     dec = Decoder({
@@ -688,7 +694,7 @@ def load_neural_field(nf_checkpoint: dict, fabric: object, config: dict = None) 
         "code_dim": config["decoder"]["code_dim"],
         "radius": config["decoder"].get("radius", 3.0),  # Add radius parameter with default
         "cutoff": config["decoder"].get("cutoff", None)  # Add cutoff parameter with default
-    }, device=fabric.device)
+    })
     dec = load_network(nf_checkpoint, dec, fabric, net_name="dec")
     # Disable torch.compile due to compatibility issues with torch_cluster
     # dec = torch.compile(dec)
@@ -709,8 +715,11 @@ def load_neural_field(nf_checkpoint: dict, fabric: object, config: dict = None) 
     # enc = torch.compile(enc)
     enc.eval()
 
-    dec = fabric.setup_module(dec)
-    enc = fabric.setup_module(enc)
+    # Handle both Lightning module and Fabric
+    if hasattr(fabric, 'setup_module'):
+        dec = fabric.setup_module(dec)
+        enc = fabric.setup_module(enc)
+    # For Lightning modules, we don't need setup_module as Lightning handles device placement
 
     return enc, dec
 
@@ -819,7 +828,7 @@ def infer_codes(
         loader (torch.utils.data.DataLoader): DataLoader providing batches of data
         enc (torch.nn.Module): Encoder model for inferring codes
         config (dict): Configuration dictionary containing model and dataset parameters
-        fabric: Optional fabric object for distributed training (default: None)
+        fabric: Optional fabric object for distributed training (can be Lightning module or Fabric, default: None)
         to_cpu (bool): Flag indicating whether to move inferred codes to CPU (default: True)
         code_stats (dict, optional): Statistics for code normalization (default: None)
         n_samples (int, optional): Number of samples to infer codes for. If None, infer for all samples (default: None)
@@ -830,8 +839,10 @@ def infer_codes(
     enc.eval()
     codes_all = []
     
-    if fabric is not None:
+    if fabric is not None and hasattr(fabric, 'print'):
         fabric.print(f">> Inferring codes - batch size: {config['dset']['batch_size']}")
+    elif fabric is not None:
+        print(f">> Inferring codes - batch size: {config['dset']['batch_size']}")
     
     total_samples = 0
     
@@ -849,7 +860,7 @@ def infer_codes(
                 codes = codes.cpu()
             
             # Gather codes in distributed environment - 保持原始形状
-            if fabric is not None:
+            if fabric is not None and hasattr(fabric, 'all_gather'):
                 codes = fabric.all_gather(codes)
                 # 不进行reshape，保持原始形状 [B, n_grid, code_dim]
             
@@ -867,8 +878,10 @@ def infer_codes(
     if n_samples is not None and codes.size(0) > n_samples:
         codes = codes[:n_samples]
     
-    if fabric is not None:
+    if fabric is not None and hasattr(fabric, 'print'):
         fabric.print(f">> Inference completed, generated {codes.size(0)} codes in total")
+    elif fabric is not None:
+        print(f">> Inference completed, generated {codes.size(0)} codes in total")
     
     return codes
 
