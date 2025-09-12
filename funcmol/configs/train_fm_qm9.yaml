@@ -13,23 +13,23 @@ wandb: False
 seed: 1234
 # nf_pretrained_path: ../exps/neural_field/nf_qm9
 # nf_pretrained_path: ../exps/neural_field/nf_qm9_20250812_181425_750832
-nf_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20250911/lightning_logs/version_1/checkpoints/model-epoch=09.ckpt
+nf_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20250911/lightning_logs/version_1/checkpoints/model-epoch=39.ckpt
 exp_dir: ../exps/funcmol
-exp_name: "fm_${dset.dset_name}/${now:%Y%m%d}" # NOTE: in lightning, no time stamp needed
+exp_name: "fm_${dset.dset_name}/${now:%Y%m%d}"
 dirname: "${exp_dir}/${exp_name}"
 reload_model_path: null
 
 # data params
 smooth_sigma: 0.5 # 2.0, 1.0, 0.5
 normalize_codes: 1
-on_the_fly: True  # use True to compute codes on the fly from neural field
-codes_dir: "${nf_pretrained_path}/codes/"
+on_the_fly: False  # use True to compute codes on the fly from neural field
+codes_dir: "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20250911/lightning_logs/version_1/checkpoints/codes"
 
 # training params
 num_epochs: 50000
 dset:
   batch_size: 4
-save_every: 10  # Save checkpoint
+ckpt_every_n_epochs: 5  # 每隔多少epoch保存一次ckpt
 decoder:
   code_dim: 128
 num_augmentations: null
@@ -46,9 +46,3 @@ max_grad_norm: 1.0
 hydra:
   run:
     dir: ${dirname}
-  job:
-    config:
-      override_dirname:
-        kv_sep: ""
-        item_sep: "_"
-        exclude_keys: ["exp_dir"]

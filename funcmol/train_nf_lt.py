@@ -3,8 +3,6 @@ sys.path.append("..")
 
 # Standard libraries
 import os
-import time
-from pathlib import Path
 
 # Data visualization and processing
 import matplotlib.pyplot as plt

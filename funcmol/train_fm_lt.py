@@ -74,7 +74,7 @@ class FuncmolLightningModule(pl.LightningModule):
         self.save_hyperparameters(ignore=['enc', 'dec_module', 'code_stats'])
         
         # Create Funcmol model
-        self.funcmol = create_funcmol(config, None)  # No fabric needed for Lightning
+        self.funcmol = create_funcmol(config, None)
         
         # Set up loss function
         self.criterion = nn.MSELoss(reduction="mean")
@@ -169,11 +169,16 @@ class FuncmolLightningModule(pl.LightningModule):
         """Called at the end of validation epoch"""
         # Update best loss
         val_loss = self.trainer.callback_metrics.get('val_loss')
-        if val_loss is not None and val_loss < self.best_loss:
-            self.best_loss = val_loss.item()
-            self.val_losses.append(val_loss.item())
-        elif val_loss is not None:
-            self.val_losses.append(val_loss.item())
+        if val_loss is not None:
+            if hasattr(val_loss, 'item'):
+                val_loss_scalar = val_loss.item()
+            else:
+                val_loss_scalar = float(val_loss)
+            
+            if val_loss_scalar < self.best_loss:
+                self.best_loss = val_loss_scalar
+            
+            self.val_losses.append(val_loss_scalar)
     
     def configure_optimizers(self):
         """Configure optimizers and learning rate schedulers"""
@@ -238,13 +243,11 @@ def main(config):
     num_gpus = torch.cuda.device_count()
     print(f"Available GPUs: {num_gpus}")
     
-    # Convert config to container
-    config = OmegaConf.to_container(config)
+    # Resolve config variables before converting to container
+    config = OmegaConf.to_container(config, resolve=True)
     
     # Create directories
     os.makedirs(config["dirname"], exist_ok=True)
-    os.makedirs(os.path.join(config["dirname"], "checkpoints"), exist_ok=True)
-    os.makedirs(os.path.join(config["dirname"], "samples"), exist_ok=True)
     
     print(">> saving experiments in:", config["dirname"])
     
@@ -287,35 +290,46 @@ def main(config):
     config_nf["debug"] = config["debug"]
     config_nf["dset"]["batch_size"] = config["dset"]["batch_size"]
     
-    if config["on_the_fly"]:
-        # Create GNFConverter instance for data loading
-        gnf_converter = create_gnf_converter(config, device="cpu")
+    # Create data loaders
+    try:
+        if config["on_the_fly"]:
+            # Create GNFConverter instance for data loading
+            gnf_converter = create_gnf_converter(config, device="cpu")
+            
+            loader_train = create_field_loaders(config, gnf_converter, split="train", fabric=dummy_fabric, use_fabric=False)
+            loader_val = create_field_loaders(config, gnf_converter, split="val", fabric=dummy_fabric, use_fabric=False)
+            
+            # Handle cases where loaders are returned as lists
+            if isinstance(loader_train, list) and len(loader_train) > 0:
+                loader_train = loader_train[0]
+            if isinstance(loader_val, list) and len(loader_val) > 0:
+                loader_val = loader_val[0]
+            
+            # Compute codes for normalization
+            _, code_stats = compute_codes(
+                loader_train, enc, config_nf, "train", dummy_fabric, config["normalize_codes"],
+                code_stats=None
+            )
+        else:
+            loader_train = create_code_loaders(config, split="train", fabric=dummy_fabric)
+            loader_val = create_code_loaders(config, split="val", fabric=dummy_fabric)
+            
+            # Handle cases where loaders are returned as lists
+            if isinstance(loader_train, list) and len(loader_train) > 0:
+                loader_train = loader_train[0]
+            if isinstance(loader_val, list) and len(loader_val) > 0:
+                loader_val = loader_val[0]
+            
+            code_stats = compute_code_stats_offline(loader_train, "train", dummy_fabric, config["normalize_codes"])
         
-        loader_train = create_field_loaders(config, gnf_converter, split="train", fabric=dummy_fabric, use_fabric=False)
-        loader_val = create_field_loaders(config, gnf_converter, split="val", fabric=dummy_fabric, use_fabric=False)
-        
-        # Handle cases where loaders are returned as lists
-        if isinstance(loader_train, list):
-            loader_train = loader_train[0]
-        if isinstance(loader_val, list):
-            loader_val = loader_val[0]
-        
-        # Compute codes for normalization
-        _, code_stats = compute_codes(
-            loader_train, enc, config_nf, "train", dummy_fabric, config["normalize_codes"],
-            code_stats=None
-        )
-    else:
-        loader_train = create_code_loaders(config, split="train", fabric=dummy_fabric)
-        loader_val = create_code_loaders(config, split="val", fabric=dummy_fabric)
-        
-        # Handle cases where loaders are returned as lists
-        if isinstance(loader_train, list):
-            loader_train = loader_train[0]
-        if isinstance(loader_val, list):
-            loader_val = loader_val[0]
-        
-        code_stats = compute_code_stats_offline(loader_train, "train", dummy_fabric, config["normalize_codes"])
+        # Check if loaders are empty
+        if not loader_train or len(loader_train) == 0:
+            raise ValueError("Training data loader is empty")
+            
+        print(f"Created data loaders - Train: {len(loader_train)} batches, Val: {len(loader_val) if loader_val else 0} batches")
+    except Exception as e:
+        print(f"Error creating data loaders: {e}")
+        raise
     
     dec_module.set_code_stats(code_stats)
     
@@ -379,9 +393,8 @@ def main(config):
     # Configure callbacks
     callbacks = [
         ModelCheckpoint(
-            dirpath=os.path.join(config["dirname"], "checkpoints"),
             filename="funcmol-{epoch:02d}-{val_loss:.4f}",
-            every_n_epochs=config["save_every"],
+            every_n_epochs=config.get("ckpt_every_n_epochs", 10),
             monitor="val_loss",
             mode="min",
             save_last=True,

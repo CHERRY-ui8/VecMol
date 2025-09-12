@@ -17,9 +17,46 @@ dset:
   n_points: 500
   subsampling_ratio: 2
   num_workers: 4
-  batch_size: 16
-  lr_enc: 0.0002
-  lr_dec: 0.001
+  batch_size: 4
+  lr_enc: 0.0001
+  lr_dec: 0.0005
+encoder:
+  _target_: funcmol.models.encoder.CrossGraphEncoder
+  n_atom_types: 5
+  code_dim: 128
+  hidden_dim: 128
+  num_layers: 6
+  k_neighbors: 24
+  atom_k_neighbors: 8
+  cutoff: 6.0
+decoder:
+  name: decoder_global
+  code_dim: 128
+  spatial: false
+  hidden_dim: 128
+  coord_dim: 3
+  n_layers: 4
+  input_scale: 32
+  radius: 3
+  cutoff: 3
+  k_neighbors: 32
+denoiser:
+  use_gnn: true
+  n_hidden_units: 256
+  num_blocks: 4
+  dropout: 0.1
+  k_neighbors: 8
+  cutoff: 5.0
+  radius: 3.0
+  use_radius_graph: true
+wjs:
+  friction_wjs: 1
+  n_chains: 10
+  steps_wjs: 10
+  max_steps_wjs: 10
+  delta_wjs: 0.1
+  repeats_wjs: 1
+  batch_size_render: 50
 converter:
   sigma: 1
   n_iter: 2000
@@ -54,39 +91,25 @@ converter:
     step_size: 0.01
     sig_sf: 0.1
     sig_mag: 0.45
-encoder:
-  _target_: funcmol.models.encoder.CrossGraphEncoder
-  n_atom_types: 5
-  code_dim: 128
-  hidden_dim: 128
-  num_layers: 6
-  k_neighbors: 24
-  atom_k_neighbors: 8
-  cutoff: 6.0
-decoder:
-  name: decoder_global
-  code_dim: 128
-  spatial: false
-  hidden_dim: 128
-  coord_dim: 3
-  n_layers: 4
-  input_scale: 32
-  radius: 3
-  cutoff: 3
-  k_neighbors: 32
 debug: false
-debug_one_mol: false
-debug_subset: false
 wandb: false
 seed: 1234
-exp_dir: ../exps/neural_field
-exp_name: nf_${dset.dset_name}/${now:%Y%m%d}
+nf_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20250911/lightning_logs/version_1/checkpoints/model-epoch=39.ckpt
+exp_dir: ../exps/funcmol
+exp_name: fm_${dset.dset_name}/${now:%Y%m%d}
 dirname: ${exp_dir}/${exp_name}
 reload_model_path: null
-auto_resume: false
-n_samples: None
-ckpt_every_n_epochs: 10
-n_epochs: 1000
-eval_every: 1
-use_ema: false
-lr_decay: false
+smooth_sigma: 0.5
+normalize_codes: 1
+on_the_fly: false
+codes_dir: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20250911/lightning_logs/version_1/checkpoints/codes
+num_epochs: 50000
+save_every: 10
+ckpt_every_n_epochs: 1
+num_augmentations: null
+lr: 5.0e-05
+use_lr_schedule: 0
+num_warmup_iter: 4000
+wd: 0.01
+ema_decay: 0.9999
+max_grad_norm: 1.0

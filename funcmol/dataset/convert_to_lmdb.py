@@ -11,6 +11,10 @@ from tqdm import tqdm
 import argparse
 from funcmol.utils.constants import ELEMENTS_HASH, PADDING_INDEX
 
+# 允许的元素ID列表：C(0), H(1), O(2), N(3), F(4), S(5), Cl(6), Br(7)
+# 过滤掉P(8), I(9), B(10)等元素
+ALLOWED_ELEMENTS = {0, 1, 2, 3, 4, 5, 6, 7}
+
 
 def convert_pth_to_lmdb(pth_path, lmdb_path, keys_path):
     """
@@ -64,15 +68,15 @@ def convert_pth_to_lmdb(pth_path, lmdb_path, keys_path):
                     print(f"Warning: datum {i} is not a dict: {type(datum)}")
                     continue
 
-                # check elements are valid - 只允许0-7的元素（C, H, O, N, F, S, Cl, Br）
+                # check elements are valid - 只允许指定元素（C, H, O, N, F, S, Cl, Br）
                 if "atoms_channel" in datum:
                     elements_valid = True
                     atoms = datum["atoms_channel"][datum["atoms_channel"] != PADDING_INDEX]
                     for atom in atoms.unique():
                         atom_id = int(atom.item())
-                        # 只允许0-7的元素，过滤掉P(8), I(9), B(10)
-                        if atom_id < 0 or atom_id > 7:
-                            print(f"Warning: atom {atom} (id: {atom_id}) not in allowed range [0-7], filtering out")
+                        # 检查元素是否在允许的列表中
+                        if atom_id not in ALLOWED_ELEMENTS:
+                            print(f"Warning: atom {atom} (id: {atom_id}) not in allowed elements {ALLOWED_ELEMENTS}, filtering out")
                             elements_valid = False
                             break
                     if elements_valid:

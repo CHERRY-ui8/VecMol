@@ -19,26 +19,30 @@ import torch
 
 @hydra.main(config_path="configs", config_name="infer_codes", version_base=None)
 def main(config):
-    # 检查是否指定了模型路径
-    if "nf_pretrained_path" not in config or config["nf_pretrained_path"] is None:
+    # 验证并处理 nf_pretrained_path
+    nf_pretrained_path = config.get("nf_pretrained_path")
+    if not nf_pretrained_path:
         raise ValueError("必须指定 nf_pretrained_path 参数来指定Lightning checkpoint路径")
     
-    # 验证checkpoint文件是否存在
-    if not os.path.exists(config["nf_pretrained_path"]):
-        raise FileNotFoundError(f"指定的checkpoint文件不存在: {config['nf_pretrained_path']}")
+    if not nf_pretrained_path.endswith('.ckpt') or not os.path.exists(nf_pretrained_path):
+        raise ValueError(f"指定的checkpoint文件不存在或格式不正确: {nf_pretrained_path}")
     
-    # 验证是否为.ckpt文件
-    if not config["nf_pretrained_path"].endswith('.ckpt'):
-        raise ValueError(f"指定的文件不是Lightning checkpoint格式(.ckpt): {config['nf_pretrained_path']}")
+    # 自动计算 dirname，基于 nf_pretrained_path 的目录
+    checkpoint_dir = os.path.dirname(nf_pretrained_path)
+    dirname = os.path.join(checkpoint_dir, "codes", config.get("split", "train"))
+    
+    # 将 config 转换为普通字典以避免结构化配置限制
+    if isinstance(config, omegaconf.dictconfig.DictConfig):
+        config = omegaconf.OmegaConf.to_container(config, resolve=True)
+    
+    config["dirname"] = dirname
     
     # initial setup
     fabric = setup_fabric(config)
 
-    # load Lightning checkpoint and update config
-    model_path = config["nf_pretrained_path"]
-    
     # 加载Lightning checkpoint
-    checkpoint = torch.load(model_path, map_location='cpu')
+    # 使用 weights_only=False 以支持包含 omegaconf.DictConfig 的 checkpoint
+    checkpoint = torch.load(nf_pretrained_path, map_location='cpu', weights_only=False)
     
     # 从Lightning checkpoint中提取配置
     if 'hyper_parameters' in checkpoint:
@@ -46,10 +50,13 @@ def main(config):
     else:
         config_model = checkpoint.get('config', {})
     
-    # 更新配置
+    # 将 config_model 转换为普通字典以避免结构化配置的限制
+    if isinstance(config_model, omegaconf.dictconfig.DictConfig):
+        config_model = omegaconf.OmegaConf.to_container(config_model, resolve=True)
+    
     for key in config.keys():
         if key in config_model and \
-            isinstance(config_model[key], omegaconf.dictconfig.DictConfig):
+            isinstance(config_model[key], dict) and isinstance(config[key], dict):
             config_model[key].update(config[key])
         else:
             config_model[key] = config[key]

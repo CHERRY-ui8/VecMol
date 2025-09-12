@@ -30,10 +30,4 @@ lr_decay: False
 hydra:
   run:
     dir: ${dirname}
-  job:
-    config:
-      override_dirname:
-        kv_sep: ""
-        item_sep: "_"
-        exclude_keys: ["exp_dir"]
 

@@ -1,15 +1,10 @@
 import torch
 import torch.nn as nn
 import numpy as np
-import os
-import subprocess
-from scipy.spatial.distance import cdist
-from scipy.optimize import linear_sum_assignment
-from typing import Callable, Optional, Tuple, List, Dict, Any
-from scipy.spatial import cKDTree
+from typing import Optional, Tuple, List, Dict
 from sklearn.cluster import DBSCAN
 import torch.nn.functional as F
-from funcmol.utils.constants import PADDING_INDEX, ELEMENTS_HASH, ELEMENTS_HASH_INV
+from funcmol.utils.constants import PADDING_INDEX
 
 class GNFConverter(nn.Module):
     """
@@ -71,6 +66,13 @@ class GNFConverter(nn.Module):
             ratio = self.sigma_ratios.get(atom_symbol, 1.0)  # 默认比例为1.0
             self.sigma_params[atom_idx] = sigma * ratio
     
+    def forward(self, coords: torch.Tensor, atom_types: torch.Tensor, 
+                query_points: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass for the GNF converter.
+        """
+        return self.mol2gnf(coords, atom_types, query_points)
+    
     def mol2gnf(self, coords: torch.Tensor, atom_types: torch.Tensor, 
                 query_points: torch.Tensor) -> torch.Tensor:
         """
@@ -109,115 +111,317 @@ class GNFConverter(nn.Module):
             if valid_coords.size(0) == 0:
                 continue
                 
-            for t in range(n_atom_types):
-                type_mask = (valid_types == t)
-                if type_mask.sum() > 0:
-                    type_coords = valid_coords[type_mask]  # [n_type_atoms, 3]
-                    # 使用当前原子类型特定的 sigma 参数
-                    sigma = self.sigma_params.get(t, self.sigma)
-                    # 计算当前类型原子的梯度场
-                    coords_exp = type_coords.unsqueeze(1)      # (n_type_atoms, 1, 3)
-                    q_exp = query_points[b].unsqueeze(0)       # (1, n_points, 3)
-                    diff = coords_exp - q_exp                  # (n_type_atoms, n_points, 3)
-                    dist_sq = torch.sum(diff ** 2, dim=-1, keepdim=True)  # (n_type_atoms, n_points, 1)
-                    
-                    if self.gradient_field_method == "gaussian":  # 高斯定义：基于距离的高斯权重
-                        individual_gradients = diff * torch.exp(-dist_sq / (2 * sigma ** 2)) / (sigma ** 2)
-                        type_gradients = torch.sum(individual_gradients, dim=0)  # (n_points, 3)
-                    elif self.gradient_field_method == "softmax":  # 基于softmax的定义：使用温度控制的权重
-                        distances = torch.sqrt(dist_sq.squeeze(-1))  # (n_type_atoms, n_points)
-                        weights = torch.softmax(-distances / self.temperature, dim=0)  # (n_type_atoms, n_points)
-                        weights = weights.unsqueeze(-1)  # (n_type_atoms, n_points, 1)
-                        weighted_gradients = diff * weights  # (n_type_atoms, n_points, 3)
-                        type_gradients = torch.sum(weighted_gradients, dim=0)  # (n_points, 3)
-                        
-                        # 应用梯度模长截断
-                        if self.gradient_clip_threshold > 0:
-                            gradient_magnitudes = torch.norm(type_gradients, dim=-1, keepdim=True)  # (n_points, 1)
-                            clip_mask = gradient_magnitudes > self.gradient_clip_threshold
-                            if clip_mask.any():
-                                # 保持方向不变，只截断模长
-                                type_gradients = torch.where(
-                                    clip_mask,
-                                    type_gradients * self.gradient_clip_threshold / gradient_magnitudes,
-                                    type_gradients
-                                )
-                    elif self.gradient_field_method == "sfnorm":  # 基于softmax的定义：使用温度控制的权重，并除以diff的模长
-                        distances = torch.sqrt(dist_sq.squeeze(-1))  # (n_type_atoms, n_points)
-                        weights = torch.softmax(-distances / self.temperature, dim=0)  # (n_type_atoms, n_points)
-                        weights = weights.unsqueeze(-1)  # (n_type_atoms, n_points, 1)
-                        diff_norm = diff / (torch.norm(diff, dim=-1, keepdim=True) + 1e-8)
-                        weighted_gradients = diff_norm * weights  # (n_type_atoms, n_points, 3)
-                        type_gradients = torch.sum(weighted_gradients, dim=0)  # (n_points, 3)
-                        
-                    elif self.gradient_field_method == "logsumexp":  # 基于LogSumExp的定义
-                        # 计算每个原子产生的梯度
-                        scale = 0.1 # TODO：目前这个参数是hard code的，因为不确定有没有必要添加这个参数。如果必要，后期把这个参数移动到初始化阶段
-                        individual_gradients = diff * torch.exp(-dist_sq / (2 * sigma ** 2)) / (sigma ** 2)  # (n_type_atoms, n_points, 3)
-                        
-                        # 对每个原子产生的梯度分别进行幅度的对数变换
-                        gradient_magnitudes = torch.norm(individual_gradients, dim=2, keepdim=True)  # (n_type_atoms, n_points, 1)
-                        gradient_directions = individual_gradients / (gradient_magnitudes + self.logsumexp_eps)  # (n_type_atoms, n_points, 3)
-                        
-                        # 计算LogSumExp
-                        log_sum_exp = torch.logsumexp(gradient_magnitudes, dim=0, keepdim=True)  # (1, n_points, 1)
-                        
-                        # 计算最终梯度：方向之和 × LogSumExp(log(||∇fᵢ(z)||))
-                        type_gradients = scale * torch.sum(gradient_directions, dim=0) * log_sum_exp.squeeze(0)  # (n_points, 3)
-                    elif self.gradient_field_method == "inverse_square":  # 基于距离平方反比的定义
-                        # 计算距离（避免除零）
-                        distances = torch.sqrt(dist_sq.squeeze(-1) + 1e-8)  # (n_type_atoms, n_points)
-                        
-                        # 计算距离平方反比权重：1/r²
-                        inverse_square_weights = 1.0 / (distances ** 2 + 1e-8)  # (n_type_atoms, n_points)
-                        
-                        # 应用强度参数
-                        weighted_weights = inverse_square_weights * self.inverse_square_strength  # (n_type_atoms, n_points)
-                        weighted_weights = weighted_weights.unsqueeze(-1)  # (n_type_atoms, n_points, 1)
-                        
-                        # 计算加权梯度：方向 × 距离平方反比权重
-                        weighted_gradients = diff * weighted_weights  # (n_type_atoms, n_points, 3)
-                        type_gradients = torch.sum(weighted_gradients, dim=0)  # (n_points, 3)
-                    
-                    elif self.gradient_field_method == "tanh":  # tanh版本：使用tanh作为magnitude权重
-                        distances = torch.sqrt(dist_sq.squeeze(-1))  # (n_type_atoms, n_points)
-                        # softmax权重
-                        w_softmax = torch.softmax(-distances / self.sig_sf, dim=0)  # (n_type_atoms, n_points)
-                        # tanh magnitude权重
-                        w_mag = torch.tanh(distances / self.sig_mag)  # (n_type_atoms, n_points)
-                        # 归一化方向
-                        diff_normed = diff / (torch.norm(diff, dim=-1, keepdim=True) + 1e-8)  # (n_type_atoms, n_points, 3)
-                        # 计算最终field
-                        weighted_gradients = diff_normed.squeeze(-1) * w_softmax.unsqueeze(-1) * w_mag.unsqueeze(-1)  # (n_type_atoms, n_points, 3)
-                        type_gradients = torch.sum(weighted_gradients, dim=0)  # (n_points, 3)
-                    
-                    elif self.gradient_field_method == "gaussian_mag":  # gaussian版本：使用高斯作为magnitude权重
-                        distances = torch.sqrt(dist_sq.squeeze(-1))  # (n_type_atoms, n_points)
-                        # softmax权重
-                        w_softmax = torch.softmax(-distances / self.sig_sf, dim=0)  # (n_type_atoms, n_points)
-                        # gaussian magnitude权重
-                        w_mag = torch.exp(-distances**2 / (2 * self.sig_mag**2)) * distances  # (n_type_atoms, n_points)
-                        # 归一化方向
-                        diff_normed = diff / (torch.norm(diff, dim=-1, keepdim=True) + 1e-8)  # (n_type_atoms, n_points, 3)
-                        # 计算最终field
-                        weighted_gradients = diff_normed.squeeze(-1) * w_softmax.unsqueeze(-1) * w_mag.unsqueeze(-1)  # (n_type_atoms, n_points, 3)
-                        type_gradients = torch.sum(weighted_gradients, dim=0)  # (n_points, 3)
-                        type_gradients = type_gradients
-                    
-                    elif self.gradient_field_method == "distance":  # distance版本：使用距离作为magnitude权重
-                        distances = torch.sqrt(dist_sq.squeeze(-1))  # (n_type_atoms, n_points)
-                        # softmax权重
-                        w_softmax = torch.softmax(-distances / self.sig_sf, dim=0)  # (n_type_atoms, n_points)
-                        # distance magnitude权重（在原子处为0，随距离线性增长到1）
-                        w_mag = torch.clamp(distances, min=0, max=1)  # (n_type_atoms, n_points)
-                        # 归一化方向
-                        diff_normed = diff / (torch.norm(diff, dim=-1, keepdim=True) + 1e-8)  # (n_type_atoms, n_points, 3)
-                        # 计算最终field
-                        weighted_gradients = diff_normed.squeeze(-1) * w_softmax.unsqueeze(-1) * w_mag.unsqueeze(-1)  # (n_type_atoms, n_points, 3)
-                        type_gradients = torch.sum(weighted_gradients, dim=0)  # (n_points, 3)
-                    
-                    vector_field[b, :, t, :] = type_gradients
+            # 矩阵化计算：一次性处理所有原子类型
+            vector_field[b] = self._compute_gradient_field_matrix(
+                valid_coords, valid_types, query_points[b], n_atom_types
+            )
         return vector_field
+
+    def _compute_gradient_field_matrix(self, coords: torch.Tensor, atom_types: torch.Tensor, 
+                                     query_points: torch.Tensor, n_atom_types: int) -> torch.Tensor:
+        """
+        完全矩阵化计算梯度场，避免所有原子类型循环。
+        
+        Args:
+            coords: 有效原子坐标 [n_valid_atoms, 3]
+            atom_types: 有效原子类型 [n_valid_atoms]
+            query_points: 查询点 [n_points, 3]
+            n_atom_types: 原子类型数量
+            
+        Returns:
+            vector_field: [n_points, n_atom_types, 3]
+        """
+        n_points, _ = query_points.shape
+        device = coords.device
+        
+        # 计算所有原子到所有查询点的距离和方向向量
+        n_atoms, _ = coords.shape
+        coords_exp = coords.unsqueeze(1)  # [n_atoms, 1, 3]
+        q_exp = query_points.unsqueeze(0)  # [1, n_points, 3]
+        diff = coords_exp - q_exp  # [n_atoms, n_points, 3]
+        dist_sq = torch.sum(diff ** 2, dim=-1, keepdim=True)  # [n_atoms, n_points, 1]
+        
+        # 创建原子类型掩码矩阵 [n_atoms, n_atom_types]
+        atom_type_mask = (atom_types.unsqueeze(1) == torch.arange(n_atom_types, device=device).unsqueeze(0))  # [n_atoms, n_atom_types]
+        
+        # 创建sigma参数矩阵 [n_atom_types]
+        sigma_values = torch.tensor([self.sigma_params.get(t, self.sigma) for t in range(n_atom_types)], device=device)  # [n_atom_types]
+        
+        # 初始化结果张量
+        vector_field = torch.zeros(n_points, n_atom_types, 3, device=device)
+        
+        # 根据梯度场计算方法进行完全矩阵化计算
+        if self.gradient_field_method == "gaussian":
+            # 为每个原子类型分别计算高斯权重（保持与原始实现一致）
+            for t in range(n_atom_types):
+                type_mask = atom_type_mask[:, t]  # [n_atoms]
+                if type_mask.sum() > 0:
+                    sigma = sigma_values[t]
+                    type_diff = diff[type_mask]  # [n_type_atoms, n_points, 3]
+                    type_dist_sq = dist_sq[type_mask]  # [n_type_atoms, n_points, 1]
+                    
+                    individual_gradients = type_diff * torch.exp(-type_dist_sq / (2 * sigma ** 2)) / (sigma ** 2)
+                    vector_field[:, t, :] = torch.sum(individual_gradients, dim=0)  # [n_points, 3]
+            
+        elif self.gradient_field_method == "softmax":
+            # 计算距离 [n_atoms, n_points]
+            distances = torch.sqrt(dist_sq.squeeze(-1))  # [n_atoms, n_points]
+            
+            # 为每个原子类型分别计算softmax权重
+            for t in range(n_atom_types):
+                type_mask = atom_type_mask[:, t]  # [n_atoms]
+                if type_mask.sum() > 0:
+                    type_distances = distances[type_mask]  # [n_type_atoms, n_points]
+                    type_diff = diff[type_mask]  # [n_type_atoms, n_points, 3]
+                    
+                    # 计算softmax权重
+                    weights = torch.softmax(-type_distances / self.temperature, dim=0)  # [n_type_atoms, n_points]
+                    weights = weights.unsqueeze(-1)  # [n_type_atoms, n_points, 1]
+                    weighted_gradients = type_diff * weights  # [n_type_atoms, n_points, 3]
+                    type_gradients = torch.sum(weighted_gradients, dim=0)  # [n_points, 3]
+                    
+                    # 应用梯度模长截断
+                    if self.gradient_clip_threshold > 0:
+                        gradient_magnitudes = torch.norm(type_gradients, dim=-1, keepdim=True)  # [n_points, 1]
+                        clip_mask = gradient_magnitudes > self.gradient_clip_threshold
+                        if clip_mask.any():
+                            type_gradients = torch.where(
+                                clip_mask,
+                                type_gradients * self.gradient_clip_threshold / gradient_magnitudes,
+                                type_gradients
+                            )
+                    vector_field[:, t, :] = type_gradients
+                    
+        elif self.gradient_field_method == "sfnorm":
+            # 计算距离 [n_atoms, n_points]
+            distances = torch.sqrt(dist_sq.squeeze(-1))  # [n_atoms, n_points]
+            
+            for t in range(n_atom_types):
+                type_mask = atom_type_mask[:, t]  # [n_atoms]
+                if type_mask.sum() > 0:
+                    type_distances = distances[type_mask]  # [n_type_atoms, n_points]
+                    type_diff = diff[type_mask]  # [n_type_atoms, n_points, 3]
+                    
+                    weights = torch.softmax(-type_distances / self.temperature, dim=0)  # [n_type_atoms, n_points]
+                    weights = weights.unsqueeze(-1)  # [n_type_atoms, n_points, 1]
+                    diff_norm = type_diff / (torch.norm(type_diff, dim=-1, keepdim=True) + 1e-8)
+                    weighted_gradients = diff_norm * weights  # [n_type_atoms, n_points, 3]
+                    vector_field[:, t, :] = torch.sum(weighted_gradients, dim=0)  # [n_points, 3]
+                    
+        elif self.gradient_field_method == "logsumexp":
+            scale = 0.1  # TODO: 参数化
+            for t in range(n_atom_types):
+                type_mask = atom_type_mask[:, t]  # [n_atoms]
+                if type_mask.sum() > 0:
+                    sigma = sigma_values[t]
+                    type_diff = diff[type_mask]  # [n_type_atoms, n_points, 3]
+                    type_dist_sq = dist_sq[type_mask]  # [n_type_atoms, n_points, 1]
+                    
+                    individual_gradients = type_diff * torch.exp(-type_dist_sq / (2 * sigma ** 2)) / (sigma ** 2)
+                    gradient_magnitudes = torch.norm(individual_gradients, dim=2, keepdim=True)  # [n_type_atoms, n_points, 1]
+                    gradient_directions = individual_gradients / (gradient_magnitudes + self.logsumexp_eps)  # [n_type_atoms, n_points, 3]
+                    log_sum_exp = torch.logsumexp(gradient_magnitudes, dim=0, keepdim=True)  # [1, n_points, 1]
+                    vector_field[:, t, :] = scale * torch.sum(gradient_directions, dim=0) * log_sum_exp.squeeze(0)  # [n_points, 3]
+                    
+        elif self.gradient_field_method == "inverse_square":
+            for t in range(n_atom_types):
+                type_mask = atom_type_mask[:, t]  # [n_atoms]
+                if type_mask.sum() > 0:
+                    type_diff = diff[type_mask]  # [n_type_atoms, n_points, 3]
+                    type_dist_sq = dist_sq[type_mask]  # [n_type_atoms, n_points, 1]
+                    
+                    distances = torch.sqrt(type_dist_sq.squeeze(-1) + 1e-8)  # [n_type_atoms, n_points]
+                    inverse_square_weights = 1.0 / (distances ** 2 + 1e-8)  # [n_type_atoms, n_points]
+                    weighted_weights = inverse_square_weights * self.inverse_square_strength  # [n_type_atoms, n_points]
+                    weighted_weights = weighted_weights.unsqueeze(-1)  # [n_type_atoms, n_points, 1]
+                    weighted_gradients = type_diff * weighted_weights  # [n_type_atoms, n_points, 3]
+                    vector_field[:, t, :] = torch.sum(weighted_gradients, dim=0)  # [n_points, 3]
+                    
+        elif self.gradient_field_method == "tanh":
+            for t in range(n_atom_types):
+                type_mask = atom_type_mask[:, t]  # [n_atoms]
+                if type_mask.sum() > 0:
+                    type_diff = diff[type_mask]  # [n_type_atoms, n_points, 3]
+                    type_dist_sq = dist_sq[type_mask]  # [n_type_atoms, n_points, 1]
+                    
+                    distances = torch.sqrt(type_dist_sq.squeeze(-1))  # [n_type_atoms, n_points]
+                    w_softmax = torch.softmax(-distances / self.sig_sf, dim=0)  # [n_type_atoms, n_points]
+                    w_mag = torch.tanh(distances / self.sig_mag)  # [n_type_atoms, n_points]
+                    diff_normed = type_diff / (torch.norm(type_diff, dim=-1, keepdim=True) + 1e-8)  # [n_type_atoms, n_points, 3]
+                    weighted_gradients = diff_normed * w_softmax.unsqueeze(-1) * w_mag.unsqueeze(-1)  # [n_type_atoms, n_points, 3]
+                    vector_field[:, t, :] = torch.sum(weighted_gradients, dim=0)  # [n_points, 3]
+                    
+        elif self.gradient_field_method == "gaussian_mag":
+            for t in range(n_atom_types):
+                type_mask = atom_type_mask[:, t]  # [n_atoms]
+                if type_mask.sum() > 0:
+                    type_diff = diff[type_mask]  # [n_type_atoms, n_points, 3]
+                    type_dist_sq = dist_sq[type_mask]  # [n_type_atoms, n_points, 1]
+                    
+                    distances = torch.sqrt(type_dist_sq.squeeze(-1))  # [n_type_atoms, n_points]
+                    w_softmax = torch.softmax(-distances / self.sig_sf, dim=0)  # [n_type_atoms, n_points]
+                    w_mag = torch.exp(-distances**2 / (2 * self.sig_mag**2)) * distances  # [n_type_atoms, n_points]
+                    diff_normed = type_diff / (torch.norm(type_diff, dim=-1, keepdim=True) + 1e-8)  # [n_type_atoms, n_points, 3]
+                    weighted_gradients = diff_normed * w_softmax.unsqueeze(-1) * w_mag.unsqueeze(-1)  # [n_type_atoms, n_points, 3]
+                    vector_field[:, t, :] = torch.sum(weighted_gradients, dim=0)  # [n_points, 3]
+                    
+        elif self.gradient_field_method == "distance":
+            for t in range(n_atom_types):
+                type_mask = atom_type_mask[:, t]  # [n_atoms]
+                if type_mask.sum() > 0:
+                    type_diff = diff[type_mask]  # [n_type_atoms, n_points, 3]
+                    type_dist_sq = dist_sq[type_mask]  # [n_type_atoms, n_points, 1]
+                    
+                    distances = torch.sqrt(type_dist_sq.squeeze(-1))  # [n_type_atoms, n_points]
+                    w_softmax = torch.softmax(-distances / self.sig_sf, dim=0)  # [n_type_atoms, n_points]
+                    w_mag = torch.clamp(distances, min=0, max=1)  # [n_type_atoms, n_points]
+                    diff_normed = type_diff / (torch.norm(type_diff, dim=-1, keepdim=True) + 1e-8)  # [n_type_atoms, n_points, 3]
+                    weighted_gradients = diff_normed * w_softmax.unsqueeze(-1) * w_mag.unsqueeze(-1)  # [n_type_atoms, n_points, 3]
+                    vector_field[:, t, :] = torch.sum(weighted_gradients, dim=0)  # [n_points, 3]
+        
+        return vector_field
+
+    def _process_atom_types_matrix(self, current_codes: torch.Tensor, n_atom_types: int, 
+                                 n_query_points: int, device: torch.device, 
+                                 decoder: nn.Module, fabric: object = None) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+        """
+        矩阵化处理所有原子类型，避免原子类型循环。
+        
+        Args:
+            current_codes: 当前batch的编码 [1, code_dim]
+            n_atom_types: 原子类型数量
+            n_query_points: 查询点数量
+            device: 设备
+            fabric: 日志对象
+            
+        Returns:
+            (coords_list, types_list): 坐标和类型列表
+        """
+        coords_list = []
+        types_list = []
+        
+        # 1. 初始化采样点 - 智能梯度场采样策略
+        init_min, init_max = -7.0, 7.0
+        n_candidates = n_query_points * self.gradient_sampling_candidate_multiplier
+        candidate_points = torch.rand(n_candidates, 3, device=device) * (init_max - init_min) + init_min
+        
+        # 计算候选点的梯度场强度
+        candidate_batch = candidate_points.unsqueeze(0)  # [1, n_candidates, 3]
+        
+        try:
+            if fabric:
+                fabric.print(f">>     Calling decoder with candidate_batch shape: {candidate_batch.shape}")
+                fabric.print(f">>     Using current_codes shape: {current_codes.shape}")
+            
+            candidate_field = decoder(candidate_batch, current_codes)  # [1, n_candidates, n_atom_types, 3]
+            if fabric:
+                fabric.print(f">>     Decoder output shape: {candidate_field.shape}")
+            
+        except Exception as e:
+            if fabric:
+                fabric.print(f">> ERROR in decoder call: {e}")
+                fabric.print(f">>   candidate_batch shape: {candidate_batch.shape}")
+                fabric.print(f">>   current_codes shape: {current_codes.shape}")
+                fabric.print(f">>   current_codes device: {current_codes.device}")
+                fabric.print(f">>   candidate_batch device: {candidate_batch.device}")
+            raise e
+        
+        # 矩阵化处理所有原子类型
+        all_sampled_points = []
+        all_atom_types = []
+        
+        for t in range(n_atom_types):
+            candidate_grad = candidate_field[0, :, t, :]  # [n_candidates, 3]
+            
+            # 计算梯度场强度（模长）
+            grad_magnitudes = torch.norm(candidate_grad, dim=1)  # [n_candidates]
+            
+            # 根据梯度场强度进行加权采样
+            probabilities = torch.softmax(grad_magnitudes / self.gradient_sampling_temperature, dim=0)
+            
+            # 从候选点中采样n_query_points个点
+            sampled_indices = torch.multinomial(probabilities, n_query_points, replacement=False)
+            z = candidate_points[sampled_indices]  # [n_query_points, 3]
+            
+            all_sampled_points.append(z)
+            all_atom_types.append(torch.full((n_query_points,), t, dtype=torch.long, device=device))
+        
+        # 合并所有原子类型的采样点进行批量梯度上升
+        if all_sampled_points:
+            # 将所有采样点合并 [n_atom_types * n_query_points, 3]
+            combined_points = torch.cat(all_sampled_points, dim=0)
+            combined_types = torch.cat(all_atom_types, dim=0)  # [n_atom_types * n_query_points]
+            
+            # 批量梯度上升
+            final_points = self._batch_gradient_ascent(
+                combined_points, combined_types, current_codes, device, decoder, fabric
+            )
+            
+            # 按原子类型分离结果并进行聚类
+            for t in range(n_atom_types):
+                start_idx = t * n_query_points
+                end_idx = (t + 1) * n_query_points
+                type_points = final_points[start_idx:end_idx]  # [n_query_points, 3]
+                
+                # 聚类/合并
+                z_np = type_points.detach().cpu().numpy()
+                merged_points = self._merge_points(z_np)
+                if len(merged_points) > 0:
+                    coords_list.append(torch.from_numpy(merged_points).to(device))
+                    types_list.append(torch.full((len(merged_points),), t, dtype=torch.long, device=device))
+        
+        return coords_list, types_list
+
+    def _batch_gradient_ascent(self, points: torch.Tensor, atom_types: torch.Tensor,
+                              current_codes: torch.Tensor, device: torch.device,
+                              decoder: nn.Module, fabric: object = None) -> torch.Tensor:
+        """
+        批量梯度上升，对所有原子类型的点同时进行梯度上升。
+        
+        Args:
+            points: 采样点 [n_total_points, 3]
+            atom_types: 原子类型 [n_total_points]
+            current_codes: 当前编码 [1, code_dim]
+            device: 设备
+            fabric: 日志对象
+            
+        Returns:
+            final_points: 最终点位置 [n_total_points, 3]
+        """
+        z = points.clone()
+        
+        for iter_idx in range(self.n_iter):
+            z_batch = z.unsqueeze(0)  # [1, n_total_points, 3]
+            
+            try:
+                current_field = decoder(z_batch, current_codes)  # [1, n_total_points, n_atom_types, 3]
+                
+                # 为每个点选择对应原子类型的梯度
+                # 使用高级索引选择梯度
+                point_indices = torch.arange(z.size(0), device=device)  # [n_total_points]
+                type_indices = atom_types  # [n_total_points]
+                grad = current_field[0, point_indices, type_indices, :]  # [n_total_points, 3]
+                
+                # 检查梯度是否包含NaN/Inf
+                if torch.isnan(grad).any() or torch.isinf(grad).any():
+                    if fabric:
+                        fabric.print(f">>     WARNING: Gradient contains NaN/Inf at iteration {iter_idx}")
+                    break
+                
+                # 使用原子类型特定的sigma调整步长
+                sigma_ratios = torch.tensor([self.sigma_params.get(t.item(), self.sigma) / self.sigma 
+                                           for t in atom_types], device=device)  # [n_total_points]
+                adjusted_step_sizes = self.step_size * sigma_ratios.unsqueeze(-1)  # [n_total_points, 1]
+                
+                # 更新采样点位置
+                z = z + adjusted_step_sizes * grad
+                
+            except (RuntimeError, ValueError, IndexError) as e:
+                if fabric:
+                    fabric.print(f">> ERROR in batch gradient ascent iteration {iter_idx}: {e}")
+                break
+        
+        return z
 
     def gnf2mol(self, decoder: nn.Module, codes: torch.Tensor,
                 atom_types: Optional[torch.Tensor] = None,
@@ -269,84 +473,10 @@ class GNFConverter(nn.Module):
                     fabric.print(f">> ERROR: codes at batch {b} contains Inf values!")
                 continue
             
-            coords_list = []
-            types_list = []
-            # 对每个原子类型分别做流动和聚类
-            for t in range(n_atom_types):  # TODO:remove this loop to use all atom types
-                # 1. 初始化采样点 - 智能梯度场采样策略
-                # 不再在整个空间随机洒点，而是优先在梯度场强度大的位置采样
-                # 这样可以提高采样效率，减少在无意义区域的采样
-                init_min, init_max = -7.0, 7.0
-                n_candidates = n_query_points * self.gradient_sampling_candidate_multiplier  # 生成候选点
-                candidate_points = torch.rand(n_candidates, 3, device=device) * (init_max - init_min) + init_min
-                
-                # 计算候选点的梯度场强度
-                candidate_batch = candidate_points.unsqueeze(0)  # [1, n_candidates, 3]
-                
-                try:
-                    if fabric:
-                        fabric.print(f">>     Calling decoder with candidate_batch shape: {candidate_batch.shape}")
-                        fabric.print(f">>     Using codes[b:b+1] shape: {current_codes.shape}")
-                    
-                    candidate_field = decoder(candidate_batch, current_codes)  # [1, n_candidates, n_atom_types, 3]
-                    if fabric:
-                        fabric.print(f">>     Decoder output shape: {candidate_field.shape}")
-                    
-                    candidate_grad = candidate_field[0, :, t, :]  # [n_candidates, 3]
-                    
-                except Exception as e:
-                    if fabric:
-                        fabric.print(f">> ERROR in atom type {t}: {e}")
-                        fabric.print(f">>   candidate_batch shape: {candidate_batch.shape}")
-                        fabric.print(f">>   current_codes shape: {current_codes.shape}")
-                        fabric.print(f">>   current_codes device: {current_codes.device}")
-                        fabric.print(f">>   candidate_batch device: {candidate_batch.device}")
-                    raise e
-                
-                # 计算梯度场强度（模长）
-                grad_magnitudes = torch.norm(candidate_grad, dim=1)  # [n_candidates]
-                
-                # 根据梯度场强度进行加权采样，优先选择梯度场大的位置
-                # 使用softmax将梯度强度转换为概率分布，温度参数控制采样的尖锐程度
-                probabilities = torch.softmax(grad_magnitudes / self.gradient_sampling_temperature, dim=0)
-                
-                # 从候选点中采样n_query_points个点，使用加权采样策略
-                sampled_indices = torch.multinomial(probabilities, n_query_points, replacement=False)
-                z = candidate_points[sampled_indices]  # [n_query_points, 3]
-                
-                # 2. 梯度上升（每次迭代都重新计算梯度！）
-                for iter_idx in range(self.n_iter):
-                    # 在新位置计算梯度场
-                    z_batch = z.unsqueeze(0)  # [1, n_query_points, 3]
-                    
-                    try:
-                        current_field = decoder(z_batch, current_codes)  # [1, n_query_points, n_atom_types, 3]
-                        grad = current_field[0, :, t, :]  # [n_query_points, 3]
-                        # TODO: use all atom types
-                        # 检查梯度是否包含NaN/Inf
-                        if torch.isnan(grad).any() or torch.isinf(grad).any():
-                            if fabric:
-                                fabric.print(f">>     WARNING: Gradient contains NaN/Inf at iteration {iter_idx}")
-                            break
-                        
-                        # 使用原子类型特定的sigma调整步长，保持与训练时的一致性
-                        sigma_ratio = self.sigma_params.get(t, self.sigma) / self.sigma
-                        adjusted_step_size = self.step_size * sigma_ratio
-                        
-                        # 更新采样点位置
-                        z = z + adjusted_step_size * grad
-                        
-                    except Exception as e:
-                        if fabric:
-                            fabric.print(f">> ERROR in gradient ascent iteration {iter_idx}: {e}")
-                        break
-                                    
-                # 3. 聚类/合并
-                z_np = z.detach().cpu().numpy()
-                merged_points = self._merge_points(z_np)
-                if len(merged_points) > 0:
-                    coords_list.append(torch.from_numpy(merged_points).to(device))
-                    types_list.append(torch.full((len(merged_points),), t, dtype=torch.long, device=device))
+            # 矩阵化处理所有原子类型
+            coords_list, types_list = self._process_atom_types_matrix(
+                current_codes, n_atom_types, n_query_points, device, decoder, fabric
+            )
             
             # 合并所有类型
             if coords_list:

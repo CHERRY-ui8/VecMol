@@ -1,4 +1,6 @@
 defaults:
+  - dset: qm9  # 包含必要的数据集配置
+  - converter: gnf_converter_qm9  # 包含必要的转换器配置
   - override hydra/job_logging: custom
   - _self_
 
@@ -12,18 +14,17 @@ debug: False
 debug_one_mol: False
 debug_subset: False
 
-dirname: ${nf_pretrained_path}/codes/${split}
+# dirname 将自动基于 nf_pretrained_path 的目录计算
 
 # overwrite
-split: train
+split: train # train, val, test
 dset:
   data_aug: True
-  batch_size: 500  # 原来是2000，减少批次大小以节省内存
+  batch_size: 32
 
-# set the running dir
 hydra:
   run:
-    dir: ${dirname}
+    dir: outputs  # 使用默认的 outputs 目录
   job:
     config:
       override_dirname:

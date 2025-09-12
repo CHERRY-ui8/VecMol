@@ -38,3 +38,9 @@ class ModelEma(nn.Module):
 
     def set(self, model):
         self._update(model, update_fn=lambda e, m: m)
+    
+    def forward(self, *args, **kwargs):
+        """
+        Forward pass through the EMA model.
+        """
+        return self.module(*args, **kwargs)

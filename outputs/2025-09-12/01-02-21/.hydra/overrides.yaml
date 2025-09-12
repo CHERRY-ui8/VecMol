@@ -1,0 +1,3 @@
+- field_mode=gt_field
+- field_methods=[gaussian_mag]
+- max_samples=5

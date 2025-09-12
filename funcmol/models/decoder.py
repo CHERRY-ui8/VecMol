@@ -47,6 +47,15 @@ class Decoder(nn.Module):
         # The output from EGNN is already in the correct shape: [B, n_points, n_atom_types, 3]
         return vector_field
 
+    def set_code_stats(self, code_stats: dict) -> None:
+        """
+        Set the code statistics.
+
+        Args:
+            code_stats: Code statistics.
+        """
+        self.code_stats = code_stats
+
 
 class CommentedDecoder(Decoder):
     def render_code(

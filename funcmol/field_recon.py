@@ -48,9 +48,6 @@ from funcmol.dataset.dataset_field import FieldDataset
 from funcmol.models.funcmol import create_funcmol
 from funcmol.utils.utils_fm import load_checkpoint_fm
         
-from funcmol.models.funcmol import create_funcmol
-from funcmol.utils.utils_fm import load_checkpoint_fm
-        
 
 def compute_rmsd(coords1: torch.Tensor, coords2: torch.Tensor) -> float:
     """Compute RMSD using Hungarian algorithm."""
@@ -102,32 +99,27 @@ def main(config: DictConfig) -> None:
     print(f"Evaluating {max_samples} molecules with field_mode: {field_mode}, methods: {field_methods}")
     
     # Load models based on field mode
-    # Load models based on field mode
+    encoder = None
+    decoder = None
+    funcmol = None
+    
     if field_mode == 'nf_field':
         fabric = Fabric()
-        encoder, decoder = load_model(fabric, config)
+        if config.get("nf_pretrained_path") is None:
+            raise ValueError("nf_pretrained_path must be specified for nf_field mode")
+        encoder, decoder = load_model(fabric, config, config["nf_pretrained_path"])
         print("Loaded neural field encoder/decoder")
     elif field_mode == 'denoiser_field':
         fabric = Fabric()
         # Load neural field encoder/decoder for denoiser input/output
-        encoder, decoder = load_model(fabric, config)
+        if config.get("nf_pretrained_path") is None:
+            raise ValueError("nf_pretrained_path must be specified for denoiser_field mode")
+        encoder, decoder = load_model(fabric, config, config["nf_pretrained_path"])
         # Load FuncMol denoiser
         if config.get("fm_pretrained_path") is None:
             raise ValueError("fm_pretrained_path must be specified for denoiser_field mode")
         funcmol = create_funcmol(config, fabric)
-        funcmol, code_stats = load_checkpoint_fm(funcmol, config["fm_pretrained_path"], fabric=fabric)
-        funcmol = fabric.setup_module(funcmol)
-        funcmol.eval()
-        print("Loaded neural field encoder/decoder and FuncMol denoiser")
-    elif field_mode == 'denoiser_field':
-        fabric = Fabric()
-        # Load neural field encoder/decoder for denoiser input/output
-        encoder, decoder = load_model(fabric, config)
-        # Load FuncMol denoiser
-        if config.get("fm_pretrained_path") is None:
-            raise ValueError("fm_pretrained_path must be specified for denoiser_field mode")
-        funcmol = create_funcmol(config, fabric)
-        funcmol, code_stats = load_checkpoint_fm(funcmol, config["fm_pretrained_path"], fabric=fabric)
+        funcmol, _ = load_checkpoint_fm(funcmol, config["fm_pretrained_path"], fabric=fabric)
         funcmol = fabric.setup_module(funcmol)
         funcmol.eval()
         print("Loaded neural field encoder/decoder and FuncMol denoiser")
@@ -155,6 +147,10 @@ def main(config: DictConfig) -> None:
                 method_config['converter']['gradient_field_method'] = field_method
                 converter = create_gnf_converter(method_config)
                 
+                # 初始化decoder和codes变量
+                # 注意：decoder在全局作用域中已经定义，这里不需要重新定义
+                codes = None
+                
                 if field_mode == 'gt_field':
                     # 2.1 Convert to field using gt_field function (also can change to mode: using trained nf decoder of encoded gt_mol)
                     # For gt_field mode, we need to create a dummy decoder and codes                    
@@ -176,6 +172,8 @@ def main(config: DictConfig) -> None:
                             )
                     
                     dummy_decoder = DummyDecoder(converter, gt_coords, gt_types)
+                    decoder = dummy_decoder  # 设置decoder变量
+                    codes = dummy_codes  # 设置codes变量
                     
                     # Generate query points
                     n_query_points = converter.n_query_points
@@ -186,7 +184,7 @@ def main(config: DictConfig) -> None:
                     query_points = query_points.unsqueeze(0)
                     
                     # Generate field data using dummy decoder
-                    field_data = dummy_decoder(query_points, dummy_codes)
+                    dummy_decoder(query_points, dummy_codes)
                     
                 elif field_mode == 'nf_field':
                     # 2.1 Convert to field using trained nf decoder of encoded gt_mol
@@ -201,7 +199,7 @@ def main(config: DictConfig) -> None:
                     query_points = query_points * (coords_max - coords_min) + coords_min
                     query_points = query_points.unsqueeze(0)
                     
-                    field_data = decoder(query_points, codes)
+                    decoder(query_points, codes)
                 
                 elif field_mode == 'denoiser_field':
                     # 2.1 Convert to field using denoiser-processed codes
@@ -212,24 +210,7 @@ def main(config: DictConfig) -> None:
                     with torch.no_grad():
                         denoised_codes = funcmol(raw_codes)
                     
-                    # Use neural field decoder to get field data
-                    n_query_points = converter.n_query_points
-                    coords_min = gt_coords.min(dim=0)[0] - 2.0
-                    coords_max = gt_coords.max(dim=0)[0] + 2.0
-                    query_points = torch.rand(n_query_points, 3, device=gt_coords.device)
-                    query_points = query_points * (coords_max - coords_min) + coords_min
-                    query_points = query_points.unsqueeze(0)
-                    
-                    field_data = decoder(query_points, denoised_codes)
-                
-                elif field_mode == 'denoiser_field':
-                    # 2.1 Convert to field using denoiser-processed codes
-                    # First encode with neural field encoder
-                    raw_codes = encoder(gt_coords.unsqueeze(0), gt_types.unsqueeze(0))
-                    
-                    # Process codes through denoiser
-                    with torch.no_grad():
-                        denoised_codes = funcmol(raw_codes)
+                    codes = denoised_codes  # 设置codes变量
                     
                     # Use neural field decoder to get field data
                     n_query_points = converter.n_query_points
@@ -239,32 +220,16 @@ def main(config: DictConfig) -> None:
                     query_points = query_points * (coords_max - coords_min) + coords_min
                     query_points = query_points.unsqueeze(0)
                     
-                    field_data = decoder(query_points, denoised_codes)
+                    decoder(query_points, denoised_codes)
                 
                 # 2.2 Reconstruct mol
-                if field_mode == 'gt_field':
-                    # Reconstruct mol using gnf2mol with dummy decoder (gt_field mode)
-                    recon_coords, _ = converter.gnf2mol(
-                        decoder=dummy_decoder,
-                        codes=dummy_codes,
-                        atom_types=gt_types.unsqueeze(0)
-                    )
-                elif field_mode == 'nf_field':
-                elif field_mode == 'nf_field':
-                    # Reconstruct mol using gnf2mol (nf_field mode)
-                    recon_coords, _ = converter.gnf2mol(
-                        decoder=decoder,
-                        codes=codes,
-                        atom_types=gt_types.unsqueeze(0)
-                    )
-                else:  # denoiser_field mode
-                    # Reconstruct mol using gnf2mol (denoiser_field mode)
-                    recon_coords, _ = converter.gnf2mol(
-                        field_data, 
-                        decoder=decoder,
-                        codes=denoised_codes,
-                        atom_types=gt_types.unsqueeze(0)
-                    )
+                # 所有模式都使用相同的gnf2mol调用
+                print(f"Debug: decoder = {decoder}, codes = {codes}")
+                recon_coords, _ = converter.gnf2mol(
+                    decoder,
+                    codes,
+                    atom_types=gt_types.unsqueeze(0)
+                )
                 
                 # 2.3 Save mol (if use gt_field, save in /exps/gt_field; if use predicted_field, save in the nf path under /exps/neural_field)
                 # Note: Currently we only save results to CSV, not individual mol files
