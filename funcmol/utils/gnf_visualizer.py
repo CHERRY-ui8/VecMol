@@ -501,7 +501,11 @@ class GNFVisualizer(MoleculeVisualizer):
                                    save_interval: int = 50,
                                    create_1d_plots: bool = True,
                                    use_recon_dir: bool = True,
-                                   fixed_axis: bool = True) -> Dict[str, Any]:
+                                   fixed_axis: bool = True,
+                                   use_intelligent_sampling: bool = False,
+                                   decoder=None,
+                                   codes=None,
+                                   fabric=None) -> Dict[str, Any]:
         """创建分子生成过程的动画
         
         从 codes 生成的场函数开始，通过梯度下降找到原子位置，生成完整的分子结构。
@@ -515,6 +519,10 @@ class GNFVisualizer(MoleculeVisualizer):
             create_1d_plots: 是否创建1D场可视化
             use_recon_dir: 是否使用recon子目录，False时直接在主目录下生成文件
             fixed_axis: 是否使用固定坐标轴，True时坐标轴范围在第一帧确定后不再变化
+            use_intelligent_sampling: 是否使用智能采样（与field_recon.py相同的方法）
+            decoder: 解码器（智能采样时需要）
+            codes: 分子代码（智能采样时需要）
+            fabric: 日志对象（智能采样时需要）
             
         Returns:
             包含动画路径、最终结果和指标历史的字典
@@ -531,13 +539,41 @@ class GNFVisualizer(MoleculeVisualizer):
         
         all_atom_types = list(range(5))
         
-        # 在合理范围内初始化随机点
-        init_min = torch.tensor([-3.0, -3.0, -3.0], device=device)
-        init_max = torch.tensor([3.0, 3.0, 3.0], device=device)
-        
-        z_dict = {}
-        for atom_type in all_atom_types:
-            z_dict[atom_type] = torch.rand(converter.n_query_points, 3, device=device) * (init_max - init_min) + init_min
+        # 初始化随机点
+        if use_intelligent_sampling and decoder is not None and codes is not None:
+            # 使用与 field_recon.py 相同的智能采样方法
+            print("Using intelligent sampling method...")
+            init_min, init_max = -7.0, 7.0
+            n_candidates = converter.n_query_points * converter.gradient_sampling_candidate_multiplier
+            candidate_points = torch.rand(n_candidates, 3, device=device) * (init_max - init_min) + init_min
+            
+            # 计算候选点的梯度场强度
+            candidate_batch = candidate_points.unsqueeze(0)  # [1, n_candidates, 3]
+            
+            try:
+                with torch.no_grad():
+                    candidate_field = decoder(candidate_batch, codes)
+            except Exception as e:
+                if fabric:
+                    fabric.print(f">> ERROR in decoder call: {e}")
+                raise e
+            
+            # 为每个原子类型进行智能采样
+            z_dict = {}
+            for t in all_atom_types:
+                candidate_grad = candidate_field[0, :, t, :]  # [n_candidates, 3]
+                grad_magnitudes = torch.norm(candidate_grad, dim=1)  # [n_candidates]
+                probabilities = torch.softmax(grad_magnitudes / converter.gradient_sampling_temperature, dim=0)
+                sampled_indices = torch.multinomial(probabilities, converter.n_query_points, replacement=False)
+                z_dict[t] = candidate_points[sampled_indices]  # [n_query_points, 3]
+        else:
+            # 使用简单的均匀随机采样
+            init_min = torch.tensor([-3.0, -3.0, -3.0], device=device)
+            init_max = torch.tensor([3.0, 3.0, 3.0], device=device)
+            
+            z_dict = {}
+            for atom_type in all_atom_types:
+                z_dict[atom_type] = torch.rand(converter.n_query_points, 3, device=device) * (init_max - init_min) + init_min
         
         frame_paths = []
         metrics_history = {

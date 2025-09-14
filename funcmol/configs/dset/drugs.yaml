@@ -11,7 +11,7 @@ n_channels: 8
 n_points: 500 # TODO：后面可以再调大一些，暂时先保留500
 subsampling_ratio: 4
 
-num_workers: 2  # 可能是导致Segmentation fault的原因
-batch_size: 48
-lr_enc: 1e-4
-lr_dec: 5e-4
+num_workers: 2  # 可能是导致Segmentation fault的原因，这个参数不能太大了
+batch_size: 16
+lr_enc: 5e-4
+lr_dec: 1e-3

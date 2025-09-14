@@ -359,31 +359,14 @@ class NeuralFieldLightningModule(pl.LightningModule):
         return items
 
 
-@hydra.main(config_path="configs", config_name="train_nf_qm9", version_base=None)
-# @hydra.main(config_path="configs", config_name="train_nf_drugs", version_base=None)
+# @hydra.main(config_path="configs", config_name="train_nf_qm9", version_base=None)
+@hydra.main(config_path="configs", config_name="train_nf_drugs", version_base=None)
 def main_hydra(config):
     """Entry point for Hydra configuration system"""
     main(config)
 
 def main(config):
-    """Main function to set up and run the training"""
-    # Set environment variables
-    # os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
-    # os.environ['TORCH_DISTRIBUTED_DEBUG'] = 'OFF'
-    # os.environ['LIGHTNING_CLI_USAGE'] = 'OFF'
-    
-    # # Set NCCL environment variables to avoid communication issues
-    # os.environ['NCCL_DEBUG'] = 'WARN'
-    # os.environ['NCCL_TIMEOUT'] = '1800'
-    # os.environ['NCCL_IB_DISABLE'] = '1'
-    # os.environ['NCCL_P2P_DISABLE'] = '1'
-    # os.environ['NCCL_SOCKET_IFNAME'] = 'lo'
-    # os.environ['TORCH_NCCL_BLOCKING_WAIT'] = '1'
-    # os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
-    # os.environ['NCCL_ASYNC_ERROR_HANDLING'] = '1'
-    # os.environ['NCCL_BUFFSIZE'] = '2097152'
-    # os.environ['NCCL_NTHREADS'] = '4'
-    
+    """Main function to set up and run the training"""    
     # Get available GPU count
     num_gpus = torch.cuda.device_count()
     print(f"Available GPUs: {num_gpus}")

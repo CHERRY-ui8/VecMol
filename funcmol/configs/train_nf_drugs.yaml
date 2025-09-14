@@ -20,7 +20,7 @@ auto_resume: False  # 是否自动加载最新的checkpoint继续训练
 n_samples: None
 
 # training params
-ckpt_every_n_epochs: 1  # 每隔多少epoch保存一次ckpt
+ckpt_every_n_epochs: 5  # 每隔多少epoch保存一次ckpt
 n_epochs: 500
 eval_every: 1
 use_ema: False
