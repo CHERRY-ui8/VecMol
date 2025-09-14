@@ -13,5 +13,5 @@ subsampling_ratio: 2
 
 num_workers: 4
 batch_size: 16
-lr_enc: 1e-4
-lr_dec: 5e-4 # 这个学习率不需要再调大了，已经较优了
+lr_enc: 2e-4
+lr_dec: 1e-3 # 这个学习率不需要再调大了，已经较优了（但是调大一倍好像也可以？现在是调大一倍的

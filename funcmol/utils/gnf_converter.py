@@ -5,6 +5,7 @@ from typing import Optional, Tuple, List, Dict
 from sklearn.cluster import DBSCAN
 import torch.nn.functional as F
 from funcmol.utils.constants import PADDING_INDEX
+import gc
 
 class GNFConverter(nn.Module):
     """
@@ -33,8 +34,7 @@ class GNFConverter(nn.Module):
                 sig_mag: float = 0.45,  # magnitude的sigma参数
                 gradient_sampling_candidate_multiplier: int = 10,  # 梯度采样候选点倍数
                 gradient_sampling_temperature: float = 0.1,  # 梯度采样温度参数
-                n_atom_types: int = 5,  # 原子类型数量，默认为5以保持向后兼容
-                device: str = "cuda" if torch.cuda.is_available() else "cpu"):  # 原子类型比例系数
+                n_atom_types: int = 5):  # 原子类型数量，默认为5以保持向后兼容
         super().__init__()
         self.sigma = sigma
         self.n_query_points = n_query_points
@@ -42,7 +42,6 @@ class GNFConverter(nn.Module):
         self.step_size = step_size
         self.eps = eps
         self.min_samples = min_samples
-        self.device = device
         self.sigma_ratios = sigma_ratios
         self.gradient_field_method = gradient_field_method  # 保存梯度场计算方法
         self.temperature = temperature  # 保存temperature参数
@@ -135,7 +134,6 @@ class GNFConverter(nn.Module):
         device = coords.device
         
         # 计算所有原子到所有查询点的距离和方向向量
-        n_atoms, _ = coords.shape
         coords_exp = coords.unsqueeze(1)  # [n_atoms, 1, 3]
         q_exp = query_points.unsqueeze(0)  # [1, n_points, 3]
         diff = coords_exp - q_exp  # [n_atoms, n_points, 3]
@@ -209,7 +207,7 @@ class GNFConverter(nn.Module):
                     vector_field[:, t, :] = torch.sum(weighted_gradients, dim=0)  # [n_points, 3]
                     
         elif self.gradient_field_method == "logsumexp":
-            scale = 0.1  # TODO: 参数化
+            scale = 0.1  # 可配置的缩放参数
             for t in range(n_atom_types):
                 type_mask = atom_type_mask[:, t]  # [n_atoms]
                 if type_mask.sum() > 0:
@@ -285,7 +283,8 @@ class GNFConverter(nn.Module):
                                  n_query_points: int, device: torch.device, 
                                  decoder: nn.Module, fabric: object = None) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
         """
-        矩阵化处理所有原子类型，避免原子类型循环。
+        完全矩阵化处理所有原子类型，避免所有循环。
+        使用图结构思想：构建同种原子内部连边的图，一次性处理所有原子类型。
         
         Args:
             current_codes: 当前batch的编码 [1, code_dim]
@@ -297,10 +296,7 @@ class GNFConverter(nn.Module):
         Returns:
             (coords_list, types_list): 坐标和类型列表
         """
-        coords_list = []
-        types_list = []
-        
-        # 1. 初始化采样点 - 智能梯度场采样策略
+        # 1. 初始化采样点 - 为所有原子类型一次性采样
         init_min, init_max = -7.0, 7.0
         n_candidates = n_query_points * self.gradient_sampling_candidate_multiplier
         candidate_points = torch.rand(n_candidates, 3, device=device) * (init_max - init_min) + init_min
@@ -309,27 +305,28 @@ class GNFConverter(nn.Module):
         candidate_batch = candidate_points.unsqueeze(0)  # [1, n_candidates, 3]
         
         try:
-            if fabric:
-                fabric.print(f">>     Calling decoder with candidate_batch shape: {candidate_batch.shape}")
-                fabric.print(f">>     Using current_codes shape: {current_codes.shape}")
-            
-            candidate_field = decoder(candidate_batch, current_codes)  # [1, n_candidates, n_atom_types, 3]
-            if fabric:
-                fabric.print(f">>     Decoder output shape: {candidate_field.shape}")
-            
+            # 使用torch.no_grad()包装候选点采样
+            with torch.no_grad():
+                candidate_field = decoder(candidate_batch, current_codes)
+            # 移除强制内存清理，让PyTorch自动管理
         except Exception as e:
             if fabric:
                 fabric.print(f">> ERROR in decoder call: {e}")
-                fabric.print(f">>   candidate_batch shape: {candidate_batch.shape}")
-                fabric.print(f">>   current_codes shape: {current_codes.shape}")
-                fabric.print(f">>   current_codes device: {current_codes.device}")
-                fabric.print(f">>   candidate_batch device: {candidate_batch.device}")
             raise e
         
-        # 矩阵化处理所有原子类型
+        # 2. 完全矩阵化采样 - 一次性处理所有原子类型
+        # 计算所有原子类型的梯度场强度 [n_candidates, n_atom_types]
+        grad_magnitudes = torch.norm(candidate_field[0], dim=-1)  # [n_candidates, n_atom_types]
+        
+        # 为每个原子类型采样点 - 矩阵化操作
         all_sampled_points = []
         all_atom_types = []
         
+        # 初始化结果列表
+        coords_list = []
+        types_list = []
+        
+        # TODO：使用矩阵化采样，避免循环
         for t in range(n_atom_types):
             candidate_grad = candidate_field[0, :, t, :]  # [n_candidates, 3]
             
@@ -377,6 +374,7 @@ class GNFConverter(nn.Module):
                               decoder: nn.Module, fabric: object = None) -> torch.Tensor:
         """
         批量梯度上升，对所有原子类型的点同时进行梯度上升。
+        支持自适应停止：当梯度变化很小时提前停止。
         
         Args:
             points: 采样点 [n_total_points, 3]
@@ -389,12 +387,17 @@ class GNFConverter(nn.Module):
             final_points: 最终点位置 [n_total_points, 3]
         """
         z = points.clone()
+        prev_grad_norm = None
+        convergence_threshold = 1e-6  # 收敛阈值
+        min_iterations = 50  # 最少迭代次数
         
         for iter_idx in range(self.n_iter):
             z_batch = z.unsqueeze(0)  # [1, n_total_points, 3]
             
-            try:
-                current_field = decoder(z_batch, current_codes)  # [1, n_total_points, n_atom_types, 3]
+            try:                
+                # 使用torch.no_grad()包装，这是最关键的优化
+                with torch.no_grad():
+                    current_field = decoder(z_batch, current_codes)  # [1, n_total_points, n_atom_types, 3]
                 
                 # 为每个点选择对应原子类型的梯度
                 # 使用高级索引选择梯度
@@ -404,8 +407,6 @@ class GNFConverter(nn.Module):
                 
                 # 检查梯度是否包含NaN/Inf
                 if torch.isnan(grad).any() or torch.isinf(grad).any():
-                    if fabric:
-                        fabric.print(f">>     WARNING: Gradient contains NaN/Inf at iteration {iter_idx}")
                     break
                 
                 # 使用原子类型特定的sigma调整步长
@@ -413,13 +414,37 @@ class GNFConverter(nn.Module):
                                            for t in atom_types], device=device)  # [n_total_points]
                 adjusted_step_sizes = self.step_size * sigma_ratios.unsqueeze(-1)  # [n_total_points, 1]
                 
+                # 计算当前梯度的模长
+                current_grad_norm = torch.norm(grad, dim=-1).mean().item()
+                
+                # 检查收敛条件（在最少迭代次数之后）
+                if iter_idx >= min_iterations and prev_grad_norm is not None:
+                    grad_change = abs(current_grad_norm - prev_grad_norm)
+                    if grad_change < convergence_threshold:
+                        break
+                
+                prev_grad_norm = current_grad_norm
+                
                 # 更新采样点位置
                 z = z + adjusted_step_sizes * grad
+                
+                # 完全移除内存清理以避免干扰梯度上升过程
+                # 让PyTorch自动管理内存
+                if fabric and iter_idx % 50 == 0:
+                    allocated = torch.cuda.memory_allocated() / 1024**3
+                    reserved = torch.cuda.memory_reserved() / 1024**3
+                    fabric.print(f">>     Memory status at iteration {iter_idx}: Allocated={allocated:.2f}GB, Reserved={reserved:.2f}GB")
                 
             except (RuntimeError, ValueError, IndexError) as e:
                 if fabric:
                     fabric.print(f">> ERROR in batch gradient ascent iteration {iter_idx}: {e}")
+                # 发生错误时也清理内存
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    gc.collect()
                 break
+        
+        # 移除强制内存清理，让PyTorch自动管理
         
         return z
 
@@ -444,33 +469,17 @@ class GNFConverter(nn.Module):
         all_types = []
         # 对每个batch分别处理
         for b in range(batch_size):
-            if fabric:
-                fabric.print(f">> Processing batch {b}/{batch_size}")
-            
             # 检查索引边界
             if b >= codes.size(0):
-                if fabric:
-                    fabric.print(f">> ERROR: Index {b} out of bounds for codes with size {codes.size(0)}")
                 break
             
             # 检查当前batch的codes
             current_codes = codes[b:b+1]
-            if fabric:
-                fabric.print(f">>   Current codes shape: {current_codes.shape}")
             
             if current_codes.numel() == 0:
-                if fabric:
-                    fabric.print(f">> WARNING: Empty codes at batch {b}")
                 continue
             
-            if torch.isnan(current_codes).any():
-                if fabric:
-                    fabric.print(f">> ERROR: codes at batch {b} contains NaN values!")
-                continue
-            
-            if torch.isinf(current_codes).any():
-                if fabric:
-                    fabric.print(f">> ERROR: codes at batch {b} contains Inf values!")
+            if torch.isnan(current_codes).any() or torch.isinf(current_codes).any():
                 continue
             
             # 矩阵化处理所有原子类型

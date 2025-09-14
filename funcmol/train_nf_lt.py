@@ -108,8 +108,7 @@ def create_training_gnf_converter(config, device="cuda"):
         'sig_mag': method_required_params['sig_mag'],
         'gradient_sampling_candidate_multiplier': required_params['gradient_sampling_candidate_multiplier'],
         'gradient_sampling_temperature': required_params['gradient_sampling_temperature'],
-        'n_atom_types': config["dset"]["n_channels"],
-        'device': device
+        'n_atom_types': config["dset"]["n_channels"]
     }
     
     # Create and return the GNF converter
@@ -390,7 +389,7 @@ def main(config):
     print(f"Available GPUs: {num_gpus}")
     
     # Setup GNF Converter for data processing
-    data_gnf_converter = create_gnf_converter(config, device="cpu")
+    data_gnf_converter = create_gnf_converter(config)
     
     # Create data loaders
     try:

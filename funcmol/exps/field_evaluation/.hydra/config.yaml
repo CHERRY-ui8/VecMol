@@ -17,9 +17,9 @@ dset:
   n_points: 500
   subsampling_ratio: 2
   num_workers: 4
-  batch_size: 64
-  lr_enc: 0.0001
-  lr_dec: 0.0005
+  batch_size: 16
+  lr_enc: 0.0002
+  lr_dec: 0.001
 converter:
   sigma: 1
   n_iter: 1000
@@ -78,19 +78,21 @@ decoder:
   radius: 3
   cutoff: 3
   k_neighbors: 32
-debug: false
-debug_one_mol: false
-debug_subset: false
-wandb: false
+denoiser:
+  use_gnn: true
+  n_hidden_units: 256
+  num_blocks: 4
+  dropout: 0.1
+  k_neighbors: 8
+  cutoff: 5.0
+  radius: 3.0
+  use_radius_graph: true
+max_samples: 2
+split: val
 seed: 1234
-exp_dir: ../exps/neural_field
-exp_name: nf_${dset.dset_name}/${now:%Y%m%d}
-dirname: ${exp_dir}/${exp_name}
-reload_model_path: null
-auto_resume: false
-n_samples: None
-ckpt_every_n_epochs: 10
-n_epochs: 1000
-eval_every: 1
-use_ema: false
-lr_decay: false
+field_mode: denoiser_field
+smooth_sigma: 0.5
+field_methods:
+- tanh
+nf_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20250911/lightning_logs/version_1/checkpoints/model-epoch=39.ckpt
+fm_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20250912/lightning_logs/version_0/checkpoints/funcmol-epoch=319-val_loss=0.0106.ckpt

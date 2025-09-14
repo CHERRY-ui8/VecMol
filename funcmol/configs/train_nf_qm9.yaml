@@ -22,7 +22,7 @@ n_samples: None
 # training params
 ckpt_every_n_epochs: 10  # 每隔多少epoch保存一次ckpt
 n_epochs: 1000
-eval_every: 1
+eval_every: 5
 use_ema: False
 lr_decay: False
 

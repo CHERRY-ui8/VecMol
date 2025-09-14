@@ -124,7 +124,7 @@ def main(config):
     ##############################
     # data loaders
     # 创建GNFConverter实例用于数据加载
-    data_gnf_converter = create_gnf_converter(config, device="cpu")
+    data_gnf_converter = create_gnf_converter(config)
     
     # 为多卡训练设置数据加载器
     loader_train = create_field_loaders(config, data_gnf_converter, split="train", fabric=fabric)

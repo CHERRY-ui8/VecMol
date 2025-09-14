@@ -588,13 +588,12 @@ def create_field_loaders(
         return loader
 
 
-def create_gnf_converter(config: dict, device: str = "cpu") -> GNFConverter:
+def create_gnf_converter(config: dict) -> GNFConverter:
     """
     根据配置创建GNFConverter实例的便捷函数。
     
     Args:
         config (dict): 配置字典，包含gnf_converter相关参数
-        device (str): 设备类型，默认为"cpu"
         
     Returns:
         GNFConverter: 配置好的GNFConverter实例
@@ -693,6 +692,5 @@ def create_gnf_converter(config: dict, device: str = "cpu") -> GNFConverter:
         gradient_clip_threshold=gradient_clip_threshold,
         sig_sf=sig_sf,
         sig_mag=sig_mag,
-        n_atom_types=n_atom_types,  # 添加原子类型数量参数
-        device=device
+        n_atom_types=n_atom_types  # 添加原子类型数量参数
     ) 

@@ -294,7 +294,7 @@ def main(config):
     try:
         if config["on_the_fly"]:
             # Create GNFConverter instance for data loading
-            gnf_converter = create_gnf_converter(config, device="cpu")
+            gnf_converter = create_gnf_converter(config)
             
             loader_train = create_field_loaders(config, gnf_converter, split="train", fabric=dummy_fabric, use_fabric=False)
             loader_val = create_field_loaders(config, gnf_converter, split="val", fabric=dummy_fabric, use_fabric=False)
@@ -393,7 +393,7 @@ def main(config):
     # Configure callbacks
     callbacks = [
         ModelCheckpoint(
-            filename="funcmol-{epoch:02d}-{val_loss:.4f}",
+            filename="model-{epoch:02d}",
             every_n_epochs=config.get("ckpt_every_n_epochs", 10),
             monitor="val_loss",
             mode="min",

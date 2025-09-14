@@ -188,7 +188,7 @@ class EGNNVectorField(nn.Module):
         batch_size = query_points.size(0)
         n_points = query_points.size(1)
         device = query_points.device
-        grid_points = self.grid_points  #.to(device)  # [grid_size**3, 3]
+        grid_points = self.grid_points.to(device)  # [grid_size**3, 3]
         n_grid = grid_points.size(0)
 
         # Flatten query_points immediately

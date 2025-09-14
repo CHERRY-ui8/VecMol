@@ -3,61 +3,36 @@
 defaults:
   - dset: qm9  # 或 drugs
   - converter: gnf_converter_qm9  # 或 gnf_converter_drugs
+  - encoder: gnn  # 添加 encoder 配置
+  - decoder: decoder_global  # 添加 decoder 配置
+  - denoiser: gnn  # 添加 denoiser 配置
   - override hydra/job_logging: custom
   - _self_
 
 # 评估参数
-max_samples: null  # 要评估的样本数量，null表示使用整个数据集，也可以指定具体数量如100
-n_processes: 4    # 并行进程数
+max_samples: 2  # 要评估的样本数量，null表示使用整个数据集，也可以指定具体数量如100
+split: val  # 数据集分割：train/val/test，默认使用val数据集
+seed: 1234  # 随机种子，确保采样结果可重现
 
 # Field模式设置
-field_mode: gt_field  # 'gt_field', 'nf_field', 或 'denoiser_field'
+field_mode: denoiser_field  # 'gt_field', 'nf_field', 或 'denoiser_field'
+
+# FuncMol denoiser 参数
+smooth_sigma: 0.5  # 噪声平滑参数，用于 denoiser_field 模式
 
 # Field方法设置
-field_methods: ['gaussian_mag', 'tanh']  # 要比较的field方法
+field_methods: ['tanh']  # 要比较的field方法，现在已经确定了使用tanh方法
 
 # 模型路径（仅在nf_field或denoiser_field模式下需要）
-model_dir: null  # 例如: exps/neural_field/nf_qm9_20250804_153549_358664
+nf_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20250911/lightning_logs/version_1/checkpoints/model-epoch=39.ckpt
+# 注意：输出目录将基于此路径自动创建，如: exps/neural_field/nf_qm9_20250804_153549_358664
 
 # FuncMol denoiser路径（仅在denoiser_field模式下需要）
-fm_pretrained_path: null  # 例如: exps/funcmol/fm_qm9_20250804_153549_358664
+fm_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20250912/lightning_logs/version_0/checkpoints/funcmol-epoch=319-val_loss=0.0106.ckpt
+# 注意：输出目录将基于此路径自动创建，如: exps/funcmol/fm_qm9_20250804_153549_358664
 
-# 输出设置
-output_dir: exps/field_evaluation
+# Hydra 设置
+hydra:
+  run:
+    dir: exps/field_evaluation
 
-# 可以覆盖数据集参数
-# dset_name: qm9  # 或 drugs
-# data_dir: dataset/data
-# elements: ['C', 'N', 'O', 'F', 'H']  # QM9数据集
-# elements: ['C', 'N', 'O', 'F', 'H', 'S', 'Cl', 'Br']  # Drugs数据集
-
-# 可以覆盖数据加载参数
-# n_points: 2000
-# resolution: 0.25
-# grid_dim: 32
-# atomic_radius: 0.5
-
-# 可以覆盖GNF转换器参数
-# gradient_field_method: tanh
-# n_iter: 2000
-# sigma: 0.5
-# step_size: 0.01
-# eps: 1e-6
-# min_samples: 5
-# temperature: 0.1
-# logsumexp_eps: 1e-8
-# inverse_square_strength: 1.0
-# gradient_clip_threshold: 1.0
-
-# 可以覆盖方法特定配置
-# method_configs:
-#   gaussian_mag:
-#     n_query_points: 1000
-#     step_size: 0.01
-#     sig_sf: 0.5
-#     sig_mag: 0.1
-#   tanh:
-#     n_query_points: 1000
-#     step_size: 0.01
-#     sig_sf: 0.5
-#     sig_mag: 0.1

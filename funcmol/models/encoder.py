@@ -105,8 +105,7 @@ class CrossGraphEncoder(nn.Module):
             atom_feat = atom_feat[:, :self.code_dim]
 
         # 2. 构造 grid 坐标
-        # grid_coords_flat = self.grid_coords.to(device).repeat(B, 1)  # [B*n_grid, 3]
-        grid_coords_flat = self.grid_coords.repeat(B, 1)  # [B*n_grid, 3]
+        grid_coords_flat = self.grid_coords.to(device).repeat(B, 1)  # [B*n_grid, 3]
 
         # 3. 初始化 grid codes 为0
         grid_codes = torch.zeros(B * n_grid, self.code_dim, device=device)  # [B*n_grid, code_dim]

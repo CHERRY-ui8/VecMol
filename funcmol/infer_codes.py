@@ -64,7 +64,7 @@ def main(config):
     enc, _ = load_neural_field(checkpoint, fabric, config)
 
     # 创建GNFConverter实例用于数据加载
-    gnf_converter = create_gnf_converter(config, device="cpu")
+    gnf_converter = create_gnf_converter(config)
     
     # data loader
     loader = create_field_loaders(config, gnf_converter, split=config["split"], fabric=fabric)

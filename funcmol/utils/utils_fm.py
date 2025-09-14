@@ -40,13 +40,34 @@ def load_checkpoint_fm(
     Returns:
         tuple: A tuple containing the loaded model, optimizer (if provided), and the number of epochs trained.
     """
-    checkpoint = fabric.load(os.path.join(pretrained_path, "checkpoint.pth.tar"))
+    # Check if pretrained_path is a .ckpt file (Lightning format) or directory
+    if pretrained_path.endswith('.ckpt'):
+        # Load Lightning checkpoint directly
+        lightning_checkpoint = torch.load(pretrained_path, map_location='cpu', weights_only=False)
+        # Convert Lightning checkpoint format to expected format
+        checkpoint = {
+            "state_dict_ema": lightning_checkpoint["state_dict"],
+            "code_stats": lightning_checkpoint.get("code_stats", {}),
+            "epoch": lightning_checkpoint.get("epoch", 0)
+        }
+    else:
+        # Load from directory with checkpoint.pth.tar
+        checkpoint = fabric.load(os.path.join(pretrained_path, "checkpoint.pth.tar"))
+    
+    # Move model to CPU temporarily for loading, then back to original device
+    original_device = next(model.parameters()).device
+    model = model.cpu()
+    
     if optimizer is not None:
         load_network(checkpoint, model, fabric, is_compile=True, sd="state_dict_ema", net_name="denoiser")
         optimizer.load_state_dict(checkpoint["optimizer"])
+        # Move model back to original device
+        model = model.to(original_device)
         return model, optimizer, checkpoint["code_stats"]
     else:
         load_network(checkpoint, model, fabric, is_compile=True, sd="state_dict_ema", net_name="denoiser")
+        # Move model back to original device
+        model = model.to(original_device)
         fabric.print(f">> loaded model trained for {checkpoint['epoch']} epochs")
         return model, checkpoint["code_stats"]
 

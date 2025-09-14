@@ -64,7 +64,7 @@ def main(config):
 
     if config["on_the_fly"]:
         # 创建GNFConverter实例用于数据加载
-        gnf_converter = create_gnf_converter(config, device="cpu")
+        gnf_converter = create_gnf_converter(config)
         
         loader_train = create_field_loaders(config, gnf_converter, split="train", fabric=fabric)
         loader_val = create_field_loaders(config, gnf_converter, split="val", fabric=fabric) if fabric.global_rank == 0 else None
