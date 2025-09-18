@@ -15,6 +15,9 @@ import hydra
 from funcmol.utils.utils_fm import add_noise_to_code
 from funcmol.utils.utils_nf import load_neural_field, normalize_code
 
+# 设置为cpu
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
 def analyze_real_codes():
     """
     分析真实的neural field encoder输出的codes
