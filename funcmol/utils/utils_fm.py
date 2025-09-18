@@ -144,7 +144,7 @@ def compute_codes(
 def compute_code_stats_offline(
     loader: torch.utils.data.DataLoader,
     split: str,
-    fabric: object,
+    # fabric: object,
     normalize_codes: bool
 ) -> dict:
     """
@@ -160,13 +160,13 @@ def compute_code_stats_offline(
         dict: A dictionary containing the computed code statistics.
     """
     codes = loader.dataset.curr_codes[:]
-    code_stats = process_codes(codes, fabric, split, normalize_codes)
+    code_stats = process_codes(codes, split, normalize_codes)
     return code_stats
 
 
 def process_codes(
     codes: torch.Tensor,
-    fabric: object,
+    # fabric: object,
     split: str,
     normalize_codes: bool,
 ) -> dict:
@@ -184,7 +184,7 @@ def process_codes(
     """
     max, min, mean, std = get_stats(
         codes,
-        fabric=fabric,
+        # fabric=fabric,
         message=f"====codes {split}====",
     )
     code_stats = {
@@ -195,7 +195,7 @@ def process_codes(
         codes = normalize_code(codes, code_stats)
         max_normalized, min_normalized, _, _ = get_stats(
             codes,
-            fabric=fabric,
+            # fabric=fabric,
             message=f"====normalized codes {split}====",
         )
     else:
@@ -209,7 +209,7 @@ def process_codes(
 
 def get_stats(
     codes: torch.Tensor,
-    fabric: object = None,
+    # fabric: object = None,
     message: str = None,
 ):
     """
@@ -229,14 +229,14 @@ def get_stats(
             - (optional) codes (torch.Tensor): The filtered codes if `is_filter` is True.
     """
     if message is not None:
-        fabric.print(message)
+        print(message)
     max = codes.max()
     min = codes.min()
     mean = codes.mean()
     std = codes.std()
-    fabric.print(f"min: {min.item()}")
-    fabric.print(f"max: {max.item()}")
-    fabric.print(f"mean: {mean.item()}")
-    fabric.print(f"std: {std.item()}")
-    fabric.print(f"codes size: {codes.shape}")
+    print(f"min: {min.item()}")
+    print(f"max: {max.item()}")
+    print(f"mean: {mean.item()}")
+    print(f"std: {std.item()}")
+    print(f"codes size: {codes.shape}")
     return max, min, mean, std

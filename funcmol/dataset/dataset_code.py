@@ -78,7 +78,7 @@ class CodeDataset(Dataset):
 def create_code_loaders(
     config: dict,
     split: str = None,
-    fabric = None,
+    # fabric = None,
 ):
     """
     Creates and returns a DataLoader for the specified dataset split.
@@ -122,6 +122,7 @@ def create_code_loaders(
         pin_memory=True,
         drop_last=True,
     )
-    fabric.print(f">> {split} set size: {len(dset)}")
+    # fabric.print(f">> {split} set size: {len(dset)}")
+    print(f">> {split} set size: {len(dset)}")
 
-    return fabric.setup_dataloaders(loader, use_distributed_sampler=(split == "train"))
+    return loader # fabric.setup_dataloaders(loader, use_distributed_sampler=(split == "train"))

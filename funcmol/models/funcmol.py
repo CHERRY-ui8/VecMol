@@ -64,15 +64,13 @@ class FuncMol(nn.Module):
             self.net = GNNDenoiser(
                 code_dim=config["decoder"]["code_dim"],
                 hidden_dim=config["denoiser"]["n_hidden_units"],
-                num_blocks=config["denoiser"]["num_blocks"],
-                k_neighbors=config["denoiser"]["k_neighbors"],
+                num_layers=config["denoiser"]["num_blocks"],
                 cutoff=config["denoiser"]["cutoff"],
                 radius=config["denoiser"]["radius"],
                 dropout=config["denoiser"]["dropout"],
                 grid_size=config["dset"]["grid_size"],
                 anchor_spacing=config["dset"]["anchor_spacing"],
-                use_radius_graph=config["denoiser"]["use_radius_graph"],
-                device=self.device
+                use_radius_graph=config["denoiser"]["use_radius_graph"]
             )
         else:
             # 使用MLP denoiser (默认)

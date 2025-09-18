@@ -133,7 +133,6 @@ class EGNNVectorField(nn.Module):
         self.grid_size = grid_size
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
-        # self.radius = radius  # 注释掉radius参数
         self.radius = radius  # 保留但不使用
         self.n_atom_types = n_atom_types
         self.code_dim = code_dim

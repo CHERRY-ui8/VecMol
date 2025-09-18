@@ -1418,42 +1418,6 @@ def load_config(config_name: str = "train_nf_qm9") -> OmegaConf:
     
     return config
 
-def load_model(fabric: Fabric, config: OmegaConf, model_path: str) -> Tuple[torch.nn.Module, torch.nn.Module]:
-    """加载预训练模型。
-
-    Args:
-        fabric: Fabric 实例
-        config: 配置对象
-        model_path: Lightning checkpoint 文件完整路径（如：/path/to/model-epoch=09.ckpt）
-
-    Returns:
-        Tuple[encoder, decoder]，编码器和解码器模型
-    """
-    model_path = Path(model_path)
-    if not model_path.exists():
-        raise FileNotFoundError(f"Model file not found: {model_path}")
-    
-    print(f"Loading Lightning checkpoint from: {model_path}")
-    enc, dec = create_neural_field(config, fabric)
-    
-    if hasattr(enc, '_orig_mod'):
-        enc = enc._orig_mod
-    if hasattr(dec, '_orig_mod'):
-        dec = dec._orig_mod
-    
-    # 加载 Lightning checkpoint
-    checkpoint = torch.load(str(model_path), map_location='cpu', weights_only=False)
-    
-    # 从 Lightning checkpoint 中提取状态字典
-    enc_state_dict = checkpoint["enc_state_dict"]
-    dec_state_dict = checkpoint["dec_state_dict"]
-
-    enc.load_state_dict(enc_state_dict)
-    dec.load_state_dict(dec_state_dict)
-
-    print("Model loaded successfully!")
-    
-    return enc, dec
 
 def create_converter(config: OmegaConf, device: torch.device) -> GNFConverter:
     """创建 GNF 转换器。
@@ -1618,57 +1582,3 @@ def prepare_data_with_sample_idx(fabric: Fabric, config: OmegaConf, device: torc
             return batch, coords[sample_in_batch:sample_in_batch+1], atoms_channel[sample_in_batch:sample_in_batch+1]
     
     raise IndexError(f"Sample index {sample_idx} is out of bounds for validation set")
-
-
-def visualize_single_molecule(coords: torch.Tensor, 
-                             types: torch.Tensor,
-                             save_path: str,
-                             title: str = "Generated Molecule",
-                             figsize: tuple = (8, 6)) -> str:
-    """可视化单个分子（用于denoiser_field模式）
-    
-    Args:
-        coords: 分子坐标，形状 [N, 3]
-        types: 原子类型，形状 [N]
-        save_path: 保存路径
-        title: 图像标题
-        figsize: 图像大小
-        
-    Returns:
-        保存的文件路径
-    """
-    # 创建图像
-    fig = plt.figure(figsize=figsize)
-    ax = fig.add_subplot(111, projection='3d')
-    
-    # 转换数据
-    coords_np = coords.detach().cpu().numpy()
-    types_np = types.detach().cpu().numpy()
-    
-    # 原子颜色映射
-    atom_colors = ['#C0C0C0', '#FFFFFF', '#FF0000', '#0000FF', '#FFFF00']  # C, H, O, N, F
-    atom_names = ['C', 'H', 'O', 'N', 'F']
-    
-    # 绘制每种原子类型
-    for atom_type in range(5):
-        mask = (types_np == atom_type)
-        if mask.sum() > 0:
-            ax.scatter(coords_np[mask, 0], coords_np[mask, 1], coords_np[mask, 2], 
-                      c=atom_colors[atom_type], marker='o', s=100, 
-                      label=f'{atom_names[atom_type]} ({mask.sum()})', alpha=0.8)
-    
-    # 设置标签和标题
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_zlabel('Z')
-    ax.set_title(title)
-    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-    
-    # 调整布局
-    plt.tight_layout()
-    
-    # 保存图像
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    return save_path

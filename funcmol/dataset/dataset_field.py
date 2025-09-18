@@ -352,7 +352,7 @@ class FieldDataset(Dataset):
             rand_points = coords
             # 添加小的噪声，噪声大小应该与网格分辨率相关
             noise = torch.randn_like(rand_points, device=device) * self.resolution / 4  # Scale noise by resolution
-            rand_points = (rand_points + noise)  # .floor().long() TODO：如果这里floor()再long()，会全部变成-1,0,1
+            rand_points = (rand_points + noise)  # .floor().long() NOTE：如果这里floor()再long()，会全部变成-1,0,1
             
             # 计算每个原子周围需要采样的点数
             points_per_atom = max(1, (self.n_points // coords.size(0)) // self.targeted_sampling_ratio)
@@ -522,7 +522,7 @@ def create_field_loaders(
     config: dict,
     gnf_converter: GNFConverter,  # 接收GNFConverter实例
     split: str = "train",
-    fabric = Fabric(),
+    # fabric = Fabric(),
     n_samples = None,
     sample_full_grid = False,
     use_fabric=True,

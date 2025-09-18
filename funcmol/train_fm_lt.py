@@ -82,11 +82,22 @@ class FuncmolLightningModule(pl.LightningModule):
         # Initialize EMA model
         with torch.no_grad():
             self.funcmol_ema = ModelEma(self.funcmol, decay=config["ema_decay"])
+
+        self._freeze_nf()
         
-        # Track losses for plotting
+        # Track losses for plotting # TODO: remove these
         self.train_losses = []
         self.val_losses = []
         self.best_loss = float("inf")
+
+    def _freeze_nf(self):
+        """Freeze the neural field"""
+        if self.enc is not None:
+            for param in self.enc.parameters():
+                param.requires_grad = False
+        if self.dec_module is not None:
+            for param in self.dec_module.parameters():
+                param.requires_grad = False
         
     def _process_batch(self, batch):
         """
@@ -107,7 +118,8 @@ class FuncmolLightningModule(pl.LightningModule):
         else:
             codes = normalize_code(batch, self.code_stats)
         
-        smooth_codes = add_noise_to_code(codes, smooth_sigma=self.config["smooth_sigma"])
+        with torch.no_grad():
+            smooth_codes = add_noise_to_code(codes, smooth_sigma=self.config["smooth_sigma"])
         
         return codes, smooth_codes
     
@@ -150,6 +162,61 @@ class FuncmolLightningModule(pl.LightningModule):
                  on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         
         return loss
+    
+    # ############# function for debug ##############
+    # def on_before_optimizer_step(self, optimizer):
+    #     """Print gradient norm before clipping"""
+    #     # Calculate total gradient norm
+    #     total_norm = 0.0
+    #     for param in self.parameters():
+    #         if param.grad is not None:
+    #             param_norm = param.grad.data.norm(2)
+    #             total_norm += param_norm.item() ** 2
+    #     total_norm = total_norm ** (1. / 2)
+        
+    #     # Print gradient info every 10 steps
+    #     if self.global_step % 10 == 0:
+    #         print(f"Step {self.global_step}: Gradient norm before clipping = {total_norm:.6f}")
+    
+    # ############# function for debug ############## 
+    # def on_after_backward(self):
+    #     """Print gradient norm after backward pass"""
+    #     # Print gradient info every 20 steps
+    #     if self.global_step % 20 == 0:
+    #         total_norm = 0.0
+    #         for param in self.parameters():
+    #             if param.grad is not None:
+    #                 param_norm = param.grad.data.norm(2)
+    #                 total_norm += param_norm.item() ** 2
+    #         total_norm = total_norm ** (1. / 2)
+    #         print(f"Step {self.global_step}: Gradient norm after backward = {total_norm:.6f}")
+    
+    def on_before_optimizer_step(self, optimizer):
+        """Print gradient norm before clipping"""
+        # Calculate total gradient norm
+        total_norm = 0.0
+        for param in self.parameters():
+            if param.grad is not None:
+                param_norm = param.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+        total_norm = total_norm ** (1. / 2)
+        
+        # Print gradient info every 10 steps
+        if self.global_step % 10 == 0:
+            print(f"Step {self.global_step}: Gradient norm before clipping = {total_norm:.6f}")
+    
+    ############# function for debug ############## 
+    def on_after_backward(self):
+        """Print gradient norm after backward pass"""
+        # Print gradient info every 20 steps
+        if self.global_step % 20 == 0:
+            total_norm = 0.0
+            for param in self.parameters():
+                if param.grad is not None:
+                    param_norm = param.grad.data.norm(2)
+                    total_norm += param_norm.item() ** 2
+            total_norm = total_norm ** (1. / 2)
+            print(f"Step {self.global_step}: Gradient norm after backward = {total_norm:.6f}")
     
     def on_train_epoch_start(self):
         """Called at the beginning of training epoch"""
@@ -207,9 +274,14 @@ class FuncmolLightningModule(pl.LightningModule):
         if iteration < self.config["num_warmup_iter"]:
             return float((iteration + 1) / self.config["num_warmup_iter"])
         else:
-            # Decay proportionally with the square root of the iteration
-            lr_ratio = 1 - (iteration - self.config["num_warmup_iter"] + 1) / (self.config["num_iterations"] - self.config["num_warmup_iter"] + 1)
-            return lr_ratio ** 0.5
+            # NOTE：Use a more conservative decay strategy
+            # Calculate the progress within the training
+            total_iterations = self.config.get("num_iterations", 50000)
+            progress = iteration / total_iterations
+            
+            # Linear decay from 1.0 to 0.1 over the course of training
+            lr_ratio = 1.0 - 0.9 * progress
+            return max(lr_ratio, 0.1)  # Minimum learning rate ratio of 0.1
     
     def on_save_checkpoint(self, checkpoint):
         """Custom checkpoint saving logic"""
@@ -261,16 +333,16 @@ def main(config):
     # Extract config from checkpoint
     nf_config = checkpoint.get("hyper_parameters", {})
     
-    # Create a minimal dummy fabric object for compatibility with data loaders
-    class DummyFabric:
-        def print(self, msg):
-            print(msg)
-        def all_gather(self, tensor):
-            return tensor
-        def setup_dataloaders(self, loader, use_distributed_sampler=True):
-            return loader
+    # # Create a minimal dummy fabric object for compatibility with data loaders
+    # class DummyFabric:  # TODO: remove fabric
+    #     def print(self, msg):
+    #         print(msg)
+    #     def all_gather(self, tensor):
+    #         return tensor
+    #     def setup_dataloaders(self, loader, use_distributed_sampler=True):
+    #         return loader
     
-    dummy_fabric = DummyFabric()
+    # dummy_fabric = DummyFabric()
     
     # Create a checkpoint dict in the format expected by load_neural_field
     nf_checkpoint = {
@@ -296,8 +368,8 @@ def main(config):
             # Create GNFConverter instance for data loading
             gnf_converter = create_gnf_converter(config)
             
-            loader_train = create_field_loaders(config, gnf_converter, split="train", fabric=dummy_fabric, use_fabric=False)
-            loader_val = create_field_loaders(config, gnf_converter, split="val", fabric=dummy_fabric, use_fabric=False)
+            loader_train = create_field_loaders(config, gnf_converter, split="train", use_fabric=False)
+            loader_val = create_field_loaders(config, gnf_converter, split="val", use_fabric=False)
             
             # Handle cases where loaders are returned as lists
             if isinstance(loader_train, list) and len(loader_train) > 0:
@@ -311,8 +383,8 @@ def main(config):
                 code_stats=None
             )
         else:
-            loader_train = create_code_loaders(config, split="train", fabric=dummy_fabric)
-            loader_val = create_code_loaders(config, split="val", fabric=dummy_fabric)
+            loader_train = create_code_loaders(config, split="train")
+            loader_val = create_code_loaders(config, split="val")
             
             # Handle cases where loaders are returned as lists
             if isinstance(loader_train, list) and len(loader_train) > 0:
@@ -320,7 +392,7 @@ def main(config):
             if isinstance(loader_val, list) and len(loader_val) > 0:
                 loader_val = loader_val[0]
             
-            code_stats = compute_code_stats_offline(loader_train, "train", dummy_fabric, config["normalize_codes"])
+            code_stats = compute_code_stats_offline(loader_train, "train", config["normalize_codes"])
         
         # Check if loaders are empty
         if not loader_train or len(loader_train) == 0:
@@ -423,6 +495,7 @@ def main(config):
         # Use built-in gradient clipping
         gradient_clip_val=config.get("max_grad_norm", 1.0),
         gradient_clip_algorithm="norm",
+        # overfit_batches=1, TODO：可以通过修改这里，开启调试模式
     )
     
     # Train the model

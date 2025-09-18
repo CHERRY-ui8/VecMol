@@ -44,7 +44,7 @@ class SimpleSamplingMetrics:
         all_smiles = []
         error_message = Counter()
         
-        for mol in generated:
+        for i, mol in enumerate(generated):
             rdmol = mol.rdkit_mol
             if rdmol is not None:
                 try:
@@ -58,12 +58,38 @@ class SimpleSamplingMetrics:
                     valid.append(smiles)
                     all_smiles.append(smiles)
                     error_message[-1] += 1
-                except Chem.rdchem.AtomValenceException:
+                    print(f"分子 {i+1}: 有效SMILES = {smiles}")
+                except Chem.rdchem.AtomValenceException as e:
                     error_message[1] += 1
-                except Chem.rdchem.KekulizeException:
+                    print(f"分子 {i+1}: AtomValence错误 - {e}")
+                    # 即使无效也尝试获取SMILES
+                    try:
+                        invalid_smiles = Chem.MolToSmiles(rdmol, sanitize=False)
+                        all_smiles.append(f"INVALID_AtomValence: {invalid_smiles}")
+                        print(f"分子 {i+1}: 无效SMILES = {invalid_smiles}")
+                    except:
+                        all_smiles.append(f"INVALID_AtomValence: 无法生成SMILES")
+                except Chem.rdchem.KekulizeException as e:
                     error_message[2] += 1
-                except (Chem.rdchem.AtomKekulizeException, ValueError):
+                    print(f"分子 {i+1}: Kekulize错误 - {e}")
+                    try:
+                        invalid_smiles = Chem.MolToSmiles(rdmol, sanitize=False)
+                        all_smiles.append(f"INVALID_Kekulize: {invalid_smiles}")
+                        print(f"分子 {i+1}: 无效SMILES = {invalid_smiles}")
+                    except:
+                        all_smiles.append(f"INVALID_Kekulize: 无法生成SMILES")
+                except (Chem.rdchem.AtomKekulizeException, ValueError) as e:
                     error_message[3] += 1
+                    print(f"分子 {i+1}: 其他错误 - {e}")
+                    try:
+                        invalid_smiles = Chem.MolToSmiles(rdmol, sanitize=False)
+                        all_smiles.append(f"INVALID_Other: {invalid_smiles}")
+                        print(f"分子 {i+1}: 无效SMILES = {invalid_smiles}")
+                    except:
+                        all_smiles.append(f"INVALID_Other: 无法生成SMILES")
+            else:
+                print(f"分子 {i+1}: RDKit分子对象为None")
+                all_smiles.append(f"INVALID_NoRDKit: 无法构建RDKit分子")
         
         print(f"Error messages: AtomValence {error_message[1]}, Kekulize {error_message[2]}, other {error_message[3]}, "
               f" -- No error {error_message[-1]}")
@@ -616,10 +642,12 @@ def open_babel_eval(file: str = None):
 
 
 if __name__ == "__main__":
-    # 检查是否提供了生成分子目录
+    # 默认评估FuncMol生成的分子
     import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "--evaluate-generated":
+    if len(sys.argv) > 1 and sys.argv[1] == "--openbabel":
+        # 如果指定了--openbabel参数，则评估OpenBabel分子
+        open_babel_eval(file=None)
+    else:
+        # 默认评估FuncMol生成的分子
         molecule_dir = "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20250912/molecule"
         evaluate_generated_molecules(molecule_dir)
-    else:
-        open_babel_eval(file=None)

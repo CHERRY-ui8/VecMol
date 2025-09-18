@@ -111,24 +111,23 @@ hydra:
   overrides:
     hydra:
     - hydra.run.dir="/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/funcmol"
-    - hydra.job.name=train_ddp_process_3
+    - hydra.job.name=train_ddp_process_4
     - hydra.mode=RUN
     task: []
   job:
-    name: train_ddp_process_3
+    name: train_ddp_process_4
     chdir: null
     override_dirname: ''
     id: ???
     num: ???
-    config_name: train_nf_drugs
+    config_name: train_nf_qm9
     env_set: {}
     env_copy: []
     config:
       override_dirname:
-        kv_sep: ''
-        item_sep: _
-        exclude_keys:
-        - exp_dir
+        kv_sep: '='
+        item_sep: ','
+        exclude_keys: []
   runtime:
     version: 1.3.2
     version_base: '1.3'
@@ -147,8 +146,8 @@ hydra:
     choices:
       decoder: decoder_global
       encoder: gnn
-      converter: gnf_converter_drugs
-      dset: drugs
+      converter: gnf_converter_qm9
+      dset: qm9
       hydra/env: default
       hydra/callbacks: null
       hydra/job_logging: custom

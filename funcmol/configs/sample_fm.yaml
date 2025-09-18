@@ -1,22 +1,27 @@
 defaults:
-  - wjs: wjs_sampling
+  - dset: qm9  # 或 drugs
+  - converter: gnf_converter_qm9  # 或 gnf_converter_drugs
+  - encoder: gnn  # 添加 encoder 配置
+  - decoder: decoder_global  # 添加 decoder 配置
+  - denoiser: gnn  # 添加 denoiser 配置
   - override hydra/job_logging: custom
   - _self_
 
-debug: False
-wandb: False
-seed: 1234
-exp_dir: ../exps/funcmol
-fm_pretrained_path: ../exps/funcmol/fm_qm9
-dirname: ${fm_pretrained_path}/eval_s${wjs.steps_wjs}_ms${wjs.max_steps_wjs}
+fm_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20250917/lightning_logs/version_22/checkpoints/model-epoch=144.ckpt
+
+dirname: ../exps/funcmol/fm_qm9/20250912
+
+# 生成参数
+max_samples: 2  # 要生成的分子数量
+field_methods: ['tanh']  # 要使用的field方法
+
+# FuncMol denoiser 参数（必须）
+smooth_sigma: 0.5
+
+# 模型路径
+nf_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20250911/lightning_logs/version_1/checkpoints/model-epoch=39.ckpt
 
 # set the running dir
 hydra:
   run:
     dir: ${dirname}
-  job:
-    config:
-      override_dirname:
-        kv_sep: ""
-        item_sep: "_"
-        exclude_keys: ["exp_dir"]

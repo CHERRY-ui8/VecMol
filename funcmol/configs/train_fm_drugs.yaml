@@ -18,7 +18,7 @@ dirname: "${exp_dir}/${exp_name}"
 reload_model_path: null
 
 # data params
-smooth_sigma: 1.
+smooth_sigma: 0.5
 normalize_codes: 1
 on_the_fly: True  # use False if codes are computed offline.
 codes_dir: "${nf_pretrained_path}/codes/"

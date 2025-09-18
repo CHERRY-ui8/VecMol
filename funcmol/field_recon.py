@@ -43,7 +43,8 @@ from scipy.optimize import linear_sum_assignment
 import hydra
 from omegaconf import DictConfig, OmegaConf
 from lightning import Fabric
-from funcmol.utils.gnf_visualizer import create_gnf_converter, load_model
+from funcmol.utils.gnf_visualizer import create_gnf_converter
+from funcmol.utils.utils_nf import load_neural_field
 from funcmol.dataset.dataset_field import FieldDataset
 from funcmol.models.funcmol import create_funcmol
 from funcmol.utils.utils_fm import load_checkpoint_fm
@@ -200,7 +201,7 @@ def main(config: DictConfig) -> None:
     if field_mode == 'nf_field':
         if config.get("nf_pretrained_path") is None:
             raise ValueError("nf_pretrained_path must be specified for nf_field mode")
-        encoder, decoder = load_model(fabric, config, config["nf_pretrained_path"])
+        encoder, decoder = load_neural_field(config["nf_pretrained_path"], fabric, config)
         print("Loaded neural field encoder/decoder")
         
         # 移动模型到GPU并设置为评估模式
@@ -212,7 +213,7 @@ def main(config: DictConfig) -> None:
         # Load neural field encoder/decoder for denoiser input/output
         if config.get("nf_pretrained_path") is None:
             raise ValueError("nf_pretrained_path must be specified for denoiser_field mode")
-        encoder, decoder = load_model(fabric, config, config["nf_pretrained_path"])
+        encoder, decoder = load_neural_field(config["nf_pretrained_path"], fabric, config)
         
         # 移动模型到GPU并设置为评估模式
         encoder = encoder.cuda()

@@ -27,20 +27,24 @@ codes_dir: "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield
 
 # training params
 num_epochs: 50000
+num_iterations: 50000  # 总迭代次数，用于学习率调度
 dset:
-  batch_size: 32
+  batch_size: 8
 ckpt_every_n_epochs: 5  # 每隔多少epoch保存一次ckpt
 decoder:
-  code_dim: 128
+  code_dim: 128 # 和encoder的code_dim一致
 num_augmentations: null
 
 # optim params
-lr: 1e-4
-use_lr_schedule: 0 # 0-NOT use lr schedule, 1-use lr schedule
-num_warmup_iter: 4000
-wd: 1e-2 # NOTE: smaller
-ema_decay: 0.999
-max_grad_norm: 1.0
+lr: 1e-3
+# use_lr_schedule: 1 # 0-NOT use lr schedule, 1-use lr schedule
+use_lr_schedule: 0 # 暂时禁用学习率调度，使用固定学习率
+# num_warmup_iter: 4000
+num_warmup_iter: 1000  # 减少预热步数
+wd: 1e-4
+# ema_decay: 0.999
+ema_decay: 0.999  # 启用EMA
+max_grad_norm: 0.5  # 0.5，1
 
 # set the running dir
 hydra:

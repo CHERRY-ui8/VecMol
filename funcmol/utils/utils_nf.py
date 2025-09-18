@@ -638,12 +638,17 @@ def auto_load_latest_checkpoint(
 
 
 
-def load_neural_field(nf_checkpoint: dict, fabric: object, config: dict = None) -> tuple:
+# TODO: 
+def load_neural_field(nf_checkpoint_or_path, fabric: object, config: dict = None) -> tuple:
     """
     Load and initialize the neural field encoder and decoder from a Lightning checkpoint.
+    
+    This function supports two calling patterns:
+    1. load_neural_field(nf_checkpoint, fabric, config) - original pattern
+    2. load_neural_field(model_path, fabric, config) - new pattern from load_model
 
     Args:
-        nf_checkpoint (dict): The Lightning checkpoint containing the saved state of the neural field model.
+        nf_checkpoint_or_path: Either a dict containing the checkpoint data, or a string path to a .ckpt file.
         fabric (object): The fabric object used for setting up the modules (can be Lightning module or Fabric).
         config (dict, optional): Configuration dictionary for initializing the encoder and decoder.
                                  If None, the configuration from the checkpoint will be used.
@@ -651,6 +656,30 @@ def load_neural_field(nf_checkpoint: dict, fabric: object, config: dict = None) 
     Returns:
         tuple: A tuple containing the initialized encoder and decoder modules.
     """
+    # Handle model_path string input (from load_model functionality)
+    if isinstance(nf_checkpoint_or_path, str):
+        model_path = Path(nf_checkpoint_or_path)
+        if not model_path.exists():
+            raise FileNotFoundError(f"Model file not found: {model_path}")
+        
+        print(f"Loading Lightning checkpoint from: {model_path}")
+        
+        # Load Lightning checkpoint
+        checkpoint = torch.load(str(model_path), map_location='cpu', weights_only=False)
+        
+        # Extract config from checkpoint if not provided
+        if config is None:
+            config = checkpoint.get('hyper_parameters', {})
+        
+        # Create nf_checkpoint in expected format
+        nf_checkpoint = {
+            'enc_state_dict': checkpoint["enc_state_dict"],
+            'dec_state_dict': checkpoint["dec_state_dict"],
+            'config': config
+        }
+    else:
+        # Original nf_checkpoint dict input
+        nf_checkpoint = nf_checkpoint_or_path
     # 处理Lightning checkpoint格式
     if 'state_dict' in nf_checkpoint:
         # Lightning checkpoint格式
@@ -684,6 +713,7 @@ def load_neural_field(nf_checkpoint: dict, fabric: object, config: dict = None) 
             config = nf_checkpoint["config"]
     
     # Initialize the decoder
+    enc, dec = create_neural_field(config, fabric)  # TODO: fix me
     dec = Decoder({
         "grid_size": config["dset"]["grid_size"],
         "anchor_spacing": config["dset"]["anchor_spacing"],
@@ -715,12 +745,19 @@ def load_neural_field(nf_checkpoint: dict, fabric: object, config: dict = None) 
     # enc = torch.compile(enc)
     enc.eval()
 
+    # Handle _orig_mod (from load_model functionality)
+    if hasattr(enc, '_orig_mod'):
+        enc = enc._orig_mod
+    if hasattr(dec, '_orig_mod'):
+        dec = dec._orig_mod
+
     # Handle both Lightning module and Fabric
     if hasattr(fabric, 'setup_module'):
         dec = fabric.setup_module(dec)
         enc = fabric.setup_module(enc)
     # For Lightning modules, we don't need setup_module as Lightning handles device placement
 
+    print("Model loaded successfully!")
     return enc, dec
 
 

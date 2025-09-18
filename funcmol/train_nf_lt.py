@@ -359,8 +359,8 @@ class NeuralFieldLightningModule(pl.LightningModule):
         return items
 
 
-# @hydra.main(config_path="configs", config_name="train_nf_qm9", version_base=None)
-@hydra.main(config_path="configs", config_name="train_nf_drugs", version_base=None)
+@hydra.main(config_path="configs", config_name="train_nf_qm9", version_base=None)
+# @hydra.main(config_path="configs", config_name="train_nf_drugs", version_base=None)
 def main_hydra(config):
     """Entry point for Hydra configuration system"""
     main(config)
