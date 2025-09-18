@@ -2,12 +2,11 @@ import torch
 import torch.nn as nn
 from torch_scatter import scatter
 from torch_scatter import scatter
-from torch_geometric.nn import MessagePassing, knn_graph, radius_graph
+from torch_geometric.nn import MessagePassing, radius_graph
 from funcmol.models.encoder import create_grid_coords
 
 
 class EGNNDenoiserLayer(MessagePassing):
-    def __init__(self, in_channels, hidden_channels, out_channels, cutoff=None, radius=None):
     def __init__(self, in_channels, hidden_channels, out_channels, cutoff=None, radius=None):
         super().__init__(aggr='mean')
         self.in_channels = in_channels
@@ -33,14 +32,8 @@ class EGNNDenoiserLayer(MessagePassing):
         
         # 添加LayerNorm层
         self.norm = nn.LayerNorm(out_channels)
-        
-        # 添加LayerNorm层
-        self.norm = nn.LayerNorm(out_channels)
 
     def forward(self, x, h, edge_index):
-        # LayerNorm + EGNN层
-        h = self.norm(h)
-        
         # LayerNorm + EGNN层
         h = self.norm(h)
         
@@ -72,12 +65,8 @@ class EGNNDenoiserLayer(MessagePassing):
         m_aggr = scatter(m_ij, edge_index[1], dim=0, dim_size=h.size(0), reduce='mean')
         h_delta = self.node_mlp(torch.cat([h, m_aggr], dim=-1))
         h = h + h_delta  # 残差连接
-        h = h + h_delta  # 残差连接
         
         return h
-
-    def message(self, message_j):  
-        return message_j
 
     def message(self, message_j):  
         return message_j
@@ -85,13 +74,11 @@ class EGNNDenoiserLayer(MessagePassing):
 
 class GNNDenoiser(nn.Module):
     def __init__(self, code_dim=1024, hidden_dim=128, num_layers=4, 
-    def __init__(self, code_dim=1024, hidden_dim=128, num_layers=4, 
                  cutoff=None, radius=None, dropout=0.1, grid_size=8, 
                  anchor_spacing=2.0, use_radius_graph=True, device=None):
         super().__init__()
         self.code_dim = code_dim
         self.hidden_dim = hidden_dim
-        self.num_blocks = num_layers
         self.num_blocks = num_layers
         self.cutoff = cutoff
         self.radius = radius
@@ -107,19 +94,11 @@ class GNNDenoiser(nn.Module):
         self.input_projection = nn.Linear(code_dim, hidden_dim)
         
         # GNN Layers (now integrated with residual blocks)
-        # GNN Layers (now integrated with residual blocks)
         self.blocks = nn.ModuleList([
             EGNNDenoiserLayer(
                 in_channels=hidden_dim,
                 hidden_channels=hidden_dim,
                 out_channels=hidden_dim,
-            EGNNDenoiserLayer(
-                in_channels=hidden_dim,
-                hidden_channels=hidden_dim,
-                out_channels=hidden_dim,
-                cutoff=cutoff,
-                radius=radius
-            ) for _ in range(num_layers)
                 radius=radius
             ) for _ in range(num_layers)
         ])
@@ -135,29 +114,7 @@ class GNNDenoiser(nn.Module):
                                device='cpu', 
                                anchor_spacing=self.anchor_spacing
                            ).squeeze(0))  # [n_grid, 3]
-        # 预创建网格坐标（在__init__中）
-        self.register_buffer('grid_coords', 
-                           create_grid_coords(
-                               batch_size=1, 
-                               grid_size=self.grid_size, 
-                               device='cpu', 
-                               anchor_spacing=self.anchor_spacing
-                           ).squeeze(0))  # [n_grid, 3]
         
-        self._init_weights()
-
-    def _init_weights(self):
-        for module in self.modules():
-            if isinstance(module, nn.Linear):
-                # 使用更合适的初始化方法
-                nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
-            elif isinstance(module, nn.LayerNorm):
-                nn.init.ones_(module.weight)
-                nn.init.zeros_(module.bias)
-
-
     def forward(self, y):
         # 处理输入维度 - 现在只支持3D输入 [batch_size, n_grid, code_dim]
         if y.dim() == 4:  # (batch_size, 1, n_grid, code_dim)
@@ -169,7 +126,6 @@ class GNNDenoiser(nn.Module):
         
         batch_size = y.size(0)
         n_grid = y.size(1)
-        expected_n_grid = self.grid_size ** 3
         
         # 构建图 - 直接在这里实现
         # 使用预创建的网格坐标
@@ -189,7 +145,6 @@ class GNNDenoiser(nn.Module):
             r=self.radius,
             batch=grid_batch
         )
-        expected_n_grid = self.grid_size ** 3
         
         # 构建图 - 直接在这里实现
         # 使用预创建的网格坐标
@@ -214,7 +169,6 @@ class GNNDenoiser(nn.Module):
         h = self.input_projection(y)  # (batch_size, n_grid, hidden_dim)
         h = h.reshape(-1, self.hidden_dim)  # (batch_size * n_grid, hidden_dim)
         
-        # 通过GNN块
         # 通过GNN块
         for block in self.blocks:
             h = block(grid_coords, h, edge_index)

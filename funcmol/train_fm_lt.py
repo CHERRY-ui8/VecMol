@@ -191,33 +191,6 @@ class FuncmolLightningModule(pl.LightningModule):
     #         total_norm = total_norm ** (1. / 2)
     #         print(f"Step {self.global_step}: Gradient norm after backward = {total_norm:.6f}")
     
-    def on_before_optimizer_step(self, optimizer):
-        """Print gradient norm before clipping"""
-        # Calculate total gradient norm
-        total_norm = 0.0
-        for param in self.parameters():
-            if param.grad is not None:
-                param_norm = param.grad.data.norm(2)
-                total_norm += param_norm.item() ** 2
-        total_norm = total_norm ** (1. / 2)
-        
-        # Print gradient info every 10 steps
-        if self.global_step % 10 == 0:
-            print(f"Step {self.global_step}: Gradient norm before clipping = {total_norm:.6f}")
-    
-    ############# function for debug ############## 
-    def on_after_backward(self):
-        """Print gradient norm after backward pass"""
-        # Print gradient info every 20 steps
-        if self.global_step % 20 == 0:
-            total_norm = 0.0
-            for param in self.parameters():
-                if param.grad is not None:
-                    param_norm = param.grad.data.norm(2)
-                    total_norm += param_norm.item() ** 2
-            total_norm = total_norm ** (1. / 2)
-            print(f"Step {self.global_step}: Gradient norm after backward = {total_norm:.6f}")
-    
     def on_train_epoch_start(self):
         """Called at the beginning of training epoch"""
         # Set model to training mode
@@ -379,7 +352,7 @@ def main(config):
             
             # Compute codes for normalization
             _, code_stats = compute_codes(
-                loader_train, enc, config_nf, "train", dummy_fabric, config["normalize_codes"],
+                loader_train, enc, config_nf, "train", None, config["normalize_codes"],
                 code_stats=None
             )
         else:
