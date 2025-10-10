@@ -11,6 +11,28 @@ defaults:
 debug: False
 wandb: True
 seed: 1234
+
+diffusion_method: "new"  # "old" (WJS) 或 "new" (DDPM)
+
+# DDPM配置（仅当diffusion_method为"new"时使用）
+ddpm:
+  # 模型配置
+  hidden_dim: 128
+  num_layers: 4
+  time_emb_dim: 64
+  dropout: 0.1
+  
+  # 扩散过程配置
+  beta_start: 1e-4
+  beta_end: 0.02
+  num_timesteps: 1000
+  schedule: "linear"  # 可选: "linear", "cosine", "sigmoid"
+  
+  # Sigmoid调度参数（仅当schedule为"sigmoid"时使用）
+  s1: 0.008
+  sT: 0.008
+  w: 1.0
+  
 nf_pretrained_path: ../exps/neural_field/nf_drugs
 exp_dir: ../exps/funcmol
 exp_name: "fm_${dset.dset_name}/${now:%Y%m%d}" # NOTE: in lightning, no time stamp needed

@@ -116,7 +116,7 @@ def main(config: DictConfig) -> None:
     # 初始化CSV文件
     csv_path = output_dir / "denoiser_evaluation_results.csv"
     elements = config.dset.elements  # ["C", "H", "O", "N", "F"]
-    csv_columns = ['generated_idx', 'field_method', 'size']
+    csv_columns = ['generated_idx', 'field_method', 'diffusion_method', 'size']
     
     # 添加生成分子每种元素的原子数量
     for element in elements:
@@ -131,6 +131,10 @@ def main(config: DictConfig) -> None:
     mol_save_dir = output_dir / "molecule"
     mol_save_dir.mkdir(parents=True, exist_ok=True)
     
+    # 检查使用的扩散方法
+    diffusion_method = config.get('diffusion_method', 'old')
+    print(f"Using diffusion method: {diffusion_method}")
+    
     # 生成分子
     for sample_idx in tqdm(range(max_samples), desc="Generating molecules"):
         for field_method in field_methods:
@@ -140,17 +144,25 @@ def main(config: DictConfig) -> None:
                 method_config['converter']['gradient_field_method'] = field_method
                 converter = create_gnf_converter(method_config)
                 
-                # 生成随机噪声codes
+                # 生成codes
                 grid_size = config.get('dset', {}).get('grid_size', 9)
                 code_dim = config.get('encoder', {}).get('code_dim', 128)
                 batch_size = 1
                 
-                # 创建随机噪声codes
-                noise_codes = torch.randn(batch_size, grid_size**3, code_dim, device=next(funcmol.parameters()).device)
-                
-                # 通过denoiser处理codes
-                with torch.no_grad():
-                    denoised_codes = funcmol(noise_codes)
+                if diffusion_method == "new":
+                    # DDPM采样
+                    print(f"Using DDPM sampling for sample {sample_idx}")
+                    shape = (batch_size, grid_size, grid_size, grid_size, code_dim)
+                    with torch.no_grad():
+                        denoised_codes_3d = funcmol.sample_ddpm(shape, progress=False)
+                    # 重塑为2D格式以保持兼容性
+                    denoised_codes = denoised_codes_3d.view(batch_size, grid_size**3, code_dim)
+                else:
+                    # 原有方法：随机噪声 + denoiser
+                    print(f"Using original sampling for sample {sample_idx}")
+                    noise_codes = torch.randn(batch_size, grid_size**3, code_dim, device=next(funcmol.parameters()).device)
+                    with torch.no_grad():
+                        denoised_codes = funcmol(noise_codes)
                 
                 # 重建分子
                 recon_coords, recon_types = converter.gnf2mol(
@@ -170,6 +182,7 @@ def main(config: DictConfig) -> None:
                 result_row = {
                     'generated_idx': generated_idx,
                     'field_method': field_method,
+                    'diffusion_method': diffusion_method,
                     'size': generated_size
                 }
                 
@@ -200,6 +213,7 @@ def main(config: DictConfig) -> None:
                 error_row = {
                     'generated_idx': generated_idx,
                     'field_method': field_method,
+                    'diffusion_method': diffusion_method,
                     'size': 0
                 }
                 # 生成分子原子统计设为0
@@ -221,7 +235,7 @@ def main(config: DictConfig) -> None:
             method_df = df[df['field_method'] == method]
             if len(method_df) > 0:
                 avg_size = method_df['size'].mean()
-                print(f"{method}: average size={avg_size:.1f} atoms, count={len(method_df)}")
+                print(f"{method} ({diffusion_method}): average size={avg_size:.1f} atoms, count={len(method_df)}")
         
     except Exception as e:
         print(f"Error reading results from CSV: {e}")

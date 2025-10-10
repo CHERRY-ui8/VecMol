@@ -11,6 +11,28 @@ defaults:
 debug: False
 wandb: False
 seed: 1234
+
+diffusion_method: "new"  # "old" (WJS) 或 "new" (DDPM)
+
+# DDPM配置（仅当diffusion_method为"new"时使用）
+ddpm:
+  # 模型配置
+  hidden_dim: 128
+  num_layers: 4
+  time_emb_dim: 64
+  dropout: 0.1
+  
+  # 扩散过程配置
+  beta_start: 1e-4
+  beta_end: 0.02
+  num_timesteps: 1000
+  schedule: "linear"  # 可选: "linear", "cosine", "sigmoid"
+  
+  # Sigmoid调度参数（仅当schedule为"sigmoid"时使用）
+  s1: 0.008
+  sT: 0.008
+  w: 1.0
+
 # nf_pretrained_path: ../exps/neural_field/nf_qm9
 # nf_pretrained_path: ../exps/neural_field/nf_qm9_20250812_181425_750832
 nf_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20250911/lightning_logs/version_1/checkpoints/model-epoch=39.ckpt
@@ -41,7 +63,7 @@ lr: 1e-3
 use_lr_schedule: 0 # 暂时禁用学习率调度，使用固定学习率
 # num_warmup_iter: 4000
 num_warmup_iter: 1000  # 减少预热步数
-wd: 1e-4
+wd: 1e-6
 # ema_decay: 0.999
 ema_decay: 0.999  # 启用EMA
 max_grad_norm: 0.5  # 0.5，1

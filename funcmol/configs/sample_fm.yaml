@@ -12,8 +12,29 @@ fm_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neu
 dirname: ../exps/funcmol/fm_qm9/20250912
 
 # 生成参数
-max_samples: 2  # 要生成的分子数量
+max_samples: 8  # 要生成的分子数量
 field_methods: ['tanh']  # 要使用的field方法
+
+diffusion_method: "new" #  方法选择: "old" (WJS) 或 "new" (DDPM)
+
+# DDPM配置（仅当diffusion_method为"new"时使用）
+ddpm:
+  n_samples: 10  # DDPM推理时生成的样本数量
+  batch_size: 2  # DDPM采样的批次大小
+  num_timesteps: 50  # 时间步数（可调整）
+  hidden_dim: 64
+  num_layers: 2
+  time_emb_dim: 32
+  
+  # Beta调度配置
+  beta_start: 1e-4
+  beta_end: 0.02
+  schedule: "linear"  # 可选: "linear", "cosine", "sigmoid"
+  
+  # Sigmoid调度参数（仅当schedule为"sigmoid"时使用）
+  s1: 0.008
+  sT: 0.008
+  w: 1.0
 
 # FuncMol denoiser 参数（必须）
 smooth_sigma: 0.5

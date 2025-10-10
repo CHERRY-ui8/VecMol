@@ -7,6 +7,7 @@ from funcmol.utils.utils_fm import add_noise_to_code
 from funcmol.utils.utils_nf import unnormalize_code
 from funcmol.models.unet1d import MLPResCode
 from funcmol.models.egnn_denoiser import GNNDenoiser
+from funcmol.models.ddpm import create_diffusion_constants, compute_ddpm_loss, p_sample_loop
 
 
 ########################################################################################
@@ -57,38 +58,62 @@ class FuncMol(nn.Module):
         
         self.smooth_sigma = config["smooth_sigma"]
         self.grid_size = config["dset"]["grid_size"]  # 保存grid_size配置
-
-        # 根据配置选择denoiser类型
-        if config.get("denoiser", {}).get("use_gnn", False):
-            # 使用GNN denoiser
+        
+        # 添加diffusion方法选择
+        self.diffusion_method = config.get("diffusion_method", "old")  # "old" 或 "new"
+        
+        if self.diffusion_method == "new":
             self.net = GNNDenoiser(
                 code_dim=config["decoder"]["code_dim"],
-                hidden_dim=config["denoiser"]["n_hidden_units"],
-                num_layers=config["denoiser"]["num_blocks"],
-                cutoff=config["denoiser"]["cutoff"],
-                radius=config["denoiser"]["radius"],
-                dropout=config["denoiser"]["dropout"],
+                hidden_dim=config.get("ddpm", {}).get("hidden_dim", 128),
+                num_layers=config.get("ddpm", {}).get("num_layers", 4),
+                time_emb_dim=config.get("ddpm", {}).get("time_emb_dim", 64),
+                cutoff=config.get("denoiser", {}).get("cutoff", 5.0),
+                radius=config.get("denoiser", {}).get("radius", 2.0),
+                dropout=config.get("ddpm", {}).get("dropout", 0.1),
                 grid_size=config["dset"]["grid_size"],
                 anchor_spacing=config["dset"]["anchor_spacing"],
-                use_radius_graph=config["denoiser"]["use_radius_graph"]
-            )
+                use_radius_graph=config.get("denoiser", {}).get("use_radius_graph", True),
+                device=self.device
+            ).to(self.device)
+            self.diffusion_consts = create_diffusion_constants(config)
+            # 将扩散常数移动到正确的设备
+            for key in self.diffusion_consts:
+                self.diffusion_consts[key] = self.diffusion_consts[key].to(self.device)
+            self.num_timesteps = config.get("ddpm", {}).get("num_timesteps", 1000)
         else:
-            # 使用MLP denoiser (默认)
-            self.net = MLPResCode(
-                code_dim=config["decoder"]["code_dim"],
-                n_hidden_units=config["denoiser"]["n_hidden_units"],
-                num_blocks=config["denoiser"]["num_blocks"],
-                n_groups=config["denoiser"]["n_groups"],
-                dropout=config["denoiser"]["dropout"],
-                bias_free=config["denoiser"]["bias_free"],
-            )
+            # 使用原有方法
+            if config.get("denoiser", {}).get("use_gnn", False):
+                # 使用GNN denoiser
+                self.net = GNNDenoiser(
+                    code_dim=config["decoder"]["code_dim"],
+                    hidden_dim=config["denoiser"]["n_hidden_units"],
+                    num_layers=config["denoiser"]["num_blocks"],
+                    cutoff=config["denoiser"]["cutoff"],
+                    radius=config["denoiser"]["radius"],
+                    dropout=config["denoiser"]["dropout"],
+                    grid_size=config["dset"]["grid_size"],
+                    anchor_spacing=config["dset"]["anchor_spacing"],
+                    use_radius_graph=config["denoiser"]["use_radius_graph"]
+                )
+            else:
+                # 使用MLP denoiser
+                self.net = MLPResCode(
+                    code_dim=config["decoder"]["code_dim"],
+                    n_hidden_units=config["denoiser"]["n_hidden_units"],
+                    num_blocks=config["denoiser"]["num_blocks"],
+                    n_groups=config["denoiser"]["n_groups"],
+                    dropout=config["denoiser"]["dropout"],
+                    bias_free=config["denoiser"]["bias_free"],
+                )
 
-    def forward(self, y: torch.Tensor, debug: bool = False):
+    def forward(self, y: torch.Tensor, t: torch.Tensor = None, debug: bool = False):
         """
         Forward pass of the denoiser model.
 
         Args:
-            y (torch.Tensor): Input tensor of shape (batch_size, channel_size, c_size).
+            y (torch.Tensor): Input tensor of shape (batch_size, channel_size, c_size) or (batch_size, N, N, N, code_dim) for DDPM.
+            t (torch.Tensor, optional): Time steps for DDPM. Required when using DDPM method.
             debug (bool): Whether to print debug information.
 
         Returns:
@@ -98,7 +123,14 @@ class FuncMol(nn.Module):
             print(f"[DENOISER DEBUG] Input y - min: {y.min().item():.6f}, max: {y.max().item():.6f}, mean: {y.mean().item():.6f}, std: {y.std().item():.6f}")
             print(f"[DENOISER DEBUG] Input y - shape: {y.shape}, device: {y.device}, dtype: {y.dtype}")
         
-        xhat = self.net(y)
+        if self.diffusion_method == "new":
+            # DDPM方法需要时间步
+            if t is None:
+                raise ValueError("Time steps 't' are required for DDPM method")
+            xhat = self.net(y, t)
+        else:
+            # 原有方法
+            xhat = self.net(y)
         
         if debug:
             print(f"[DENOISER DEBUG] Output xhat - min: {xhat.min().item():.6f}, max: {xhat.max().item():.6f}, mean: {xhat.mean().item():.6f}, std: {xhat.std().item():.6f}")
@@ -116,24 +148,30 @@ class FuncMol(nn.Module):
         
         return xhat
 
-    def score(self, y: torch.Tensor, debug: bool = False):
+    def score(self, y: torch.Tensor, t: torch.Tensor = None, debug: bool = False):
         """
         Calculates the score of the denoiser model.
 
         Args:
-        - y: Input tensor of shape (batch_size, channels, height, width).
+        - y: Input tensor of shape (batch_size, channels, height, width) or (batch_size, N, N, N, code_dim) for DDPM.
+        - t: Time steps for DDPM. Required when using DDPM method.
         - debug (bool): Whether to print debug information.
 
         Returns:
         - score: The score tensor of shape (batch_size, channels, height, width).
         """
-        xhat = self.forward(y, debug=debug)
-        score = (xhat - y) / (self.smooth_sigma**2)
+        if self.diffusion_method == "new":
+            # DDPM方法：score就是预测的噪声
+            if t is None:
+                raise ValueError("Time steps 't' are required for DDPM method")
+            score = self.forward(y, t, debug=debug)
+        else:
+            # 原有方法
+            xhat = self.forward(y, debug=debug)
+            score = (xhat - y) / (self.smooth_sigma**2)
         
         if debug:
-            print(f"[SCORE DEBUG] xhat - y difference - min: {(xhat-y).min().item():.6f}, max: {(xhat-y).max().item():.6f}, mean: {(xhat-y).mean().item():.6f}")
-            print(f"[SCORE DEBUG] smooth_sigma: {self.smooth_sigma}, smooth_sigma^2: {self.smooth_sigma**2}")
-            print(f"[SCORE DEBUG] Raw score - min: {score.min().item():.6f}, max: {score.max().item():.6f}, mean: {score.mean().item():.6f}, std: {score.std().item():.6f}")
+            print(f"[SCORE DEBUG] Score - min: {score.min().item():.6f}, max: {score.max().item():.6f}, mean: {score.mean().item():.6f}, std: {score.std().item():.6f}")
         
         # 添加数值稳定性：梯度裁剪
         max_score_norm = 10.0  # 可调参数
@@ -157,6 +195,39 @@ class FuncMol(nn.Module):
             print(f"[SCORE DEBUG] Final score - min: {score.min().item():.6f}, max: {score.max().item():.6f}, norm: {final_norm:.6f}")
         
         return score
+
+    def train_ddpm_step(self, x_0: torch.Tensor) -> torch.Tensor:
+        """
+        DDPM训练步骤
+        
+        Args:
+            x_0: 原始数据 [B, N*N*N, code_dim]
+        
+        Returns:
+            训练损失
+        """
+        if self.diffusion_method != "new":
+            raise ValueError("DDPM training step only available for 'new' diffusion method")
+        
+        return compute_ddpm_loss(self.net, x_0, self.diffusion_consts, self.device)
+
+    @torch.no_grad()
+    def sample_ddpm(self, shape: tuple, progress: bool = True) -> torch.Tensor:
+        """
+        DDPM采样
+        
+        Args:
+            shape: 输出形状 (batch_size, N*N*N, code_dim)
+            progress: 是否显示进度条
+        
+        Returns:
+            生成的样本 [B, N*N*N, code_dim]
+        """
+        if self.diffusion_method != "new":
+            raise ValueError("DDPM sampling only available for 'new' diffusion method")
+        
+        self.net.eval()
+        return p_sample_loop(self.net, shape, self.diffusion_consts, self.device, progress)
 
     @torch.no_grad()
     def wjs_walk_steps(
@@ -288,10 +359,10 @@ class FuncMol(nn.Module):
         debug: bool = False,
     ):
         """
-        Samples molecular modulation codes using the Walk-Jump-Sample (WJS) method.
+        Samples molecular modulation codes using either DDPM or Walk-Jump-Sample (WJS) method.
 
         Args:
-            config (dict): Configuration dictionary containing parameters for WJS.
+            config (dict): Configuration dictionary containing parameters for sampling.
             fabric (optional): Fabric object for printing and logging.
             delete_net (bool, optional): If True, deletes the network and clears CUDA cache after sampling. Default is False.
             code_stats (dict, optional): Code statistics for unnormalization. If provided, codes will be unnormalized before returning.
@@ -301,7 +372,88 @@ class FuncMol(nn.Module):
         """
         self.eval()
 
-        #  sample codes with WJS
+        if self.diffusion_method == "new":
+            # 使用DDPM采样
+            return self._sample_ddpm(config, fabric, delete_net, code_stats, debug)
+        else:
+            # 使用原有WJS采样
+            return self._sample_wjs(config, fabric, delete_net, code_stats, debug)
+
+    def _sample_ddpm(self, config: dict, fabric, delete_net: bool, code_stats: dict, debug: bool = False):  # noqa: ARG002
+        """
+        DDPM采样方法
+        """
+        codes_all = []
+        n_samples = config.get("ddpm", {}).get("n_samples", 100)
+        batch_size = config.get("ddpm", {}).get("batch_size", 10)
+        
+        _print(fabric, f">> Sample codes with DDPM (n_samples: {n_samples})")
+        
+        try:
+            for _ in tqdm(range(0, n_samples, batch_size)):
+                current_batch_size = min(batch_size, n_samples - len(codes_all))
+                
+                # 定义DDPM采样形状 [batch_size, N*N*N, code_dim]
+                shape = (current_batch_size, self.grid_size**3, config["decoder"]["code_dim"])
+                
+                # DDPM采样
+                codes_batch = self.sample_ddpm(shape, progress=False)
+                codes_all.append(codes_batch.cpu())
+                
+                # 清理GPU内存
+                del codes_batch
+                torch.cuda.empty_cache()
+                
+        except Exception as e:
+            _print(fabric, f"Error during DDPM sampling: {e}")
+            raise e
+
+        # Clean up network if requested
+        if delete_net:
+            del self.net
+            torch.cuda.empty_cache()
+
+        # Concatenate all generated codes
+        codes = torch.cat(codes_all, dim=0)
+        _print(fabric, f">> Generated {codes.size(0)} codes")
+        
+        # 添加调试信息：检查codes的维度和内容
+        _print(fabric, f">> Codes shape: {codes.shape}")
+        _print(fabric, f">> Codes dtype: {codes.dtype}")
+        _print(fabric, f">> Codes device: {codes.device}")
+        
+        # 检查codes是否包含NaN/Inf
+        if torch.isnan(codes).any():
+            _print(fabric, ">> WARNING: codes contains NaN values!")
+            nan_count = torch.isnan(codes).sum().item()
+            _print(fabric, f">> NaN count: {nan_count}")
+        
+        if torch.isinf(codes).any():
+            _print(fabric, ">> WARNING: codes contains Inf values!")
+            inf_count = torch.isinf(codes).sum().item()
+            _print(fabric, f">> Inf count: {inf_count}")
+        
+        # 检查codes的数值范围（normalized）
+        _print(fabric, f">> Codes min: {codes.min().item():.6f}, max: {codes.max().item():.6f}")
+
+        # 如果提供了code_stats，进行unnormalization
+        if code_stats is not None:
+            _print(fabric, ">> Unnormalizing codes...")
+            codes = unnormalize_code(codes, code_stats)
+            _print(fabric, f">> Unnormalized codes min: {codes.min().item():.6f}, max: {codes.max().item():.6f}")
+        else:
+            _print(fabric, ">> No code_stats provided, returning normalized codes")
+
+        # 清理内存
+        del codes_all
+        torch.cuda.empty_cache()
+
+        return codes
+
+    def _sample_wjs(self, config: dict, fabric, delete_net: bool, code_stats: dict, debug: bool):
+        """
+        原有WJS采样方法
+        """
         codes_all = []
         _print(fabric, f">> Sample codes with WJS (n_chains: {config['wjs']['n_chains']})")
         try:

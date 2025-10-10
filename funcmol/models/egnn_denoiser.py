@@ -7,21 +7,32 @@ from funcmol.models.encoder import create_grid_coords
 
 
 class EGNNDenoiserLayer(MessagePassing):
-    def __init__(self, in_channels, hidden_channels, out_channels, cutoff=None, radius=None):
+    def __init__(self, in_channels, hidden_channels, out_channels, cutoff=None, radius=None, time_emb_dim=None):
         super().__init__(aggr='mean')
         self.in_channels = in_channels
         self.hidden_channels = hidden_channels
         self.out_channels = out_channels
         self.cutoff = cutoff
         self.radius = radius
+        self.time_emb_dim = time_emb_dim
 
-        # 边特征MLP
-        self.edge_mlp = nn.Sequential(
-            nn.Linear(2 * in_channels + 1, hidden_channels),
-            nn.SiLU(),
-            nn.Linear(hidden_channels, hidden_channels),
-            nn.SiLU(),
-        )
+        # 边特征MLP - 支持时间嵌入
+        if time_emb_dim is not None:
+            # DDPM模式：包含时间嵌入
+            self.edge_mlp = nn.Sequential(
+                nn.Linear(2 * in_channels + 1 + hidden_channels, hidden_channels),
+                nn.SiLU(),
+                nn.Linear(hidden_channels, hidden_channels),
+                nn.SiLU(),
+            )
+        else:
+            # 原有模式：不包含时间嵌入
+            self.edge_mlp = nn.Sequential(
+                nn.Linear(2 * in_channels + 1, hidden_channels),
+                nn.SiLU(),
+                nn.Linear(hidden_channels, hidden_channels),
+                nn.SiLU(),
+            )
         
         # 节点特征更新MLP
         self.node_mlp = nn.Sequential(
@@ -33,7 +44,7 @@ class EGNNDenoiserLayer(MessagePassing):
         # 添加LayerNorm层
         self.norm = nn.LayerNorm(out_channels)
 
-    def forward(self, x, h, edge_index):
+    def forward(self, x, h, edge_index, t_emb=None):
         # LayerNorm + EGNN层
         h = self.norm(h)
         
@@ -49,10 +60,18 @@ class EGNNDenoiserLayer(MessagePassing):
         rel = x[col] - x[row]  # [E, 3] 从row指向col
         dist = torch.norm(rel, dim=-1, keepdim=True)  # [E, 1]
         
-        # 构造message输入 - 标准EGNN实现
+        # 构造message输入
         h_i = h[row]  # 源节点特征
         h_j = h[col]  # 目标节点特征
-        edge_input = torch.cat([h_i, h_j, dist], dim=-1)  # [E, 2*in_channels+1]
+        
+        if t_emb is not None and self.time_emb_dim is not None:
+            # DDPM模式：包含时间嵌入
+            t_emb_i = t_emb[row]  # [E, hidden_dim]
+            edge_input = torch.cat([h_i, h_j, dist, t_emb_i], dim=-1)  # [E, 2*in_channels+1+hidden_channels]
+        else:
+            # 原有模式：不包含时间嵌入
+            edge_input = torch.cat([h_i, h_j, dist], dim=-1)  # [E, 2*in_channels+1]
+        
         m_ij = self.edge_mlp(edge_input)  # [E, hidden_channels]
         
         if self.cutoff is not None:
@@ -75,7 +94,8 @@ class EGNNDenoiserLayer(MessagePassing):
 class GNNDenoiser(nn.Module):
     def __init__(self, code_dim=1024, hidden_dim=128, num_layers=4, 
                  cutoff=None, radius=None, dropout=0.1, grid_size=8, 
-                 anchor_spacing=2.0, use_radius_graph=True, device=None):
+                 anchor_spacing=2.0, use_radius_graph=True, device=None,
+                 time_emb_dim=None):  # 新增时间嵌入维度参数
         super().__init__()
         self.code_dim = code_dim
         self.hidden_dim = hidden_dim
@@ -85,6 +105,7 @@ class GNNDenoiser(nn.Module):
         self.grid_size = grid_size
         self.anchor_spacing = anchor_spacing
         self.use_radius_graph = use_radius_graph
+        self.time_emb_dim = time_emb_dim
         
         if device is None:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -93,13 +114,18 @@ class GNNDenoiser(nn.Module):
         # 输入投影层
         self.input_projection = nn.Linear(code_dim, hidden_dim)
         
+        # 时间嵌入投影（如果启用DDPM模式）
+        if time_emb_dim is not None:
+            self.time_projection = nn.Linear(time_emb_dim, hidden_dim)
+        
         # GNN Layers (now integrated with residual blocks)
         self.blocks = nn.ModuleList([
             EGNNDenoiserLayer(
                 in_channels=hidden_dim,
                 hidden_channels=hidden_dim,
                 out_channels=hidden_dim,
-                radius=radius
+                radius=radius,
+                time_emb_dim=time_emb_dim
             ) for _ in range(num_layers)
         ])
         
@@ -115,7 +141,7 @@ class GNNDenoiser(nn.Module):
                                anchor_spacing=self.anchor_spacing
                            ).squeeze(0))  # [n_grid, 3]
         
-    def forward(self, y):
+    def forward(self, y, t=None):
         # 处理输入维度 - 现在只支持3D输入 [batch_size, n_grid, code_dim]
         if y.dim() == 4:  # (batch_size, 1, n_grid, code_dim)
             y = y.squeeze(1)  # (batch_size, n_grid, code_dim)
@@ -169,9 +195,18 @@ class GNNDenoiser(nn.Module):
         h = self.input_projection(y)  # (batch_size, n_grid, hidden_dim)
         h = h.reshape(-1, self.hidden_dim)  # (batch_size * n_grid, hidden_dim)
         
+        # 处理时间嵌入（如果提供）
+        t_emb_broadcast = None
+        if t is not None and self.time_emb_dim is not None:
+            from funcmol.models.ddpm import get_time_embedding
+            t_emb = get_time_embedding(t, self.time_emb_dim)  # [B, time_emb_dim]
+            t_emb_proj = self.time_projection(t_emb)  # [B, hidden_dim]
+            t_emb_broadcast = t_emb_proj.unsqueeze(1).expand(-1, n_grid_actual, -1)  # [B, n_grid, hidden_dim]
+            t_emb_broadcast = t_emb_broadcast.reshape(-1, self.hidden_dim)  # [B*n_grid, hidden_dim]
+        
         # 通过GNN块
         for block in self.blocks:
-            h = block(grid_coords, h, edge_index)
+            h = block(grid_coords, h, edge_index, t_emb_broadcast)
         
         # 重塑回原始维度
         h = h.view(batch_size, n_grid, self.hidden_dim)

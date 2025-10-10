@@ -125,6 +125,45 @@ class FuncmolLightningModule(pl.LightningModule):
     
     def training_step(self, batch, batch_idx):
         """Training step logic"""
+        # 添加调试信息
+        if batch_idx == 0:  # 只在第一个batch打印
+            print(f"[DEBUG] Using diffusion_method: {self.funcmol.diffusion_method}")
+            print(f"[DEBUG] Training step type: {'DDPM' if self.funcmol.diffusion_method == 'new' else 'Original'}")
+        
+        if self.funcmol.diffusion_method == "new":
+            # DDPM训练
+            return self._training_step_ddpm(batch, batch_idx)
+        else:
+            # 原有训练方法
+            return self._training_step_original(batch, batch_idx)
+
+    def _training_step_ddpm(self, batch, batch_idx):
+        """DDPM训练步骤"""
+        # 获取codes
+        codes, _ = self._process_batch(batch)
+        
+        # 添加调试信息
+        if batch_idx == 0:  # 只在第一个batch打印
+            print(f"[DEBUG] DDPM training step - input shape: {codes.shape}")
+            print(f"[DEBUG] Using diffusion constants: {list(self.funcmol.diffusion_consts.keys())}")
+        
+        # DDPM训练步骤 - 直接使用3维输入 [B, N*N*N, code_dim]
+        loss = self.funcmol.train_ddpm_step(codes)
+        
+        # Update EMA model
+        self.funcmol_ema.update(self.funcmol)
+        
+        # Log metrics
+        self.log('train_loss', loss, batch_size=len(batch),
+                 on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        
+        # Store loss for plotting
+        self.train_losses.append(loss.item())
+        
+        return loss
+
+    def _training_step_original(self, batch, batch_idx):
+        """原有训练方法"""
         # Get codes and smooth codes
         codes, smooth_codes = self._process_batch(batch)
         
@@ -148,6 +187,29 @@ class FuncmolLightningModule(pl.LightningModule):
     
     def validation_step(self, batch, batch_idx):
         """Validation step logic"""
+        if self.funcmol.diffusion_method == "new":
+            # DDPM验证
+            return self._validation_step_ddpm(batch, batch_idx)
+        else:
+            # 原有验证方法
+            return self._validation_step_original(batch, batch_idx)
+
+    def _validation_step_ddpm(self, batch, batch_idx):
+        """DDPM验证步骤"""
+        # 获取codes
+        codes, _ = self._process_batch(batch)
+        
+        # DDPM验证步骤 - 直接使用3维输入 [B, N*N*N, code_dim]
+        loss = self.funcmol.train_ddpm_step(codes)
+        
+        # Log metrics
+        self.log('val_loss', loss, batch_size=len(batch),
+                 on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        
+        return loss
+
+    def _validation_step_original(self, batch, batch_idx):
+        """原有验证方法"""
         # Get codes and smooth codes
         codes, smooth_codes = self._process_batch(batch)
         

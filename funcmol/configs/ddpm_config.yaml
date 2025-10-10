@@ -1,0 +1,66 @@
+# DDPM配置文件
+# 支持linear、cosine和sigmoid三种调度方法
+
+# 扩散方法选择: "old" 或 "new"
+diffusion_method: "new"
+
+# DDPM相关配置
+ddpm:
+  # 模型配置
+  hidden_dim: 128
+  num_layers: 4
+  time_emb_dim: 64
+  dropout: 0.1
+  
+  # 扩散过程配置
+  beta_start: 1e-4
+  beta_end: 0.02
+  num_timesteps: 1000
+  schedule: "linear"  # "linear", "cosine", 或 "sigmoid"
+  
+  # Sigmoid调度参数（仅当schedule为"sigmoid"时使用）
+  s1: 0.008    # 起始参数 - 控制调度曲线的起始值
+  sT: 0.008    # 结束参数 - 控制调度曲线的结束值  
+  w: 1.0       # 宽度参数 - 控制调度曲线的陡峭程度
+  
+  # 采样配置
+  n_samples: 100
+  batch_size: 10
+
+# 原有WJS配置（当diffusion_method为"old"时使用）
+wjs:
+  n_chains: 25
+  repeats_wjs: 1
+  max_steps_wjs: 1000
+  steps_wjs: 10
+  delta_wjs: 0.5
+  friction_wjs: 1.0
+
+# 数据集配置
+dset:
+  grid_size: 8
+  anchor_spacing: 2.0
+
+# 解码器配置
+decoder:
+  code_dim: 128
+
+# 编码器配置
+encoder:
+  code_dim: 128
+
+# 去噪器配置（当diffusion_method为"old"时使用）
+denoiser:
+  use_gnn: false
+  n_hidden_units: 128
+  num_blocks: 4
+  n_groups: 8
+  dropout: 0.1
+  bias_free: false
+  cutoff: 5.0
+  radius: 2.0
+  use_radius_graph: true
+
+# 训练配置
+smooth_sigma: 0.1
+ema_decay: 0.9999
