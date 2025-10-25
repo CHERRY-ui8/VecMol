@@ -20,7 +20,7 @@ os.environ['CUDA_VISIBLE_DEVICES'] = gpu_id
 print(f"Setting CUDA_VISIBLE_DEVICES={gpu_id}")
 
 from funcmol.utils.utils_nf import train_nf, create_neural_field, eval_nf
-from funcmol.utils.utils_nf import load_network, load_optim_fabric, save_checkpoint, auto_load_latest_checkpoint
+from funcmol.utils.utils_nf import load_network, load_optim_fabric, save_checkpoint
 from funcmol.utils.utils_nf import create_tensorboard_writer
 from funcmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
 from funcmol.utils.gnf_converter import GNFConverter
@@ -127,16 +127,12 @@ def main(config):
     data_gnf_converter = create_gnf_converter(config)
     
     # 为多卡训练设置数据加载器
-    loader_train = create_field_loaders(config, data_gnf_converter, split="train", fabric=fabric)
-    if isinstance(loader_train, list):
-        loader_train = loader_train[0]
+    loader_train = create_field_loaders(config, data_gnf_converter, split="train")
     
     # 验证集只在主进程中加载
     loader_val = None
     if fabric.global_rank == 0:
-        loader_val = create_field_loaders(config, data_gnf_converter, split="val", fabric=fabric)
-        if isinstance(loader_val, list):
-            loader_val = loader_val[0]
+        loader_val = create_field_loaders(config, data_gnf_converter, split="val")
 
     # model
     enc, dec = create_neural_field(config, fabric)
@@ -168,15 +164,7 @@ def main(config):
         except Exception as e:
             if fabric.global_rank == 0:
                 fabric.print(f"Error loading checkpoint: {e}")
-    
-    # 自动检测并加载最新的checkpoint（如果启用了auto_resume且没有指定reload_model_path）
-    elif config.get("auto_resume", True) and config["reload_model_path"] is None:
-        if fabric.global_rank == 0:
-            fabric.print(">> Auto-resume enabled, looking for latest checkpoint...")
-        enc, dec, optim_enc, optim_dec, start_epoch, train_losses, val_losses, best_loss = auto_load_latest_checkpoint(
-            config, enc, dec, optim_enc, optim_dec, fabric
-        )
-    
+        
     # 从头开始训练（如果禁用了auto_resume）
     else:
         if fabric.global_rank == 0:

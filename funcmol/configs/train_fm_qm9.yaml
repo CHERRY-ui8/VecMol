@@ -35,7 +35,7 @@ ddpm:
 
 # nf_pretrained_path: ../exps/neural_field/nf_qm9
 # nf_pretrained_path: ../exps/neural_field/nf_qm9_20250812_181425_750832
-nf_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20250911/lightning_logs/version_1/checkpoints/model-epoch=39.ckpt
+nf_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251024/lightning_logs/version_0/checkpoints/model-epoch=409.ckpt
 exp_dir: ../exps/funcmol
 exp_name: "fm_${dset.dset_name}/${now:%Y%m%d}"
 dirname: "${exp_dir}/${exp_name}"
@@ -71,7 +71,7 @@ max_grad_norm: 0.5  # 0.5，1
 # set the running dir
 hydra:
   run:
-    dir: ${dirname}
+    dir: null
   job:
     chdir: false
   output_subdir: null

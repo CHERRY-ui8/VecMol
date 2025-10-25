@@ -8,8 +8,9 @@
 use_gnn: True
 
 # 隐藏层维度 - 影响模型表达能力
+# 注意：此参数应与训练配置中的ddpm.hidden_dim保持一致
 # 建议值: 128-512，code_dim是128，可以适度膨胀
-n_hidden_units: 256
+n_hidden_units: 128
 
 # 残差块数量 - 影响模型深度和表达能力
 # 增加残差块数量以增加参数量

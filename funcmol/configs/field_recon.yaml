@@ -24,7 +24,7 @@ smooth_sigma: 0.5  # 噪声平滑参数，用于 denoiser_field 模式
 field_methods: ['tanh']  # 要比较的field方法，现在已经确定了使用tanh方法
 
 # 模型路径（仅在nf_field或denoiser_field模式下需要）
-nf_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20250911/lightning_logs/version_1/checkpoints/model-epoch=39.ckpt
+nf_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251024/lightning_logs/version_0/checkpoints/model-epoch=409.ckpt
 # 注意：输出目录将基于此路径自动创建，如: exps/neural_field/nf_qm9_20250804_153549_358664
 
 # FuncMol denoiser路径（仅在denoiser_field模式下需要）
@@ -34,5 +34,5 @@ fm_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neu
 # Hydra 设置
 hydra:
   run:
-    dir: exps/field_evaluation
+    dir: ../exps/field_evaluation # NOTE：可能需要修改
 

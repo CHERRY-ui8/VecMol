@@ -424,7 +424,8 @@ def set_requires_grad(module: nn.Module, tf: bool = False) -> None:
     for param in module.parameters():
         param.requires_grad = tf
 
-# TODO: 还没有改动的旧逻辑。这个函数在train_nf.py和train_fm.py中都被调用，但是train_nf.py中没有is_compile参数，train_fm.py中没有sd参数
+# NOTE：这个函数要保留，load_nf和load_fm都调用到了这个函数，是load时的底层逻辑
+# 它不能和load_neural_field函数合并
 def load_network(
     checkpoint: dict,
     net: nn.Module,
@@ -448,14 +449,34 @@ def load_network(
         nn.Module: The neural network model with the loaded state dictionary.
     """
     net_dict = net.state_dict()
-    weight_first_layer_before = next(iter(net_dict.values())).sum()
+    # weight_first_layer_before = next(iter(net_dict.values())).sum()
     new_state_dict = OrderedDict()
     key = f"{net_name}_state_dict" if sd is None else sd
+    
+    # 之前fm的模型权重没有成功加载，pretrained_dict是空的
+    if key not in checkpoint:
+        print(f"Warning: key '{key}' not found in checkpoint!")
+        return net
+    
     for k, v in checkpoint[key].items():
+        # 统一去掉 _orig_mod. 前缀
+        if k.startswith("_orig_mod."):
+            k = k[10:]  # 移除 "_orig_mod." 前缀
+        
+        # 处理其他前缀
         if sd is not None:
-            k = k[17:] if k[:17] == "_orig_mod.module." else k
+            # 处理不同的前缀
+            if k.startswith("_orig_mod.module."):
+                k = k[17:]  # 移除 "_orig_mod.module." 前缀
+            elif k.startswith("module."):
+                k = k[7:]   # 移除 "module." 前缀
         else:
-            k = k[10:] if k[:10] == "_orig_mod." and not is_compile else k  # remove compile prefix.
+            k = k[10:] if k.startswith("_orig_mod.") and not is_compile else k  # remove compile prefix.
+        
+        # 将enc.前缀转换为net.前缀（用于FuncMol模型）
+        if k.startswith('enc.') and net_name == "denoiser":
+            k = k.replace('enc.', 'net.', 1)
+        
         new_state_dict[k] = v
 
     pretrained_dict = {k: v for k, v in new_state_dict.items() if k in net_dict}
@@ -534,10 +555,14 @@ def save_checkpoint(
         if loss_min_tot is not None:
             loss_min_tot = loss_tot
         try:
+            # 保存前去掉多余的封装
+            dec_state_dict = dec.module.state_dict() if hasattr(dec, "module") else dec.state_dict()
+            enc_state_dict = enc.module.state_dict() if hasattr(enc, "module") else enc.state_dict()
+            
             state = {
                 "epoch": epoch,
-                "dec_state_dict": dec.state_dict(),
-                "enc_state_dict": enc.state_dict(),
+                "dec_state_dict": dec_state_dict,
+                "enc_state_dict": enc_state_dict,
                 "optim_dec": optim_dec.state_dict(),
                 "optim_enc": optim_enc.state_dict(),
                 "config": config,
@@ -549,96 +574,6 @@ def save_checkpoint(
     return loss_min_tot
 
 
-def auto_load_latest_checkpoint(
-    config: dict,
-    enc: nn.Module,
-    dec: nn.Module,
-    optim_enc: torch.optim.Optimizer,
-    optim_dec: torch.optim.Optimizer,
-    fabric: object
-) -> tuple:
-    """
-    自动加载最新的checkpoint并返回训练状态
-    
-    Args:
-        config (dict): 配置字典
-        enc (nn.Module): 编码器
-        dec (nn.Module): 解码器
-        optim_enc (torch.optim.Optimizer): 编码器优化器
-        optim_dec (torch.optim.Optimizer): 解码器优化器
-        fabric (object): Fabric对象
-        
-    Returns:
-        tuple: (enc, dec, optim_enc, optim_dec, start_epoch, train_losses, val_losses, best_loss)
-    """
-    try:
-        # 查找所有以nf_qm9_开头的目录
-        exp_dir = Path("../exps/neural_field")
-        if not exp_dir.exists():
-            fabric.print(">> No ../exps/neural_field directory found, starting fresh training")
-            return enc, dec, optim_enc, optim_dec, 0, [], [], float("inf")
-        
-        # 查找所有以nf_qm9_开头的目录
-        exp_dirs = [d for d in exp_dir.iterdir() if d.is_dir() and d.name.startswith("nf_qm9_")]
-        if not exp_dirs:
-            fabric.print(">> No existing experiment directories found, starting fresh training")
-            return enc, dec, optim_enc, optim_dec, 0, [], [], float("inf")
-        
-        # 查找有model.pt文件的目录
-        valid_dirs = []
-        for d in exp_dirs:
-            model_path = d / "model.pt"
-            if model_path.exists():
-                valid_dirs.append(d)
-        
-        if not valid_dirs:
-            fabric.print(">> No existing checkpoints found, starting fresh training")
-            return enc, dec, optim_enc, optim_dec, 0, [], [], float("inf")
-        
-        # 选择最新的有checkpoint的目录
-        latest_model_path = max(valid_dirs, key=lambda x: x.stat().st_mtime)
-        checkpoint_path = latest_model_path / "model.pt"
-        
-        fabric.print(f">> Auto-loaded latest checkpoint: {latest_model_path}")
-        
-        # 加载checkpoint
-        checkpoint = fabric.load(str(checkpoint_path))
-        
-        # 加载模型和优化器状态
-        dec = load_network(checkpoint, dec, fabric, net_name="dec")
-        optim_dec = load_optim_fabric(optim_dec, checkpoint, config, fabric, net_name="dec")
-        
-        enc = load_network(checkpoint, enc, fabric, net_name="enc")
-        optim_enc = load_optim_fabric(optim_enc, checkpoint, config, fabric, net_name="enc")
-        
-        # 设置起始epoch
-        start_epoch = checkpoint.get("epoch", 0) + 1
-        fabric.print(f">> Resuming from epoch {start_epoch}")
-        
-        # 加载训练历史
-        train_losses = []
-        if os.path.exists(os.path.join(latest_model_path, "train_losses.npy")):
-            train_losses = list(np.load(os.path.join(latest_model_path, "train_losses.npy")))
-            fabric.print(f">> Loaded {len(train_losses)} previous training losses")
-        
-        val_losses = []
-        if os.path.exists(os.path.join(latest_model_path, "val_losses.npy")):
-            val_losses = list(np.load(os.path.join(latest_model_path, "val_losses.npy")))
-            fabric.print(f">> Loaded {len(val_losses)} previous validation losses")
-        
-        # 更新最佳loss
-        best_loss = checkpoint.get("best_loss", float("inf"))
-        
-        return enc, dec, optim_enc, optim_dec, start_epoch, train_losses, val_losses, best_loss
-        
-    except Exception as e:
-        fabric.print(f"Error auto-loading checkpoint: {e}")
-        fabric.print(">> Starting fresh training")
-        return enc, dec, optim_enc, optim_dec, 0, [], [], float("inf")
-
-
-
-# TODO: 
 def load_neural_field(nf_checkpoint_or_path, fabric: object, config: dict = None) -> tuple:
     """
     Load and initialize the neural field encoder and decoder from a Lightning checkpoint.
@@ -949,3 +884,56 @@ def infer_codes_occs_batch(batch, enc, config, to_cpu=False, code_stats=None):
         codes = codes.cpu()
     
     return codes
+
+
+def load_checkpoint_state_nf(model, checkpoint_path):
+    """
+    Helper function to load checkpoint state for Neural Field model.
+    
+    Args:
+        model: The Neural Field Lightning module
+        checkpoint_path (str): Path to the checkpoint file
+        
+    Returns:
+        dict: Training state dictionary containing epoch, losses, and best_loss
+    """
+    print(f"Loading checkpoint from: {checkpoint_path}")
+    state_dict = torch.load(checkpoint_path)
+    
+    # Load encoder state dict
+    if "enc" in state_dict:
+        # 统一去掉 _orig_mod. 前缀
+        new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict["enc"].items()}
+        model.enc.load_state_dict(new_state_dict)
+        print("Loaded encoder state from 'enc' key")
+    elif "enc_state_dict" in state_dict:
+        # 统一去掉 _orig_mod. 前缀
+        new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict["enc_state_dict"].items()}
+        model.enc.load_state_dict(new_state_dict)
+        print("Loaded encoder state from 'enc_state_dict' key")
+    else:
+        print("No encoder state found in checkpoint")
+    
+    # Load decoder state dict
+    if "dec" in state_dict:
+        # 统一去掉 _orig_mod. 前缀
+        new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict["dec"].items()}
+        model.dec.load_state_dict(new_state_dict)
+        print("Loaded decoder state from 'dec' key")
+    elif "dec_state_dict" in state_dict:
+        # 统一去掉 _orig_mod. 前缀
+        new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict["dec_state_dict"].items()}
+        model.dec.load_state_dict(new_state_dict)
+        print("Loaded decoder state from 'dec_state_dict' key")
+    else:
+        print("No decoder state found in checkpoint")
+    
+    # Load training state
+    training_state = {
+        "epoch": state_dict.get("epoch", None),
+        "train_losses": state_dict.get("train_losses", []),
+        "val_losses": state_dict.get("val_losses", []),
+        "best_loss": state_dict.get("best_loss", float("inf"))
+    }
+    
+    return training_state

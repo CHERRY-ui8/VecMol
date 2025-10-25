@@ -24,12 +24,13 @@ from omegaconf import OmegaConf
 import hydra
 
 # Set GPU environment
-os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3,4,5,6,7"
+os.environ['CUDA_VISIBLE_DEVICES'] = "2,3,4,5,6,7"
 
 from funcmol.models.funcmol import create_funcmol
 from funcmol.utils.utils_fm import (
     add_noise_to_code,
-    compute_code_stats_offline, compute_codes
+    compute_code_stats_offline, compute_codes,
+    load_checkpoint_state_fm
 )
 from funcmol.models.adamw import AdamW
 from funcmol.models.ema import ModelEma
@@ -307,22 +308,37 @@ class FuncmolLightningModule(pl.LightningModule):
     def _get_lr_ratio(self, iteration):
         """Calculate learning rate ratio based on iteration"""
         if iteration < self.config["num_warmup_iter"]:
+            # Linear Warmup
             return float((iteration + 1) / self.config["num_warmup_iter"])
         else:
-            # NOTE：Use a more conservative decay strategy
-            # Calculate the progress within the training
             total_iterations = self.config.get("num_iterations", 50000)
-            progress = iteration / total_iterations
+            warmup_iters = self.config["num_warmup_iter"]
+            min_ratio = 0.1 # Target minimum learning rate ratio
             
-            # Linear decay from 1.0 to 0.1 over the course of training
-            lr_ratio = 1.0 - 0.9 * progress
-            return max(lr_ratio, 0.1)  # Minimum learning rate ratio of 0.1
-    
+            # Calculate progress within the decay phase [0.0 to 1.0]
+            decay_period = total_iterations - warmup_iters
+            current_decay_step = iteration - warmup_iters
+            
+            if decay_period <= 0:
+                 return min_ratio 
+
+            progress_decay = current_decay_step / decay_period
+            
+            # Calculate square root decay factor [1.0 to 0.0]
+            decay_factor = max(0.0, 1.0 - progress_decay) ** 0.5
+            
+            # Map decay factor to the target range [1.0, 0.1]
+            lr_ratio = min_ratio + (1.0 - min_ratio) * decay_factor
+            
+            return max(lr_ratio, min_ratio)
+
     def on_save_checkpoint(self, checkpoint):
-        """Custom checkpoint saving logic"""
-        # Save Funcmol state
-        checkpoint["funcmol_state_dict"] = self.funcmol.state_dict()
-        checkpoint["funcmol_ema_state_dict"] = self.funcmol_ema.state_dict()
+        # 保存前去掉多余的封装（但是lightning模式理论上会自动处理好，不需要去除，只是以防万一）
+        funcmol_state_dict = self.funcmol.module.state_dict() if hasattr(self.funcmol, "module") else self.funcmol.state_dict()
+        funcmol_ema_state_dict = self.funcmol_ema.module.state_dict() if hasattr(self.funcmol_ema, "module") else self.funcmol_ema.state_dict()
+        
+        checkpoint["funcmol_state_dict"] = funcmol_state_dict
+        checkpoint["funcmol_ema_state_dict"] = funcmol_ema_state_dict
         checkpoint["code_stats"] = self.code_stats
         checkpoint["train_losses"] = self.train_losses
         checkpoint["val_losses"] = self.val_losses
@@ -403,14 +419,14 @@ def main(config):
             # Create GNFConverter instance for data loading
             gnf_converter = create_gnf_converter(config)
             
-            loader_train = create_field_loaders(config, gnf_converter, split="train", use_fabric=False)
-            loader_val = create_field_loaders(config, gnf_converter, split="val", use_fabric=False)
+            loader_train = create_field_loaders(config, gnf_converter, split="train")
+            loader_val = create_field_loaders(config, gnf_converter, split="val")
             
-            # Handle cases where loaders are returned as lists
-            if isinstance(loader_train, list) and len(loader_train) > 0:
-                loader_train = loader_train[0]
-            if isinstance(loader_val, list) and len(loader_val) > 0:
-                loader_val = loader_val[0]
+            # # Handle cases where loaders are returned as lists
+            # if isinstance(loader_train, list) and len(loader_train) > 0:
+            #     loader_train = loader_train[0]
+            # if isinstance(loader_val, list) and len(loader_val) > 0:
+            #     loader_val = loader_val[0]
             
             # Compute codes for normalization
             _, code_stats = compute_codes(
@@ -421,11 +437,11 @@ def main(config):
             loader_train = create_code_loaders(config, split="train")
             loader_val = create_code_loaders(config, split="val")
             
-            # Handle cases where loaders are returned as lists
-            if isinstance(loader_train, list) and len(loader_train) > 0:
-                loader_train = loader_train[0]
-            if isinstance(loader_val, list) and len(loader_val) > 0:
-                loader_val = loader_val[0]
+            # # Handle cases where loaders are returned as lists
+            # if isinstance(loader_train, list) and len(loader_train) > 0:
+            #     loader_train = loader_train[0]
+            # if isinstance(loader_val, list) and len(loader_val) > 0:
+            #     loader_val = loader_val[0]
             
             code_stats = compute_code_stats_offline(loader_train, "train", config["normalize_codes"])
         
@@ -449,41 +465,8 @@ def main(config):
     # Load checkpoint if specified
     if config["reload_model_path"] is not None:
         try:
-            def load_checkpoint_state(model, checkpoint_path):
-                """Helper function to load checkpoint state"""
-                print(f"Loading checkpoint from: {checkpoint_path}")
-                state_dict = torch.load(checkpoint_path)
-                
-                # Load Funcmol state
-                if "funcmol" in state_dict:
-                    model.funcmol.load_state_dict(state_dict["funcmol"])
-                    print("Loaded Funcmol state from 'funcmol' key")
-                elif "funcmol_state_dict" in state_dict:
-                    model.funcmol.load_state_dict(state_dict["funcmol_state_dict"])
-                    print("Loaded Funcmol state from 'funcmol_state_dict' key")
-                else:
-                    print("No Funcmol state found in checkpoint")
-                
-                # Load EMA state
-                if "funcmol_ema" in state_dict:
-                    model.funcmol_ema.load_state_dict(state_dict["funcmol_ema"])
-                    print("Loaded Funcmol EMA state from 'funcmol_ema' key")
-                elif "funcmol_ema_state_dict" in state_dict:
-                    model.funcmol_ema.load_state_dict(state_dict["funcmol_ema_state_dict"])
-                    print("Loaded Funcmol EMA state from 'funcmol_ema_state_dict' key")
-                
-                # Load training state
-                training_state = {
-                    "epoch": state_dict.get("epoch", None),
-                    "train_losses": state_dict.get("train_losses", []),
-                    "val_losses": state_dict.get("val_losses", []),
-                    "best_loss": state_dict.get("best_loss", float("inf"))
-                }
-                
-                return training_state
-            
             checkpoint_path = os.path.join(config["reload_model_path"], "checkpoint_latest.pth.tar")
-            training_state = load_checkpoint_state(model, checkpoint_path)
+            training_state = load_checkpoint_state_fm(model, checkpoint_path)
             
             # Apply training state
             if training_state["epoch"] is not None:
@@ -511,8 +494,10 @@ def main(config):
     ]
     
     # Configure logger
+    
     logger = TensorBoardLogger(
         save_dir=config["dirname"],
+        name="tensorboard",
         default_hp_metric=False
     )
     

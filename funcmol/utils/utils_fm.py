@@ -46,7 +46,7 @@ def load_checkpoint_fm(
         lightning_checkpoint = torch.load(pretrained_path, map_location='cpu', weights_only=False)
         # Convert Lightning checkpoint format to expected format
         checkpoint = {
-            "state_dict_ema": lightning_checkpoint["state_dict"],
+            "funcmol_ema_state_dict": lightning_checkpoint["funcmol_ema_state_dict"],
             "code_stats": lightning_checkpoint.get("code_stats", {}),
             "epoch": lightning_checkpoint.get("epoch", 0)
         }
@@ -59,13 +59,13 @@ def load_checkpoint_fm(
     model = model.cpu()
     
     if optimizer is not None:
-        load_network(checkpoint, model, fabric, is_compile=True, sd="state_dict_ema", net_name="denoiser")
+        load_network(checkpoint, model, fabric, is_compile=True, sd="funcmol_ema_state_dict", net_name="denoiser")
         optimizer.load_state_dict(checkpoint["optimizer"])
         # Move model back to original device
         model = model.to(original_device)
         return model, optimizer, checkpoint["code_stats"]
     else:
-        load_network(checkpoint, model, fabric, is_compile=True, sd="state_dict_ema", net_name="denoiser")
+        load_network(checkpoint, model, fabric, is_compile=True, sd="funcmol_ema_state_dict", net_name="denoiser")
         # Move model back to original device
         model = model.to(original_device)
         fabric.print(f">> loaded model trained for {checkpoint['epoch']} epochs")
@@ -135,9 +135,9 @@ def compute_codes(
         n_samples=100_000,
     )
     if code_stats is None:
-        code_stats = process_codes(codes, fabric, split, normalize_codes)
+        code_stats = process_codes(codes, split, normalize_codes)
     else:
-        get_stats(codes, fabric=fabric, message=f"====normalized codes {split}====")
+        get_stats(codes, message=f"====normalized codes {split}====")
     return codes, code_stats
 
 
@@ -166,7 +166,6 @@ def compute_code_stats_offline(
 
 def process_codes(
     codes: torch.Tensor,
-    # fabric: object,
     split: str,
     normalize_codes: bool,
 ) -> dict:
@@ -182,9 +181,8 @@ def process_codes(
     Returns:
         tuple: A tuple containing the processed codes, statistics, and normalized codes.
     """
-    max, min, mean, std = get_stats(
+    max_val, min_val, mean, std = get_stats(
         codes,
-        # fabric=fabric,
         message=f"====codes {split}====",
     )
     code_stats = {
@@ -195,11 +193,10 @@ def process_codes(
         codes = normalize_code(codes, code_stats)
         max_normalized, min_normalized, _, _ = get_stats(
             codes,
-            # fabric=fabric,
             message=f"====normalized codes {split}====",
         )
     else:
-        max_normalized, min_normalized = max, min
+        max_normalized, min_normalized = max_val, min_val
     code_stats.update({
         "max_normalized": max_normalized.item(),
         "min_normalized": min_normalized.item(),
@@ -230,13 +227,64 @@ def get_stats(
     """
     if message is not None:
         print(message)
-    max = codes.max()
-    min = codes.min()
+    max_val = codes.max()
+    min_val = codes.min()
     mean = codes.mean()
     std = codes.std()
-    print(f"min: {min.item()}")
-    print(f"max: {max.item()}")
+    print(f"min: {min_val.item()}")
+    print(f"max: {max_val.item()}")
     print(f"mean: {mean.item()}")
     print(f"std: {std.item()}")
     print(f"codes size: {codes.shape}")
-    return max, min, mean, std
+    return max_val, min_val, mean, std
+
+
+def load_checkpoint_state_fm(model, checkpoint_path):
+    """
+    Helper function to load checkpoint state for FuncMol model.
+    
+    Args:
+        model: The FuncMol Lightning module
+        checkpoint_path (str): Path to the checkpoint file
+        
+    Returns:
+        dict: Training state dictionary containing epoch, losses, and best_loss
+    """
+    print(f"Loading checkpoint from: {checkpoint_path}")
+    state_dict = torch.load(checkpoint_path)
+    
+    # Load Funcmol state
+    if "funcmol" in state_dict:
+        # 统一去掉 _orig_mod. 前缀
+        new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict["funcmol"].items()}
+        model.funcmol.load_state_dict(new_state_dict)
+        print("Loaded Funcmol state from 'funcmol' key")
+    elif "funcmol_state_dict" in state_dict:
+        # 统一去掉 _orig_mod. 前缀
+        new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict["funcmol_state_dict"].items()}
+        model.funcmol.load_state_dict(new_state_dict)
+        print("Loaded Funcmol state from 'funcmol_state_dict' key")
+    else:
+        print("No Funcmol state found in checkpoint")
+    
+    # Load EMA state
+    if "funcmol_ema" in state_dict:
+        # 统一去掉 _orig_mod. 前缀
+        new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict["funcmol_ema"].items()}
+        model.funcmol_ema.load_state_dict(new_state_dict)
+        print("Loaded Funcmol EMA state from 'funcmol_ema' key")
+    elif "funcmol_ema_state_dict" in state_dict:
+        # 统一去掉 _orig_mod. 前缀
+        new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict["funcmol_ema_state_dict"].items()}
+        model.funcmol_ema.load_state_dict(new_state_dict)
+        print("Loaded Funcmol EMA state from 'funcmol_ema_state_dict' key")
+    
+    # Load training state
+    training_state = {
+        "epoch": state_dict.get("epoch", None),
+        "train_losses": state_dict.get("train_losses", []),
+        "val_losses": state_dict.get("val_losses", []),
+        "best_loss": state_dict.get("best_loss", float("inf"))
+    }
+    
+    return training_state

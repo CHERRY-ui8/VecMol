@@ -43,7 +43,7 @@ from scipy.optimize import linear_sum_assignment
 import hydra
 from omegaconf import DictConfig, OmegaConf
 from lightning import Fabric
-from funcmol.utils.gnf_visualizer import create_gnf_converter
+from funcmol.dataset.dataset_field import create_gnf_converter
 from funcmol.utils.utils_nf import load_neural_field
 from funcmol.dataset.dataset_field import FieldDataset
 from funcmol.models.funcmol import create_funcmol

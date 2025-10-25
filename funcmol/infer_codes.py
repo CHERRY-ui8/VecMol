@@ -1,5 +1,10 @@
 import sys
 import os
+import omegaconf
+import torch
+from tqdm import tqdm
+import time
+import hydra
 # 添加当前目录到Python路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -7,14 +12,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import torch._dynamo
 torch._dynamo.config.suppress_errors = True
 
-from tqdm import tqdm
-import time
-import hydra
 from funcmol.utils.utils_nf import load_neural_field
 from funcmol.utils.utils_base import setup_fabric
 from funcmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
-import omegaconf
-import torch
 
 
 @hydra.main(config_path="configs", config_name="infer_codes", version_base=None)
@@ -67,7 +67,7 @@ def main(config):
     gnf_converter = create_gnf_converter(config)
     
     # data loader
-    loader = create_field_loaders(config, gnf_converter, split=config["split"], fabric=fabric)
+    loader = create_field_loaders(config, gnf_converter, split=config["split"])
 
     # Print config
     fabric.print(f">> config: {config}")

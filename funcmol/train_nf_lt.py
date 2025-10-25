@@ -25,94 +25,12 @@ from omegaconf import OmegaConf
 import hydra
 
 # TODO: set gpus based on server id
-os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3,4,5,6,7"
+os.environ['CUDA_VISIBLE_DEVICES'] = "2,3,4,5,6,7"
 # os.environ['CUDA_VISIBLE_DEVICES'] = "0,2,3,4,5"
 # os.environ['CUDA_VISIBLE_DEVICES'] = "0"
 
-
-from funcmol.utils.utils_nf import create_neural_field
+from funcmol.utils.utils_nf import create_neural_field, load_checkpoint_state_nf
 from funcmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
-from funcmol.utils.gnf_converter import GNFConverter
-
-
-def create_training_gnf_converter(config, device="cuda"):
-    """
-    Create a GNF converter instance for training based on configuration.
-    
-    Args:
-        config (dict): Configuration dictionary containing GNF parameters
-        device (str): Device to place the converter on
-        
-    Returns:
-        GNFConverter: Configured GNF converter instance ready for training
-    """
-    # Extract configuration
-    gnf_config = config.get("converter")
-    if gnf_config is not None and not isinstance(gnf_config, dict):
-        gnf_config = OmegaConf.to_container(gnf_config, resolve=True)
-    if isinstance(gnf_config, list):
-        gnf_config = gnf_config[0]
-    assert isinstance(gnf_config, dict), f"gnf_config should be dict, got {type(gnf_config)}"
-    
-    # Get method-specific parameters
-    method = gnf_config.get("gradient_field_method", "softmax")
-    method_config = gnf_config.get("method_configs", {}).get(method, gnf_config.get("default_config", {}))
-    
-    # Define required parameters
-    required_params = {
-        'sigma': gnf_config.get("sigma"),
-        'n_iter': gnf_config.get("n_iter"),
-        'eps': gnf_config.get("eps"),
-        'min_samples': gnf_config.get("min_samples"),
-        'sigma_ratios': gnf_config.get("sigma_ratios"),
-        'temperature': gnf_config.get("temperature"),
-        'logsumexp_eps': gnf_config.get("logsumexp_eps"),
-        'inverse_square_strength': gnf_config.get("inverse_square_strength"),
-        'gradient_clip_threshold': gnf_config.get("gradient_clip_threshold"),
-        'gradient_sampling_candidate_multiplier': gnf_config.get("gradient_sampling_candidate_multiplier"),
-        'gradient_sampling_temperature': gnf_config.get("gradient_sampling_temperature")
-    }
-    
-    # Define method-specific required parameters
-    method_required_params = {
-        'n_query_points': method_config.get("n_query_points"),
-        'step_size': method_config.get("step_size"),
-        'sig_sf': method_config.get("sig_sf"),
-        'sig_mag': method_config.get("sig_mag")
-    }
-    
-    # Check for missing parameters
-    missing_params = [param for param, value in required_params.items() if value is None]
-    missing_method_params = [param for param, value in method_required_params.items() if value is None]
-    
-    if missing_params:
-        raise ValueError(f"Missing required parameters in gnf_config: {missing_params}")
-    if missing_method_params:
-        raise ValueError(f"Missing required parameters in method_config for {method}: {missing_method_params}")
-    
-    # Build parameters for GNF Converter
-    gnf_converter_params = {
-        'sigma': required_params['sigma'],
-        'n_query_points': method_required_params['n_query_points'],
-        'n_iter': required_params['n_iter'],
-        'step_size': method_required_params['step_size'],
-        'eps': required_params['eps'],
-        'min_samples': required_params['min_samples'],
-        'sigma_ratios': required_params['sigma_ratios'],
-        'gradient_field_method': method,
-        'temperature': required_params['temperature'],
-        'logsumexp_eps': required_params['logsumexp_eps'],
-        'inverse_square_strength': required_params['inverse_square_strength'],
-        'gradient_clip_threshold': required_params['gradient_clip_threshold'],
-        'sig_sf': method_required_params['sig_sf'],
-        'sig_mag': method_required_params['sig_mag'],
-        'gradient_sampling_candidate_multiplier': required_params['gradient_sampling_candidate_multiplier'],
-        'gradient_sampling_temperature': required_params['gradient_sampling_temperature'],
-        'n_atom_types': config["dset"]["n_channels"]
-    }
-    
-    # Create and return the GNF converter
-    return GNFConverter(**gnf_converter_params)
 
 
 def plot_loss_curve(train_losses, val_losses, save_path, title_suffix=""):
@@ -136,14 +54,6 @@ def plot_loss_curve(train_losses, val_losses, save_path, title_suffix=""):
     plt.grid(True)
     plt.savefig(save_path)
     plt.close()
-
-
-# @rank_zero_only
-# def print_model_sizes(enc, dec):
-#     """Print the number of parameters in the encoder and decoder models."""
-#     print('Num of params in encoder:', sum(p.numel() for p in enc.parameters()))
-#     print('Num of params in decoder:', sum(p.numel() for p in dec.parameters()))
-
 
 class NeuralFieldLightningModule(pl.LightningModule):
     """
@@ -291,8 +201,6 @@ class NeuralFieldLightningModule(pl.LightningModule):
         self.enc.eval()
         self.dec.eval()
     
-            
-    
     def configure_optimizers(self):
         """Configure optimizers and learning rate schedulers"""
         # Create a single optimizer with different parameter groups for encoder and decoder
@@ -323,41 +231,14 @@ class NeuralFieldLightningModule(pl.LightningModule):
         
         return optimizer
     
-    def on_save_checkpoint(self, checkpoint):
-    #     """Custom checkpoint saving logic"""
-    #     checkpoint["train_losses"] = self.train_losses
-    #     checkpoint["val_losses"] = self.val_losses
-    #     checkpoint["batch_losses"] = self.batch_losses
-    #     checkpoint["best_loss"] = self.best_loss
+    def on_save_checkpoint(self, checkpoint):        
+        # 保存前去掉多余的封装（但是lightning模式理论上会自动处理好，不需要去除，只是以防万一）
+        enc_state_dict = self.enc.module.state_dict() if hasattr(self.enc, "module") else self.enc.state_dict()
+        dec_state_dict = self.dec.module.state_dict() if hasattr(self.dec, "module") else self.dec.state_dict()
         
-        # Save encoder and decoder state separately for compatibility with original code
-        checkpoint["enc_state_dict"] = self.enc.state_dict()
-        checkpoint["dec_state_dict"] = self.dec.state_dict()
-        
-    # def on_load_checkpoint(self, checkpoint):
-    #     """Custom checkpoint loading logic"""
-    #     if "train_losses" in checkpoint:
-    #         self.train_losses = checkpoint["train_losses"]
-    #     if "val_losses" in checkpoint:
-    #         self.val_losses = checkpoint["val_losses"]
-    #     if "batch_losses" in checkpoint:
-    #         self.batch_losses = checkpoint["batch_losses"]    
-    #     if "best_loss" in checkpoint:
-    #         self.best_loss = checkpoint["best_loss"]
-            
-    def get_progress_bar_dict(self):
-        """Customize the progress bar information"""
-        items = super().get_progress_bar_dict()
-        items.pop("v_num", None)
-        
-        # Add learning rates to progress bar
-        for i, optimizer in enumerate(self.trainer.optimizers):
-            for j, param_group in enumerate(optimizer.param_groups):
-                name = f"lr_{i}_{j}" if j > 0 else f"lr_{i}"
-                items[name] = param_group["lr"]
-        
-        return items
-
+        checkpoint["enc_state_dict"] = enc_state_dict
+        checkpoint["dec_state_dict"] = dec_state_dict
+                    
 
 @hydra.main(config_path="configs", config_name="train_nf_qm9", version_base=None)
 # @hydra.main(config_path="configs", config_name="train_nf_drugs", version_base=None)
@@ -376,30 +257,28 @@ def main(config):
     
     # Create data loaders
     try:
-        loader_train = create_field_loaders(config, data_gnf_converter, split="train", use_fabric=False)
-        loader_val = create_field_loaders(config, data_gnf_converter, split="val", use_fabric=False)
+        loader_train = create_field_loaders(config, data_gnf_converter, split="train")
+        loader_val = create_field_loaders(config, data_gnf_converter, split="val")
         
-        # Handle cases where loaders are returned as lists
-        if isinstance(loader_train, list):
-            print(f"Train loader returned as list with {len(loader_train)} items, using first item")
-            loader_train = loader_train[0]
-        if isinstance(loader_val, list):
-            print(f"Val loader returned as list with {len(loader_val)} items, using first item")
-            loader_val = loader_val[0]
+        # # Handle cases where loaders are returned as lists
+        # if loader_train is not None and isinstance(loader_train, list):
+        #     print(f"Train loader returned as list with {len(loader_train)} items, using first item")
+        #     loader_train = loader_train[0]
+        # if loader_val is not None and isinstance(loader_val, list):
+        #     print(f"Val loader returned as list with {len(loader_val)} items, using first item")
+        #     loader_val = loader_val[0]
             
         # Check if loaders are empty
         if not loader_train or len(loader_train) == 0:
             raise ValueError("Training data loader is empty")
             
-        print(f"Created data loaders - Train: {len(loader_train)} batches, Val: {len(loader_val) if loader_val else 0} batches")
+        print(f"Created data loaders - Train: {len(loader_train) if loader_train else 0} batches, Val: {len(loader_val) if loader_val else 0} batches")
     except Exception as e:
         print(f"Error creating data loaders: {e}")
         raise
     
     # Create GNF Converter for model training
-    # TODO: check if training and data converters can be unified
-    gnf_converter = create_training_gnf_converter(config, 
-                        device="cuda" if torch.cuda.is_available() else "cpu")
+    gnf_converter = create_gnf_converter(config)
     
     # Initialize Lightning model
     model = NeuralFieldLightningModule(config, gnf_converter)
@@ -407,43 +286,8 @@ def main(config):
     # Load checkpoint if specified
     if config["reload_model_path"] is not None:
         try:
-            def load_checkpoint_state(model, checkpoint_path):
-                """Helper function to load checkpoint state"""
-                print(f"Loading checkpoint from: {checkpoint_path}")
-                state_dict = torch.load(checkpoint_path)
-                
-                # Load encoder state dict
-                if "enc" in state_dict:
-                    model.enc.load_state_dict(state_dict["enc"])
-                    print("Loaded encoder state from 'enc' key")
-                elif "enc_state_dict" in state_dict:
-                    model.enc.load_state_dict(state_dict["enc_state_dict"])
-                    print("Loaded encoder state from 'enc_state_dict' key")
-                else:
-                    print("No encoder state found in checkpoint")
-                
-                # Load decoder state dict
-                if "dec" in state_dict:
-                    model.dec.load_state_dict(state_dict["dec"])
-                    print("Loaded decoder state from 'dec' key")
-                elif "dec_state_dict" in state_dict:
-                    model.dec.load_state_dict(state_dict["dec_state_dict"])
-                    print("Loaded decoder state from 'dec_state_dict' key")
-                else:
-                    print("No decoder state found in checkpoint")
-                
-                # Load training state
-                training_state = {
-                    "epoch": state_dict.get("epoch", None),
-                    "train_losses": state_dict.get("train_losses", []),
-                    "val_losses": state_dict.get("val_losses", []),
-                    "best_loss": state_dict.get("best_loss", float("inf"))
-                }
-                
-                return training_state
-            
             checkpoint_path = os.path.join(config["reload_model_path"], "model.pt")
-            training_state = load_checkpoint_state(model, checkpoint_path)
+            training_state = load_checkpoint_state_nf(model, checkpoint_path)
             
             # Apply training state
             if training_state["epoch"] is not None:
@@ -470,7 +314,7 @@ def main(config):
             monitor="val_loss",
             mode="min",
             save_last=True,
-            save_top_k=-1  # 保存所有checkpoint，不限制数量
+            save_top_k=-1  # 每ckpt_every_n_epochs保存所有checkpoint，不限制数量
         ),
         LearningRateMonitor(logging_interval="epoch"),
         # ProgressBarCallback()

@@ -2,8 +2,9 @@ import os
 from funcmol.models.funcmol import create_funcmol
 import hydra
 import torch
+import traceback
 from funcmol.utils.utils_fm import load_checkpoint_fm
-from funcmol.utils.gnf_visualizer import create_gnf_converter
+from funcmol.dataset.dataset_field import create_gnf_converter
 from funcmol.utils.utils_nf import load_neural_field
 import pandas as pd
 import numpy as np
@@ -152,7 +153,7 @@ def main(config: DictConfig) -> None:
                 if diffusion_method == "new":
                     # DDPM采样
                     print(f"Using DDPM sampling for sample {sample_idx}")
-                    shape = (batch_size, grid_size, grid_size, grid_size, code_dim)
+                    shape = (batch_size, grid_size**3, code_dim)
                     with torch.no_grad():
                         denoised_codes_3d = funcmol.sample_ddpm(shape, progress=False)
                     # 重塑为2D格式以保持兼容性
@@ -206,7 +207,6 @@ def main(config: DictConfig) -> None:
                 
             except Exception as e:
                 print(f"Error generating molecule {sample_idx} with {field_method}: {e}")
-                import traceback
                 traceback.print_exc()
                 # 保存错误结果
                 generated_idx = get_next_generated_idx(csv_path)

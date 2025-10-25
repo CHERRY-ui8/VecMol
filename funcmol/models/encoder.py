@@ -37,10 +37,14 @@ class GaussianSmearing(nn.Module):
         if dist.dim() == 2:
             dist = dist.squeeze(-1)
         
+        # Ensure buffers are on the same device as the input tensor
+        offset = self.offset.to(dist.device)
+        coeff = self.coeff.to(dist.device)
+        
         dist = dist.clamp_min(self.start)
         dist = dist.clamp_max(self.stop)
-        dist = dist.view(-1, 1) - self.offset.view(1, -1)
-        return torch.exp(self.coeff * torch.pow(dist, 2))
+        dist = dist.view(-1, 1) - offset.view(1, -1)
+        return torch.exp(coeff * torch.pow(dist, 2))
 
 
 class CrossGraphEncoder(nn.Module):
@@ -244,12 +248,18 @@ class MessagePassingGNN(MessagePassing):
         # 距离扩展和边嵌入
         if self.use_gaussian_smearing:
             dist_expanded = self.distance_expansion(dist)  # [E, num_gaussians]
+            # 确保 edge_emb 在正确的设备上
+            if self.edge_emb.weight.device != dist_expanded.device:
+                self.edge_emb = self.edge_emb.to(dist_expanded.device)
             edge_features = self.edge_emb(dist_expanded)  # [E, edge_dim]
             msg_input = torch.cat([x[row], x[col], edge_features], dim=-1)  # [E, 2*code_dim+edge_dim]
         else:
             # 向后兼容：直接使用距离
             msg_input = torch.cat([x[row], x[col], dist], dim=-1)  # [E, 2*code_dim+1]
         
+        # 确保 mlp 在正确的设备上
+        if self.mlp[0].weight.device != msg_input.device:
+            self.mlp = self.mlp.to(msg_input.device)
         msg = self.mlp(msg_input)  # [E, code_dim]
         
         # 使用propagate方法进行消息传递
@@ -259,6 +269,9 @@ class MessagePassingGNN(MessagePassing):
         
         # 残差连接
         x = x + aggr  # 残差连接
+        # 确保 layernorm 在正确的设备上
+        if self.layernorm.weight.device != x.device:
+            self.layernorm = self.layernorm.to(x.device)
         x = self.layernorm(x)
         return x
     

@@ -66,16 +66,16 @@ def main(config):
         # 创建GNFConverter实例用于数据加载
         gnf_converter = create_gnf_converter(config)
         
-        loader_train = create_field_loaders(config, gnf_converter, split="train", fabric=fabric)
-        loader_val = create_field_loaders(config, gnf_converter, split="val", fabric=fabric) if fabric.global_rank == 0 else None
+        loader_train = create_field_loaders(config, gnf_converter, split="train")
+        loader_val = create_field_loaders(config, gnf_converter, split="val") if fabric.global_rank == 0 else None
         _, code_stats = compute_codes(
             loader_train, enc, config_nf, "train", fabric, config["normalize_codes"],
             code_stats=None
         )
     else:
-        loader_train = create_code_loaders(config, split="train", fabric=fabric)
-        loader_val = create_code_loaders(config, split="val", fabric=fabric) if fabric.global_rank == 0 else None
-        code_stats = compute_code_stats_offline(loader_train, "train", fabric, config["normalize_codes"])
+        loader_train = create_code_loaders(config, split="train")
+        loader_val = create_code_loaders(config, split="val") if fabric.global_rank == 0 else None
+        code_stats = compute_code_stats_offline(loader_train, "train", config["normalize_codes"])
     dec_module.set_code_stats(code_stats)
 
     config["num_iterations"] = config["num_epochs"] * len(loader_train)
@@ -165,10 +165,13 @@ def main(config):
         if ((epoch + 1) % config["save_every"] == 0 or epoch == config["num_epochs"] - 1) and epoch != 0:
             # save checkpoint with epoch number to avoid overwriting
             try:
+                # 保存前去掉多余的封装
+                funcmol_ema_state_dict = funcmol_ema.module.state_dict() if hasattr(funcmol_ema, "module") else funcmol_ema.state_dict()
+                
                 state = {
                     "epoch": epoch + 1,
                     "config": config,
-                    "state_dict_ema": funcmol_ema.state_dict(),
+                    "funcmol_ema_state_dict": funcmol_ema_state_dict,
                     "optimizer": optimizer.state_dict(),
                     "code_stats": dec_module.code_stats
                 }

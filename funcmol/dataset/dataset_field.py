@@ -12,6 +12,7 @@ import numpy as np
 import torch
 from torch_geometric.data import Data, Dataset
 from torch_geometric.loader import DataLoader
+from torch_geometric.utils import to_dense_batch
 
 from funcmol.models.decoder import get_grid
 from funcmol.utils.constants import ELEMENTS_HASH, PADDING_INDEX
@@ -522,10 +523,7 @@ def create_field_loaders(
     config: dict,
     gnf_converter: GNFConverter,  # 接收GNFConverter实例
     split: str = "train",
-    # fabric = Fabric(),
-    n_samples = None,
     sample_full_grid = False,
-    use_fabric=True,
 ):
     """
     Creates data loaders for training, validation, or testing datasets.
@@ -535,10 +533,6 @@ def create_field_loaders(
         gnf_converter (GNFConverter): GNFConverter instance for computing target fields.
         split (str, optional): Dataset split to load. Options are "train", "val", or "test".
             Defaults to "train".
-        fabric (Fabric, optional): Fabric object for distributed training.
-            Defaults to a new Fabric instance.
-        n_samples (int, optional): Number of samples to use for validation or testing.
-            If None, defaults to 5000. Defaults to None.
         sample_full_grid (bool, optional): Whether to sample the full grid. Defaults to False.
 
     Returns:
@@ -557,15 +551,15 @@ def create_field_loaders(
         grid_dim=config["dset"]["grid_dim"],
         radius=config["dset"]["atomic_radius"],
         sample_full_grid=sample_full_grid,
-        debug_one_mol=config.get("debug_one_mol", False),
-        debug_subset=config.get("debug_subset", False),
+        debug_one_mol=config["debug_one_mol"],
+        debug_subset=config["debug_subset"],
     )
 
-    if config.get("debug_one_mol", False):
+    if config["debug_one_mol"]:
         if hasattr(dset, 'data'):
             dset.data = [dset.data[0]]  # 只保留第一个分子，不复制
         dset.field_idxs = torch.arange(1)  # 只保留一个分子
-    elif config.get("debug_subset", False):
+    elif config["debug_subset"]:
         if hasattr(dset, 'data'):
             dset.data = dset.data[:128]
         # dset.field_idxs = torch.arange(min(128, len(dset.field_idxs)))  # 限制为128个分子
@@ -579,13 +573,8 @@ def create_field_loaders(
         pin_memory=True,
         drop_last=True,
     )
-    if use_fabric:
-        fabric.print(f">> {split} set size: {len(dset)}")
-
-        return fabric.setup_dataloaders(loader, use_distributed_sampler=True)  # 所有split都使用分布式采样器
-    else:
-        print(f">> {split} set size: {len(dset)}")
-        return loader
+    print(f">> {split} set size: {len(dset)}")
+    return loader
 
 
 def create_gnf_converter(config: dict) -> GNFConverter:
@@ -598,84 +587,53 @@ def create_gnf_converter(config: dict) -> GNFConverter:
     Returns:
         GNFConverter: 配置好的GNFConverter实例
     """
-    gnf_config = config.get("converter", {}) or config.get("gnf_converter", {})
+    # 强制从config中获取converter配置，不允许fallback
+    if "converter" in config:
+        gnf_config = config["converter"]
+    elif "gnf_converter" in config:
+        gnf_config = config["gnf_converter"]
+    else:
+        raise ValueError("GNF converter configuration not found in config! Must have either 'converter' or 'gnf_converter' key.")
     
-    # 检查配置是否存在
-    if not gnf_config:
-        raise ValueError("GNF converter configuration not found in config!")
+    # 获取数据集配置中的原子类型数量，不允许默认值
+    dset_config = config["dset"]
+    n_atom_types = dset_config["n_channels"]
     
-    # 获取数据集配置中的原子类型数量
-    dset_config = config.get("dset", {})
-    n_atom_types = dset_config.get("n_channels", 5)  # 默认为5以保持向后兼容
+    # 获取梯度场方法，不允许默认值
+    gradient_field_method = gnf_config["gradient_field_method"]
     
-    # 获取梯度场方法
-    gradient_field_method = gnf_config.get("gradient_field_method")
-    if gradient_field_method is None:
-        raise ValueError("gradient_field_method not found in converter config!")
+    # 获取方法特定的配置，不允许默认值
+    method_configs = gnf_config["method_configs"]
+    default_config = gnf_config["default_config"]
     
-    # 获取方法特定的配置
-    method_configs = gnf_config.get("method_configs", {})
-    default_config = gnf_config.get("default_config", {})
-    
-    # 根据方法选择参数配置，移除所有硬编码默认值
+    # 根据方法选择参数配置，强制从配置中获取，不允许默认值
     if gradient_field_method in method_configs:
         method_config = method_configs[gradient_field_method]
-        # 使用方法特定的参数
-        n_query_points = method_config.get("n_query_points")
-        step_size = method_config.get("step_size")
-        sig_sf = method_config.get("sig_sf")
-        sig_mag = method_config.get("sig_mag")
-        
-        if n_query_points is None:
-            raise ValueError(f"n_query_points not found in method_config for {gradient_field_method}")
-        if step_size is None:
-            raise ValueError(f"step_size not found in method_config for {gradient_field_method}")
-        if sig_sf is None:
-            raise ValueError(f"sig_sf not found in method_config for {gradient_field_method}")
-        if sig_mag is None:
-            raise ValueError(f"sig_mag not found in method_config for {gradient_field_method}")
+        # 使用方法特定的参数，强制获取
+        n_query_points = method_config["n_query_points"]
+        step_size = method_config["step_size"]
+        sig_sf = method_config["sig_sf"]
+        sig_mag = method_config["sig_mag"]
     else:
-        # 使用默认配置
-        n_query_points = default_config.get("n_query_points")
-        step_size = default_config.get("step_size")
-        sig_sf = default_config.get("sig_sf")
-        sig_mag = default_config.get("sig_mag")
-        
-        if n_query_points is None:
-            raise ValueError("n_query_points not found in default_config")
-        if step_size is None:
-            raise ValueError("step_size not found in default_config")
-        if sig_sf is None:
-            raise ValueError("sig_sf not found in default_config")
-        if sig_mag is None:
-            raise ValueError("sig_mag not found in default_config")
+        # 使用默认配置，强制获取
+        n_query_points = default_config["n_query_points"]
+        step_size = default_config["step_size"]
+        sig_sf = default_config["sig_sf"]
+        sig_mag = default_config["sig_mag"]
     
-    # 获取其他必需参数，移除所有硬编码默认值
-    sigma = gnf_config.get("sigma")
-    n_iter = gnf_config.get("n_iter")
-    eps = gnf_config.get("eps")
-    min_samples = gnf_config.get("min_samples")
-    temperature = gnf_config.get("temperature")
-    logsumexp_eps = gnf_config.get("logsumexp_eps")
-    inverse_square_strength = gnf_config.get("inverse_square_strength")
-    gradient_clip_threshold = gnf_config.get("gradient_clip_threshold")
-    sigma_ratios = gnf_config.get("sigma_ratios")
-    
-    # 检查所有必需参数是否存在
-    required_params = {
-        "sigma": sigma,
-        "n_iter": n_iter,
-        "eps": eps,
-        "min_samples": min_samples,
-        "temperature": temperature,
-        "logsumexp_eps": logsumexp_eps,
-        "inverse_square_strength": inverse_square_strength,
-        "gradient_clip_threshold": gradient_clip_threshold
-    }
-    
-    missing_params = [param for param, value in required_params.items() if value is None]
-    if missing_params:
-        raise ValueError(f"Missing required parameters in converter config: {missing_params}")
+    # 获取其他必需参数，强制从配置中获取，不允许默认值
+    sigma = gnf_config["sigma"]
+    n_iter = gnf_config["n_iter"]
+    eps = gnf_config["eps"]
+    min_samples = gnf_config["min_samples"]
+    temperature = gnf_config["temperature"]
+    logsumexp_eps = gnf_config["logsumexp_eps"]
+    inverse_square_strength = gnf_config["inverse_square_strength"]
+    gradient_clip_threshold = gnf_config["gradient_clip_threshold"]
+    sigma_ratios = gnf_config["sigma_ratios"]
+    # 训练版专有的两个梯度采样参数，这里一并纳入，便于统一
+    gradient_sampling_candidate_multiplier = gnf_config["gradient_sampling_candidate_multiplier"]
+    gradient_sampling_temperature = gnf_config["gradient_sampling_temperature"]
     
     return GNFConverter(
         sigma=sigma,
@@ -692,5 +650,40 @@ def create_gnf_converter(config: dict) -> GNFConverter:
         gradient_clip_threshold=gradient_clip_threshold,
         sig_sf=sig_sf,
         sig_mag=sig_mag,
+        gradient_sampling_candidate_multiplier=gradient_sampling_candidate_multiplier,
+        gradient_sampling_temperature=gradient_sampling_temperature,
         n_atom_types=n_atom_types  # 添加原子类型数量参数
-    ) 
+    )
+
+
+def prepare_data_with_sample_idx(config, device, sample_idx):
+    """准备包含特定样本的数据。
+
+    Args:
+        config: 配置对象
+        device: 计算设备
+        sample_idx: 要加载的样本索引
+
+    Returns:
+        Tuple[batch, coords, atoms_channel]，数据批次、坐标和原子类型
+    """
+    
+    gnf_converter = create_gnf_converter(config)
+    loader_val = create_field_loaders(config, gnf_converter, split="val")
+    
+    # 计算需要跳过多少个batch才能到达目标样本
+    batch_size = config.dset.batch_size
+    target_batch_idx = sample_idx // batch_size
+    sample_in_batch = sample_idx % batch_size
+    
+    # 跳过前面的batch
+    for i, batch in enumerate(loader_val):
+        if i == target_batch_idx:
+            batch = batch.to(device)
+            coords, _ = to_dense_batch(batch.pos, batch.batch, fill_value=0)
+            atoms_channel, _ = to_dense_batch(batch.x, batch.batch, fill_value=PADDING_INDEX)
+            
+            # 只返回目标样本
+            return batch, coords[sample_in_batch:sample_in_batch+1], atoms_channel[sample_in_batch:sample_in_batch+1]
+    
+    raise IndexError(f"Sample index {sample_idx} is out of bounds for validation set") 
