@@ -66,6 +66,8 @@ def prepare_diffusion_constants(betas: torch.Tensor) -> Dict[str, torch.Tensor]:
         "alphas_cumprod_prev": alphas_cumprod_prev,
         "sqrt_alphas_cumprod": torch.sqrt(alphas_cumprod),
         "sqrt_one_minus_alphas_cumprod": torch.sqrt(1 - alphas_cumprod),
+        "sqrt_alphas_cumprod_prev": torch.sqrt(alphas_cumprod_prev),
+        "sqrt_one_minus_alphas_cumprod_prev": torch.sqrt(1 - alphas_cumprod_prev),
         "sqrt_recip_alphas": torch.sqrt(1.0 / alphas),
         "posterior_variance": betas * (1 - alphas_cumprod_prev) / (1 - alphas_cumprod),
     }
@@ -179,10 +181,10 @@ def p_sample(model: nn.Module, x_t: torch.Tensor, t: torch.Tensor,
 def p_sample_loop(model: nn.Module, shape: Tuple[int, ...], diffusion_consts: Dict[str, torch.Tensor], 
                   device: torch.device, progress: bool = True) -> torch.Tensor:
     """
-    完整的反向采样循环
+    完整的反向采样循环（预测噪声epsilon版本）
     
     Args:
-        model: 去噪模型
+        model: 去噪模型，预测噪声
         shape: 输出形状 [B, N*N*N, code_dim]
         diffusion_consts: 扩散常数
         device: 设备
@@ -205,13 +207,75 @@ def p_sample_loop(model: nn.Module, shape: Tuple[int, ...], diffusion_consts: Di
     return x_t
 
 
+@torch.no_grad()
+def p_sample_x0(model: nn.Module, x_t: torch.Tensor, t: torch.Tensor, 
+                diffusion_consts: Dict[str, torch.Tensor]) -> torch.Tensor:
+    """
+    单步反向采样（预测x0版本）
+    
+    Args:
+        model: 去噪模型，预测x0
+        x_t: 当前状态 [B, N*N*N, code_dim]
+        t: 时间步 [B]
+        diffusion_consts: 扩散常数
+    
+    Returns:
+        去噪后的状态 [B, N*N*N, code_dim]
+    """
+    # 预测x0
+    predicted_x0 = model(x_t, t)
+    
+    # 获取需要的常数
+    sqrt_alphas_cumprod_prev_t = extract(diffusion_consts["sqrt_alphas_cumprod_prev"], t, x_t)
+    sqrt_one_minus_alphas_cumprod_prev_t = extract(diffusion_consts["sqrt_one_minus_alphas_cumprod_prev"], t, x_t)
+    
+    if t[0] == 0:
+        # 最后一步，直接返回预测的x0
+        return predicted_x0
+    else:
+        # 从预测的x0计算x_{t-1}
+        noise = torch.randn_like(x_t)
+        x_prev = sqrt_alphas_cumprod_prev_t * predicted_x0 + sqrt_one_minus_alphas_cumprod_prev_t * noise
+        return x_prev
+
+
+@torch.no_grad()
+def p_sample_loop_x0(model: nn.Module, shape: Tuple[int, ...], diffusion_consts: Dict[str, torch.Tensor], 
+                     device: torch.device, progress: bool = True) -> torch.Tensor:
+    """
+    完整的反向采样循环（预测x0版本）
+    
+    Args:
+        model: 去噪模型，预测x0
+        shape: 输出形状 [B, N*N*N, code_dim]
+        diffusion_consts: 扩散常数
+        device: 设备
+        progress: 是否显示进度条
+    
+    Returns:
+        生成的样本 [B, N*N*N, code_dim]
+    """
+    x_t = torch.randn(shape, device=device)
+    num_timesteps = diffusion_consts["betas"].shape[0]
+    
+    iterator = reversed(range(num_timesteps))
+    if progress:
+        iterator = tqdm(iterator, desc="DDPM Sampling (x0)")
+    
+    for i in iterator:
+        t = torch.full((shape[0],), i, device=device, dtype=torch.long)
+        x_t = p_sample_x0(model, x_t, t, diffusion_consts)
+    
+    return x_t
+
+
 # ===========================
 # 6. DDPM 训练损失计算
 # ===========================
 def compute_ddpm_loss(model: nn.Module, x_0: torch.Tensor, diffusion_consts: Dict[str, torch.Tensor], 
                      device: torch.device) -> torch.Tensor:
     """
-    计算DDPM训练损失
+    计算DDPM训练损失（预测噪声epsilon版本）
     
     Args:
         model: 去噪模型
@@ -238,6 +302,40 @@ def compute_ddpm_loss(model: nn.Module, x_0: torch.Tensor, diffusion_consts: Dic
     
     # 计算损失
     loss = F.mse_loss(predicted_noise, noise)
+    
+    return loss
+
+
+def compute_ddpm_loss_x0(model: nn.Module, x_0: torch.Tensor, diffusion_consts: Dict[str, torch.Tensor], 
+                         device: torch.device) -> torch.Tensor:
+    """
+    计算DDPM训练损失（预测x0版本）
+    
+    Args:
+        model: 去噪模型，预测x0
+        x_0: 原始数据 [B, N*N*N, code_dim]
+        diffusion_consts: 扩散常数
+        device: 设备
+    
+    Returns:
+        训练损失
+    """
+    batch_size = x_0.shape[0]
+    
+    # 随机采样时间步
+    t = torch.randint(0, diffusion_consts["betas"].shape[0], (batch_size,), device=device).long()
+    
+    # 生成噪声
+    noise = torch.randn_like(x_0)
+    
+    # 前向扩散
+    x_t = q_sample(x_0, t, diffusion_consts, noise)
+    
+    # 预测x0
+    predicted_x0 = model(x_t, t)
+    
+    # 计算损失：直接预测x0
+    loss = F.mse_loss(predicted_x0, x_0)
     
     return loss
 

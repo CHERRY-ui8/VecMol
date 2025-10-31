@@ -493,7 +493,8 @@ class GNFVisualizer(MoleculeVisualizer):
 
     def create_generation_animation(self,
                                    converter: GNFConverter,
-                                   field_func,
+                                   field_func=None,
+                                   pred_field: Optional[torch.Tensor] = None,
                                    sample_idx: int = 0,
                                    save_interval: int = 50,
                                    create_1d_plots: bool = True,
@@ -510,7 +511,8 @@ class GNFVisualizer(MoleculeVisualizer):
         
         Args:
             converter: GNF 转换器，用于将场函数转换为原子位置
-            field_func: 场函数，输入查询点 [B, n_points, 3]，输出场信息 [B, n_points, n_atom_types, 3]
+            field_func: 场函数，输入查询点 [B, n_points, 3]，输出场信息 [B, n_points, n_atom_types, 3]（可选）
+            pred_field: 预计算的场值，形状 [n_points, n_atom_types, 3]（可选）
             sample_idx: 样本索引
             save_interval: 保存帧的间隔
             create_1d_plots: 是否创建1D场可视化
@@ -525,6 +527,12 @@ class GNFVisualizer(MoleculeVisualizer):
             包含动画路径、最终结果和指标历史的字典
         """
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # 验证参数
+        if field_func is None and pred_field is None:
+            raise ValueError("必须提供 field_func 或 pred_field 中的一个")
+        if field_func is not None and pred_field is not None:
+            raise ValueError("不能同时提供 field_func 和 pred_field")
         
         # 选择输出目录
         if use_recon_dir:
@@ -703,16 +711,29 @@ class GNFVisualizer(MoleculeVisualizer):
                 
                 # 生成1D场可视化
                 field_1d_save_path = os.path.join(field_1d_dir, f"field_1d_sample_{sample_idx}.png")
-                field_1d_results = visualize_1d_gradient_field_generation(
-                    field_func=field_func,
-                    sample_idx=sample_idx,
-                    atom_types=[0, 1, 2, 3, 4],  # C, H, O, N, F
-                    x_range=None,  # 使用默认范围
-                    n_points=3000,
-                    y_coord=0.0,
-                    z_coord=0.0,
-                    save_path=field_1d_save_path
-                )
+                if field_func is not None:
+                    field_1d_results = visualize_1d_gradient_field_generation(
+                        field_func=field_func,
+                        sample_idx=sample_idx,
+                        atom_types=[0, 1, 2, 3, 4],  # C, H, O, N, F
+                        x_range=None,  # 使用默认范围
+                        n_points=3000,
+                        y_coord=0.0,
+                        z_coord=0.0,
+                        save_path=field_1d_save_path
+                    )
+                else:
+                    # 使用预计算的field值
+                    field_1d_results = visualize_1d_gradient_field_generation_with_field(
+                        pred_field=pred_field,
+                        sample_idx=sample_idx,
+                        atom_types=[0, 1, 2, 3, 4],  # C, H, O, N, F
+                        x_range=None,  # 使用默认范围
+                        n_points=3000,
+                        y_coord=0.0,
+                        z_coord=0.0,
+                        save_path=field_1d_save_path
+                    )
                 print(f"1D field visualization created for sample {sample_idx}")
             except Exception as e:
                 print(f"Warning: Failed to create 1D field visualization for sample {sample_idx}: {e}")
@@ -1356,6 +1377,158 @@ def visualize_1d_gradient_field_generation(
             'magnitude_max': pred_gradients.max().item(),
             'magnitude_min': pred_gradients.min().item()
         }
+        
+        # 关闭图形以释放内存
+        plt.close(fig)
+    
+    return {
+        'all_results': all_results,
+        'available_atom_types': atom_types
+    }
+
+def visualize_1d_gradient_field_generation_with_field(
+    pred_field: torch.Tensor,
+    sample_idx: int = 0,
+    atom_types: Union[int, List[int]] = 0,
+    x_range: Optional[tuple] = None,
+    n_points: int = 3000,
+    y_coord: float = 0.0,
+    z_coord: float = 0.0,
+    save_path: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """可视化生成任务的一维梯度场（使用预计算的field值）。
+    
+    Args:
+        pred_field: 预计算的场值，形状 [n_points, n_atom_types, 3]
+        sample_idx: 样本索引
+        atom_types: 原子类型列表或单个原子类型（0=C, 1=H, 2=O, 3=N, 4=F）
+        x_range: x 轴范围，None 时使用默认范围
+        n_points: 采样点数
+        y_coord: y 坐标固定值
+        z_coord: z 坐标固定值
+        save_path: 保存路径，None 时显示图像
+
+    Returns:
+        包含梯度场统计信息和数据的字典
+    """
+    device = pred_field.device
+    
+    # 确保 atom_types 是列表
+    if isinstance(atom_types, int):
+        atom_types = [atom_types]
+    
+    # 设置默认x范围
+    if x_range is None:
+        x_range = (-5.0, 5.0)  # 默认范围
+        print(f"使用默认 x 轴范围: {x_range}")
+    
+    # 为每个原子类型创建单独的2×4图
+    all_results = {}
+    
+    for atom_type in atom_types:
+        # 扩展原子类型名称列表以支持更多元素
+        atom_names = ["C", "H", "O", "N", "F", "S", "Cl", "Br"]
+        if atom_type < len(atom_names):
+            atom_name = atom_names[atom_type]
+        else:
+            atom_name = f"Type{atom_type}"
+        
+        # 获取梯度场数据
+        pred_gradients_3d = pred_field[:, atom_type, :]
+        pred_gradients = torch.norm(pred_gradients_3d, dim=1)
+        pred_gradients_x, pred_gradients_y, pred_gradients_z = pred_gradients_3d[:, 0], pred_gradients_3d[:, 1], pred_gradients_3d[:, 2]
+        
+        # 创建2×4的子图
+        fig, ((ax1, ax2, ax3, ax4), (ax5, ax6, ax7, ax8)) = plt.subplots(2, 4, figsize=(24, 12))
+        
+        # 生成x坐标
+        x = torch.linspace(x_range[0], x_range[1], n_points, device=device)
+        
+        # 子图1: 梯度场幅度
+        ax1.plot(x.cpu().numpy(), pred_gradients.cpu().numpy(), 
+                 label=f'Generated Field ({atom_name})', 
+                 linewidth=2, color='red', alpha=0.8)
+        ax1.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
+        ax1.set_xlabel('X Position (Å)', fontsize=12)
+        ax1.set_ylabel('Gradient Field Magnitude', fontsize=12)
+        ax1.set_title(f'Gradient Field Magnitude - {atom_name} Atoms\n'
+                      f'Sample {sample_idx}, Line: y={y_coord:.2f}, z={z_coord:.2f}', fontsize=14)
+        ax1.grid(True, alpha=0.3)
+        ax1.legend(fontsize=11)
+        
+        # 子图2: X方向分量
+        ax2.plot(x.cpu().numpy(), pred_gradients_x.cpu().numpy(), 
+                 label=f'Generated X ({atom_name})', 
+                 linewidth=2, color='red', alpha=0.8)
+        ax2.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
+        ax2.set_xlabel('X Position (Å)', fontsize=12)
+        ax2.set_ylabel('X Component of Gradient Field', fontsize=12)
+        ax2.set_title(f'X Direction Component - {atom_name} Atoms\n'
+                      f'(Positive = Right, Negative = Left)', fontsize=14)
+        ax2.grid(True, alpha=0.3)
+        ax2.legend(fontsize=11)
+        
+        # 子图3: Y方向分量
+        ax3.plot(x.cpu().numpy(), pred_gradients_y.cpu().numpy(), 
+                 label=f'Generated Y ({atom_name})', 
+                 linewidth=2, color='red', alpha=0.8)
+        ax3.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
+        ax3.set_xlabel('X Position (Å)', fontsize=12)
+        ax3.set_ylabel('Y Component of Gradient Field', fontsize=12)
+        ax3.set_title(f'Y Direction Component - {atom_name} Atoms\n'
+                      f'(Positive = Up, Negative = Down)', fontsize=14)
+        ax3.grid(True, alpha=0.3)
+        ax3.legend(fontsize=11)
+        
+        # 子图4: Z方向分量
+        ax4.plot(x.cpu().numpy(), pred_gradients_z.cpu().numpy(), 
+                 label=f'Generated Z ({atom_name})', 
+                 linewidth=2, color='red', alpha=0.8)
+        ax4.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
+        ax4.set_xlabel('X Position (Å)', fontsize=12)
+        ax4.set_ylabel('Z Component of Gradient Field', fontsize=12)
+        ax4.set_title(f'Z Direction Component - {atom_name} Atoms\n'
+                      f'(Positive = Forward, Negative = Backward)', fontsize=14)
+        ax4.grid(True, alpha=0.3)
+        ax4.legend(fontsize=11)
+        
+        # 子图5-8: 其他分析图（可以根据需要添加）
+        ax5.text(0.5, 0.5, f'Additional Analysis\nfor {atom_name}', 
+                ha='center', va='center', transform=ax5.transAxes, fontsize=14)
+        ax5.set_title(f'Analysis 5 - {atom_name}')
+        
+        ax6.text(0.5, 0.5, f'Additional Analysis\nfor {atom_name}', 
+                ha='center', va='center', transform=ax6.transAxes, fontsize=14)
+        ax6.set_title(f'Analysis 6 - {atom_name}')
+        
+        ax7.text(0.5, 0.5, f'Additional Analysis\nfor {atom_name}', 
+                ha='center', va='center', transform=ax7.transAxes, fontsize=14)
+        ax7.set_title(f'Analysis 7 - {atom_name}')
+        
+        ax8.text(0.5, 0.5, f'Additional Analysis\nfor {atom_name}', 
+                ha='center', va='center', transform=ax8.transAxes, fontsize=14)
+        ax8.set_title(f'Analysis 8 - {atom_name}')
+        
+        plt.tight_layout()
+        
+        # 保存图像
+        if save_path:
+            # 为每个原子类型创建单独的文件
+            atom_save_path = save_path.replace('.png', f'_{atom_name}.png')
+            plt.savefig(atom_save_path, dpi=300, bbox_inches='tight')
+            print(f"1D field visualization saved: {atom_save_path}")
+            
+            # 记录结果
+            all_results[atom_name] = {
+                'save_path': atom_save_path,
+                'atom_type': atom_type,
+                'field_magnitude': pred_gradients.cpu().numpy(),
+                'field_x': pred_gradients_x.cpu().numpy(),
+                'field_y': pred_gradients_y.cpu().numpy(),
+                'field_z': pred_gradients_z.cpu().numpy()
+            }
+        else:
+            plt.show()
         
         # 关闭图形以释放内存
         plt.close(fig)

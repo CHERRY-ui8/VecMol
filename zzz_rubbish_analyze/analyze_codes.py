@@ -220,19 +220,6 @@ def analyze_codes(mode: str = 'real', codes_path: str = None,
         except Exception as e:
             print(f"诊断流程出错: {e}")
 
-    # 10. 可选：体素维度诊断
-    if mode == 'real' and globals().get('_VOXEL_DIAGNOSE', False):
-        try:
-            diagnose_voxel_codes(
-                raw_codes,
-                grid_size=cfg.dset.grid_size,
-                output_prefix=output_prefix,
-                reduce_method=globals().get('_VOXEL_REDUCE', 'mean'),
-                topk_bc=globals().get('_VOXEL_TOPK', 32)
-            )
-        except Exception as e:
-            print(f"体素诊断出错: {e}")
-
     return raw_codes, normalized_codes, smooth_codes
 
 
@@ -368,122 +355,6 @@ def diagnose_real_codes(raw_codes, normalized_codes=None, output_prefix=None, n_
     plt.savefig(path_plot, dpi=300, bbox_inches='tight')
     print(f"诊断图已保存到: {diag_name}")
 
-def _reduce_codes_to_scalar_series(codes, method='mean'):
-    """
-    将 [N, G, C] 的 codes 在通道维上聚合为标量序列 [N, G]。
-    method: 'mean' 或 'pc1'（按每个体素做PC1投影）。
-    """
-    if method == 'mean':
-        return codes.mean(dim=-1)
-    elif method == 'pc1':
-        with torch.no_grad():
-            N, G, C = codes.shape
-            x = codes.detach().cpu().numpy()
-            s = np.zeros((N, G), dtype=np.float32)
-            for g in range(G):
-                X = x[:, g, :]
-                Xc = X - X.mean(axis=0, keepdims=True)
-                try:
-                    U, S, Vt = np.linalg.svd(Xc, full_matrices=False)
-                    v = Vt[0]
-                    s[:, g] = Xc @ v
-                except Exception:
-                    s[:, g] = X.mean(axis=1)
-            return torch.from_numpy(s)
-    else:
-        raise ValueError(f"Unknown reduce method: {method}")
-
-def _compute_voxel_stats(scalar_series, grid_size):
-    """
-    对每个体素统计 scalar_series 的分布特征。
-    scalar_series: [N, G]
-    返回: dict of 3D numpy arrays, 形状 [grid,grid,grid]
-    """
-    N, G = scalar_series.shape
-    gs = grid_size
-    x = scalar_series.detach().cpu().numpy()
-    mean = x.mean(axis=0)
-    std = x.std(axis=0) + 1e-8
-    z = (x - mean) / std
-    skew = (z**3).mean(axis=0)
-    kurt = (z**4).mean(axis=0)
-    exceed = (np.abs(z) > 3).mean(axis=0)
-    bc = (skew**2 + 1.0) / (kurt + 1e-8)
-    def to3(v):
-        return v.reshape(gs, gs, gs)
-    return {
-        'mean': to3(mean),
-        'std': to3(std - 1e-8),
-        'skew': to3(skew),
-        'kurtosis': to3(kurt),
-        'exceed_3sigma': to3(exceed),
-        'bc': to3(bc),
-    }
-
-def diagnose_voxel_codes(raw_codes, grid_size, output_prefix=None, reduce_method='mean', topk_bc=32):
-    """按体素维度诊断分布，输出CSV与二维投影热力图，以及BC最高体素的直方图。"""
-    scalar_series = _reduce_codes_to_scalar_series(raw_codes, reduce_method)
-    stats = _compute_voxel_stats(scalar_series, grid_size)
-
-    gs = grid_size
-    ii, jj, kk = np.meshgrid(np.arange(gs), np.arange(gs), np.arange(gs), indexing='ij')
-    flat = {k: v.reshape(-1) for k, v in stats.items()}
-    csv_name = 'voxel_stats.csv' if output_prefix is None else f'{output_prefix}_voxel_stats.csv'
-    csv_path = f'/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/{csv_name}'
-    try:
-        with open(csv_path, 'w') as f:
-            f.write('index,i,j,k,mean,std,skew,kurtosis,exceed_3sigma,bc\n')
-            for t in range(gs**3):
-                f.write(','.join(map(str, [
-                    t, int(ii.reshape(-1)[t]), int(jj.reshape(-1)[t]), int(kk.reshape(-1)[t]),
-                    float(flat['mean'][t]), float(flat['std'][t]), float(flat['skew'][t]), float(flat['kurtosis'][t]),
-                    float(flat['exceed_3sigma'][t]), float(flat['bc'][t])
-                ])) + '\n')
-        print(f"体素统计已保存到: {csv_name}")
-    except Exception as e:
-        print(f"写入体素CSV失败: {e}")
-
-    import matplotlib.pyplot as plt
-    proj = {k: v.max(axis=2) for k, v in stats.items()}
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-    keys = ['mean','std','skew','kurtosis','exceed_3sigma','bc']
-    cmaps = ['viridis','magma','coolwarm','plasma','inferno','cividis']
-    for ax, key, cmap in zip(axes.reshape(-1), keys, cmaps):
-        im = ax.imshow(proj[key], origin='lower', cmap=cmap)
-        ax.set_title(f'{key} (max-proj z)')
-        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    plt.tight_layout()
-    name_proj = 'voxel_stats_projection.png' if output_prefix is None else f'{output_prefix}_voxel_stats_projection.png'
-    path_proj = f'/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/{name_proj}'
-    plt.savefig(path_proj, dpi=300, bbox_inches='tight')
-    print(f"体素统计投影图已保存到: {name_proj}")
-
-    bc_flat = flat['bc']
-    topk = min(topk_bc, gs**3)
-    top_idx = np.argsort(bc_flat)[-topk:][::-1]
-    vals = scalar_series.detach().cpu().numpy()
-    import math
-    rows = math.ceil(topk / 4)
-    fig2, axes2 = plt.subplots(rows, 4, figsize=(16, 3*rows))
-    axes2 = np.atleast_2d(axes2)
-    for k in range(topk):
-        g = top_idx[k]
-        r, c = divmod(k, 4)
-        ax = axes2[r, c]
-        v = vals[:, g]
-        m, s = v.mean(), v.std()
-        ax.hist(v, bins=60, density=True, alpha=0.7, color='tab:purple')
-        ax.axvline(m-3*s, color='red', linestyle='--'); ax.axvline(m+3*s, color='red', linestyle='--')
-        ax.set_title(f'voxel {g} (bc={bc_flat[g]:.3f})')
-        ax.grid(True, alpha=0.3)
-    for k in range(topk, rows*4):
-        r, c = divmod(k, 4)
-        axes2[r, c].axis('off')
-    plt.tight_layout()
-    name_hist = 'voxel_topk_hist.png' if output_prefix is None else f'{output_prefix}_voxel_topk_hist.png'
-    path_hist = f'/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/{name_hist}'
-    plt.savefig(path_hist, dpi=300, bbox_inches='tight')
-    print(f"体素Top-BC直方图已保存到: {name_hist}")
 
 def analyze_codes_stats(codes, name):
     """
@@ -711,9 +582,6 @@ if __name__ == "__main__":
                        help='codes路径: real模式为.pt文件路径，generated模式为包含code_*.pt的目录路径')
     parser.add_argument('--diagnose', action='store_true', help='real模式下输出每通道统计与诊断图')
     parser.add_argument('--diagnose_n_channels', type=int, default=32, help='诊断图中展示的代表通道数目')
-    parser.add_argument('--voxel_diagnose', action='store_true', help='real模式下进行体素维度分布诊断')
-    parser.add_argument('--voxel_reduce', choices=['mean','pc1'], default='mean', help='体素诊断的通道聚合方式')
-    parser.add_argument('--voxel_topk_bc', type=int, default=32, help='体素诊断中按BC展示的Top-K直方图数量')
     
     args = parser.parse_args()
     
@@ -721,9 +589,6 @@ if __name__ == "__main__":
         # 将诊断开关暴露给上游流程
         _DIAGNOSE_REAL = bool(args.diagnose)
         _DIAG_N = int(args.diagnose_n_channels)
-        _VOXEL_DIAGNOSE = bool(args.voxel_diagnose)
-        _VOXEL_REDUCE = str(args.voxel_reduce)
-        _VOXEL_TOPK = int(args.voxel_topk_bc)
         raw_codes, normalized_codes, smooth_codes = analyze_codes(
             mode=args.mode,
             codes_path=args.codes_path

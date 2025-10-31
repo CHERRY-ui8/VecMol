@@ -7,12 +7,11 @@ defaults:
   - override hydra/job_logging: custom
   - _self_
 
-fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20250929/lightning_logs/version_2/checkpoints/model-epoch=16004.ckpt
-
-dirname: ../exps/funcmol/fm_qm9/20250929
+fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251029/lightning_logs/version_0/checkpoints/model-epoch=199.ckpt
+dirname: ../exps/funcmol/fm_qm9/20251025
 
 # 生成参数
-max_samples: 5  # 要生成的分子数量
+max_samples: 50  # 要生成的分子数量
 field_methods: ['tanh']  # 要使用的field方法
 
 diffusion_method: "new" #  方法选择: "old" (WJS) 或 "new" (DDPM)
@@ -21,14 +20,14 @@ diffusion_method: "new" #  方法选择: "old" (WJS) 或 "new" (DDPM)
 ddpm:
   n_samples: 10  # DDPM推理时生成的样本数量
   batch_size: 2  # DDPM采样的批次大小
-  num_timesteps: 1000  # 时间步数（NOTE：与训练时保持一致）
+  num_timesteps: 100  # 时间步数 NOTE 100or1000！！！
   hidden_dim: 128  # 与checkpoint中的实际模型架构保持一致
   num_layers: 4  # 与checkpoint中的实际模型架构保持一致
   time_emb_dim: 64  # 与checkpoint中的实际模型架构保持一致
   
   # Beta调度配置
-  beta_start: 1e-4
-  beta_end: 0.02
+  beta_start: 0.0005
+  beta_end: 0.05
   schedule: "linear"  # 可选: "linear", "cosine", "sigmoid"
   
   # Sigmoid调度参数（仅当schedule为"sigmoid"时使用）

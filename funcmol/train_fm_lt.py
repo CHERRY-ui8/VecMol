@@ -24,7 +24,7 @@ from omegaconf import OmegaConf
 import hydra
 
 # Set GPU environment
-os.environ['CUDA_VISIBLE_DEVICES'] = "2,3,4,5,6,7"
+os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3,4,5,6,7"
 
 from funcmol.models.funcmol import create_funcmol
 from funcmol.utils.utils_fm import (
@@ -75,7 +75,7 @@ class FuncmolLightningModule(pl.LightningModule):
         self.save_hyperparameters(ignore=['enc', 'dec_module', 'code_stats'])
         
         # Create Funcmol model
-        self.funcmol = create_funcmol(config, None)
+        self.funcmol = create_funcmol(config)
         
         # Set up loss function
         self.criterion = nn.MSELoss(reduction="mean")
@@ -127,11 +127,10 @@ class FuncmolLightningModule(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         """Training step logic"""
         # 添加调试信息
-        if batch_idx == 0:  # 只在第一个batch打印
-            print(f"[DEBUG] Using diffusion_method: {self.funcmol.diffusion_method}")
-            print(f"[DEBUG] Training step type: {'DDPM' if self.funcmol.diffusion_method == 'new' else 'Original'}")
+        # if batch_idx == 0:  # 只在第一个batch打印
+        #     print(f"[DEBUG] Using diffusion_method: {self.funcmol.diffusion_method}")
         
-        if self.funcmol.diffusion_method == "new":
+        if self.funcmol.diffusion_method == "new" or self.funcmol.diffusion_method == "new_x0":
             # DDPM训练
             return self._training_step_ddpm(batch, batch_idx)
         else:
@@ -144,9 +143,9 @@ class FuncmolLightningModule(pl.LightningModule):
         codes, _ = self._process_batch(batch)
         
         # 添加调试信息
-        if batch_idx == 0:  # 只在第一个batch打印
-            print(f"[DEBUG] DDPM training step - input shape: {codes.shape}")
-            print(f"[DEBUG] Using diffusion constants: {list(self.funcmol.diffusion_consts.keys())}")
+        # if batch_idx == 0:  # 只在第一个batch打印
+        #     print(f"[DEBUG] DDPM training step - input shape: {codes.shape}")
+        #     print(f"[DEBUG] Using diffusion constants: {list(self.funcmol.diffusion_consts.keys())}")
         
         # DDPM训练步骤 - 直接使用3维输入 [B, N*N*N, code_dim]
         loss = self.funcmol.train_ddpm_step(codes)
@@ -188,7 +187,7 @@ class FuncmolLightningModule(pl.LightningModule):
     
     def validation_step(self, batch, batch_idx):
         """Validation step logic"""
-        if self.funcmol.diffusion_method == "new":
+        if self.funcmol.diffusion_method == "new" or self.funcmol.diffusion_method == "new_x0":
             # DDPM验证
             return self._validation_step_ddpm(batch, batch_idx)
         else:
@@ -497,7 +496,7 @@ def main(config):
     
     logger = TensorBoardLogger(
         save_dir=config["dirname"],
-        name="tensorboard",
+        # name="tensorboard",
         default_hp_metric=False
     )
     

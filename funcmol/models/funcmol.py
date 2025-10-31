@@ -7,37 +7,27 @@ from funcmol.utils.utils_fm import add_noise_to_code
 from funcmol.utils.utils_nf import unnormalize_code
 from funcmol.models.unet1d import MLPResCode
 from funcmol.models.egnn_denoiser import GNNDenoiser
-from funcmol.models.ddpm import create_diffusion_constants, compute_ddpm_loss, p_sample_loop
+from funcmol.models.ddpm import (create_diffusion_constants, compute_ddpm_loss, 
+    p_sample_loop, compute_ddpm_loss_x0, p_sample_loop_x0)
 
-
-########################################################################################
-# Helper function for printing
-def _print(fabric, message):
-    """Print message using fabric if available, otherwise use regular print."""
-    if fabric is not None:
-        fabric.print(message)
-    else:
-        print(message)
 
 ########################################################################################
 # create funcmol
-def create_funcmol(config: dict, fabric: object = None):
+def create_funcmol(config: dict):
     """
     Create and compile a FuncMol model.
 
     Args:
         config (dict): Configuration dictionary for the FuncMol model.
-        fabric (object): An object providing necessary methods and attributes for model creation.
-                        If None, will use single GPU mode.
 
     Returns:
         torch.nn.Module: The compiled FuncMol model.
     """
-    model = FuncMol(config, fabric=fabric)
+    model = FuncMol(config)
 
     # n params
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    _print(fabric, f">> FuncMol has {(n_params/1e6):.02f}M parameters")
+    print(f">> FuncMol has {(n_params/1e6):.02f}M parameters")
 
     # Disable torch.compile due to compatibility issues with torch_cluster
     # model = torch.compile(model)
@@ -48,21 +38,17 @@ def create_funcmol(config: dict, fabric: object = None):
 ########################################################################################
 # FuncMol class
 class FuncMol(nn.Module):
-    def __init__(self, config: dict, fabric=None):
+    def __init__(self, config: dict):
         super().__init__()
-        # Handle both fabric and single GPU modes
-        if fabric is not None:
-            self.device = fabric.device
-        else:
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         self.smooth_sigma = config["smooth_sigma"]
         self.grid_size = config["dset"]["grid_size"]  # 保存grid_size配置
         
         # 添加diffusion方法选择
-        self.diffusion_method = config.get("diffusion_method", "old")  # "old" 或 "new"
+        self.diffusion_method = config.get("diffusion_method", "old")  # "old", "new" 或 "new_x0"
         
-        if self.diffusion_method == "new":
+        if self.diffusion_method == "new" or self.diffusion_method == "new_x0":
             self.net = GNNDenoiser(
                 code_dim=config["decoder"]["code_dim"],
                 hidden_dim=config.get("ddpm", {}).get("hidden_dim", 128),
@@ -123,7 +109,7 @@ class FuncMol(nn.Module):
             print(f"[DENOISER DEBUG] Input y - min: {y.min().item():.6f}, max: {y.max().item():.6f}, mean: {y.mean().item():.6f}, std: {y.std().item():.6f}")
             print(f"[DENOISER DEBUG] Input y - shape: {y.shape}, device: {y.device}, dtype: {y.dtype}")
         
-        if self.diffusion_method == "new":
+        if self.diffusion_method == "new" or self.diffusion_method == "new_x0":
             # DDPM方法需要时间步
             if t is None:
                 raise ValueError("Time steps 't' are required for DDPM method")
@@ -160,11 +146,18 @@ class FuncMol(nn.Module):
         Returns:
         - score: The score tensor of shape (batch_size, channels, height, width).
         """
-        if self.diffusion_method == "new":
-            # DDPM方法：score就是预测的噪声
+        if self.diffusion_method == "new" or self.diffusion_method == "new_x0":
+            # DDPM方法：对于new_x0，score需要从预测的x0计算
             if t is None:
                 raise ValueError("Time steps 't' are required for DDPM method")
-            score = self.forward(y, t, debug=debug)
+            if self.diffusion_method == "new":
+                # 预测噪声epsilon版本：score就是预测的噪声
+                score = self.forward(y, t, debug=debug)
+            else:  # new_x0
+                # 预测x0版本：需要从预测的x0计算score
+                # 对于DDPM，score的推导较为复杂，这里简化处理
+                # 实际上，在new_x0模式下，score函数可能不需要，因为采样直接使用p_sample_x0
+                score = self.forward(y, t, debug=debug)  # 返回预测的x0
         else:
             # 原有方法
             xhat = self.forward(y, debug=debug)
@@ -206,13 +199,15 @@ class FuncMol(nn.Module):
         Returns:
             训练损失
         """
-        if self.diffusion_method != "new":
-            raise ValueError("DDPM training step only available for 'new' diffusion method")
-        
-        return compute_ddpm_loss(self.net, x_0, self.diffusion_consts, self.device)
+        if self.diffusion_method == "new":
+            return compute_ddpm_loss(self.net, x_0, self.diffusion_consts, self.device)
+        elif self.diffusion_method == "new_x0":
+            return compute_ddpm_loss_x0(self.net, x_0, self.diffusion_consts, self.device)
+        else:
+            raise ValueError("DDPM training step only available for 'new' or 'new_x0' diffusion method")
 
     @torch.no_grad()
-    def sample_ddpm(self, shape: tuple, progress: bool = True) -> torch.Tensor:
+    def sample_ddpm(self, shape: tuple, code_stats=None, progress: bool = True) -> torch.Tensor:
         """
         DDPM采样
         
@@ -223,11 +218,18 @@ class FuncMol(nn.Module):
         Returns:
             生成的样本 [B, N*N*N, code_dim]
         """
-        if self.diffusion_method != "new":
-            raise ValueError("DDPM sampling only available for 'new' diffusion method")
+        if self.diffusion_method == "new":
+            self.net.eval()
+            sampled = p_sample_loop(self.net, shape, self.diffusion_consts, self.device, progress)
+        elif self.diffusion_method == "new_x0":
+            self.net.eval()
+            sampled = p_sample_loop_x0(self.net, shape, self.diffusion_consts, self.device, progress)
+        else:
+            raise ValueError("DDPM sampling only available for 'new' or 'new_x0' diffusion method")
         
-        self.net.eval()
-        return p_sample_loop(self.net, shape, self.diffusion_consts, self.device, progress)
+        if code_stats is not None:
+            sampled = unnormalize_code(sampled, code_stats)
+        return sampled
 
     @torch.no_grad()
     def wjs_walk_steps(
@@ -353,7 +355,6 @@ class FuncMol(nn.Module):
     def sample(
         self,
         config: dict,
-        fabric = None,
         delete_net: bool = False,
         code_stats: dict = None,  # noqa: ARG002
         debug: bool = False,
@@ -363,7 +364,6 @@ class FuncMol(nn.Module):
 
         Args:
             config (dict): Configuration dictionary containing parameters for sampling.
-            fabric (optional): Fabric object for printing and logging.
             delete_net (bool, optional): If True, deletes the network and clears CUDA cache after sampling. Default is False.
             code_stats (dict, optional): Code statistics for unnormalization. If provided, codes will be unnormalized before returning.
 
@@ -372,14 +372,14 @@ class FuncMol(nn.Module):
         """
         self.eval()
 
-        if self.diffusion_method == "new":
+        if self.diffusion_method == "new" or self.diffusion_method == "new_x0":
             # 使用DDPM采样
-            return self._sample_ddpm(config, fabric, delete_net, code_stats, debug)
+            return self._sample_ddpm(config, delete_net, code_stats, debug)
         else:
             # 使用原有WJS采样
-            return self._sample_wjs(config, fabric, delete_net, code_stats, debug)
+            return self._sample_wjs(config, delete_net, code_stats, debug)
 
-    def _sample_ddpm(self, config: dict, fabric, delete_net: bool, code_stats: dict, debug: bool = False):  # noqa: ARG002
+    def _sample_ddpm(self, config: dict, delete_net: bool, code_stats: dict, debug: bool = False):  # noqa: ARG002
         """
         DDPM采样方法
         """
@@ -387,7 +387,7 @@ class FuncMol(nn.Module):
         n_samples = config.get("ddpm", {}).get("n_samples", 100)
         batch_size = config.get("ddpm", {}).get("batch_size", 10)
         
-        _print(fabric, f">> Sample codes with DDPM (n_samples: {n_samples})")
+        print(f">> Sample codes with DDPM (n_samples: {n_samples})")
         
         try:
             for _ in tqdm(range(0, n_samples, batch_size)):
@@ -405,7 +405,7 @@ class FuncMol(nn.Module):
                 torch.cuda.empty_cache()
                 
         except Exception as e:
-            _print(fabric, f"Error during DDPM sampling: {e}")
+            print(f"Error during DDPM sampling: {e}")
             raise e
 
         # Clean up network if requested
@@ -415,34 +415,34 @@ class FuncMol(nn.Module):
 
         # Concatenate all generated codes
         codes = torch.cat(codes_all, dim=0)
-        _print(fabric, f">> Generated {codes.size(0)} codes")
+        print(f">> Generated {codes.size(0)} codes")
         
         # 添加调试信息：检查codes的维度和内容
-        _print(fabric, f">> Codes shape: {codes.shape}")
-        _print(fabric, f">> Codes dtype: {codes.dtype}")
-        _print(fabric, f">> Codes device: {codes.device}")
+        print(f">> Codes shape: {codes.shape}")
+        print(f">> Codes dtype: {codes.dtype}")
+        print(f">> Codes device: {codes.device}")
         
         # 检查codes是否包含NaN/Inf
         if torch.isnan(codes).any():
-            _print(fabric, ">> WARNING: codes contains NaN values!")
+            print(">> WARNING: codes contains NaN values!")
             nan_count = torch.isnan(codes).sum().item()
-            _print(fabric, f">> NaN count: {nan_count}")
+            print(f">> NaN count: {nan_count}")
         
         if torch.isinf(codes).any():
-            _print(fabric, ">> WARNING: codes contains Inf values!")
+            print(">> WARNING: codes contains Inf values!")
             inf_count = torch.isinf(codes).sum().item()
-            _print(fabric, f">> Inf count: {inf_count}")
+            print(f">> Inf count: {inf_count}")
         
         # 检查codes的数值范围（normalized）
-        _print(fabric, f">> Codes min: {codes.min().item():.6f}, max: {codes.max().item():.6f}")
+        print(f">> Codes min: {codes.min().item():.6f}, max: {codes.max().item():.6f}")
 
         # 如果提供了code_stats，进行unnormalization
         if code_stats is not None:
-            _print(fabric, ">> Unnormalizing codes...")
+            print(">> Unnormalizing codes...")
             codes = unnormalize_code(codes, code_stats)
-            _print(fabric, f">> Unnormalized codes min: {codes.min().item():.6f}, max: {codes.max().item():.6f}")
+            print(f">> Unnormalized codes min: {codes.min().item():.6f}, max: {codes.max().item():.6f}")
         else:
-            _print(fabric, ">> No code_stats provided, returning normalized codes")
+            print(">> No code_stats provided, returning normalized codes")
 
         # 清理内存
         del codes_all
@@ -450,12 +450,12 @@ class FuncMol(nn.Module):
 
         return codes
 
-    def _sample_wjs(self, config: dict, fabric, delete_net: bool, code_stats: dict, debug: bool):
+    def _sample_wjs(self, config: dict, delete_net: bool, code_stats: dict, debug: bool):
         """
         原有WJS采样方法
         """
         codes_all = []
-        _print(fabric, f">> Sample codes with WJS (n_chains: {config['wjs']['n_chains']})")
+        print(f">> Sample codes with WJS (n_chains: {config['wjs']['n_chains']})")
         try:
             for _ in tqdm(range(config["wjs"]["repeats_wjs"])):
                 # initialize y and v
@@ -478,9 +478,9 @@ class FuncMol(nn.Module):
                     
                     # 如果数值范围异常，打印警告
                     if y_norm_after > 100.0 or v_norm_after > 100.0:
-                        _print(fabric, f">> WARNING: Large values detected at step {step_idx}")
-                        _print(fabric, f">> y_norm: {y_norm_before:.2f} -> {y_norm_after:.2f}")
-                        _print(fabric, f">> v_norm: {v_norm_before:.2f} -> {v_norm_after:.2f}")
+                        print(f">> WARNING: Large values detected at step {step_idx}")
+                        print(f">> y_norm: {y_norm_before:.2f} -> {y_norm_after:.2f}")
+                        print(f">> v_norm: {v_norm_before:.2f} -> {v_norm_after:.2f}")
                     
                     code_hats = self.wjs_jump_step(y)  # jump
                     codes_all.append(code_hats.cpu())
@@ -490,7 +490,7 @@ class FuncMol(nn.Module):
                 torch.cuda.empty_cache()
                 
         except Exception as e:
-            _print(fabric, f"Error during WJS sampling: {e}")
+            print(f"Error during WJS sampling: {e}")
             raise e
 
         # Clean up network if requested
@@ -500,34 +500,34 @@ class FuncMol(nn.Module):
 
         # Concatenate all generated codes
         codes = torch.cat(codes_all, dim=0)
-        _print(fabric, f">> Generated {codes.size(0)} codes")
+        print(f">> Generated {codes.size(0)} codes")
         
         # 添加调试信息：检查codes的维度和内容
-        _print(fabric, f">> Codes shape: {codes.shape}")
-        _print(fabric, f">> Codes dtype: {codes.dtype}")
-        _print(fabric, f">> Codes device: {codes.device}")
+        print(f">> Codes shape: {codes.shape}")
+        print(f">> Codes dtype: {codes.dtype}")
+        print(f">> Codes device: {codes.device}")
         
         # 检查codes是否包含NaN/Inf
         if torch.isnan(codes).any():
-            _print(fabric, ">> WARNING: codes contains NaN values!")
+            print(">> WARNING: codes contains NaN values!")
             nan_count = torch.isnan(codes).sum().item()
-            _print(fabric, f">> NaN count: {nan_count}")
+            print(f">> NaN count: {nan_count}")
         
         if torch.isinf(codes).any():
-            _print(fabric, ">> WARNING: codes contains Inf values!")
+            print(">> WARNING: codes contains Inf values!")
             inf_count = torch.isinf(codes).sum().item()
-            _print(fabric, f">> Inf count: {inf_count}")
+            print(f">> Inf count: {inf_count}")
         
         # 检查codes的数值范围（normalized）
-        _print(fabric, f">> Codes min: {codes.min().item():.6f}, max: {codes.max().item():.6f}")
+        print(f">> Codes min: {codes.min().item():.6f}, max: {codes.max().item():.6f}")
 
         # 如果提供了code_stats，进行unnormalization
         if code_stats is not None:
-            _print(fabric, ">> Unnormalizing codes...")
+            print(">> Unnormalizing codes...")
             codes = unnormalize_code(codes, code_stats)
-            _print(fabric, f">> Unnormalized codes min: {codes.min().item():.6f}, max: {codes.max().item():.6f}")
+            print(f">> Unnormalized codes min: {codes.min().item():.6f}, max: {codes.max().item():.6f}")
         else:
-            _print(fabric, ">> No code_stats provided, returning normalized codes")
+            print(">> No code_stats provided, returning normalized codes")
 
         # 清理内存
         del codes_all

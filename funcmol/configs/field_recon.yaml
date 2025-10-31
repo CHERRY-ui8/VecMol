@@ -28,7 +28,7 @@ nf_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neu
 # 注意：输出目录将基于此路径自动创建，如: exps/neural_field/nf_qm9_20250804_153549_358664
 
 # FuncMol denoiser路径（仅在denoiser_field模式下需要）
-fm_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20250912/lightning_logs/version_0/checkpoints/funcmol-epoch=319-val_loss=0.0106.ckpt
+fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251029/lightning_logs/version_0/checkpoints/model-epoch=199.ckpt
 # 注意：输出目录将基于此路径自动创建，如: exps/funcmol/fm_qm9_20250804_153549_358664
 
 # Hydra 设置
