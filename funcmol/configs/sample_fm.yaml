@@ -7,11 +7,12 @@ defaults:
   - override hydra/job_logging: custom
   - _self_
 
-fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251029/lightning_logs/version_0/checkpoints/model-epoch=199.ckpt
+# fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251029/lightning_logs/version_0/checkpoints/model-epoch=199.ckpt
+fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251101/lightning_logs/version_0/checkpoints/model-epoch=39.ckpt
 dirname: ../exps/funcmol/fm_qm9/20251025
 
 # 生成参数
-max_samples: 50  # 要生成的分子数量
+max_samples: 10  # 要生成的分子数量
 field_methods: ['tanh']  # 要使用的field方法
 
 diffusion_method: "new" #  方法选择: "old" (WJS) 或 "new" (DDPM)

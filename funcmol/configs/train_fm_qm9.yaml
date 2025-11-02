@@ -52,7 +52,7 @@ num_epochs: 50000
 num_iterations: 50000  # 总迭代次数，用于学习率调度
 dset:
   batch_size: 16
-  num_workers: 4
+  num_workers: 0
 
 ckpt_every_n_epochs: 5  # 每隔多少epoch保存一次ckpt
 decoder:

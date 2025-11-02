@@ -840,10 +840,10 @@ class GNFVisualizer(MoleculeVisualizer):
         plt.close()
 
 def visualize_1d_gradient_field_comparison(
-    gt_coords: torch.Tensor,
-    gt_types: torch.Tensor,
-    converter: GNFConverter,
-    field_func,
+    gt_coords: Optional[torch.Tensor] = None,
+    gt_types: Optional[torch.Tensor] = None,
+    converter: Optional[GNFConverter] = None,
+    field_func=None,
     sample_idx: int = 0,
     atom_types: Union[int, List[int]] = 0,
     x_range: Optional[tuple] = None,
@@ -853,16 +853,16 @@ def visualize_1d_gradient_field_comparison(
     save_path: Optional[str] = None,
     display_sample_idx: Optional[int] = None
 ) -> Optional[Dict[str, Any]]:
-    """可视化一维方向上的梯度场对比（真实 vs 预测）。
+    """可视化一维方向上的梯度场对比（真实 vs 预测）或仅预测梯度场（去噪后的codes对应的梯度场）。
 
     Args:
-        gt_coords: 真实分子坐标，形状 [batch, n_atoms, 3]
-        gt_types: 真实原子类型，形状 [batch, n_atoms]
-        converter: GNF 转换器
+        gt_coords: 真实分子坐标，形状 [batch, n_atoms, 3]。如果为None，则只绘制预测梯度场
+        gt_types: 真实原子类型，形状 [batch, n_atoms]。如果为None，则只绘制预测梯度场
+        converter: GNF 转换器。当gt_coords为None时可以为None
         field_func: 梯度场函数
         sample_idx: 数据访问的样本索引（用于访问gt_coords和gt_types）
         atom_types: 原子类型列表或单个原子类型（0=C, 1=H, 2=O, 3=N, 4=F）
-        x_range: x 轴范围，None 时自动计算
+        x_range: x 轴范围，None 时自动计算（需要gt_coords）或使用默认范围
         n_points: 采样点数
         y_coord: y 坐标固定值
         z_coord: z 坐标固定值
@@ -872,7 +872,17 @@ def visualize_1d_gradient_field_comparison(
     Returns:
         包含梯度场统计信息和数据的字典，若无目标原子类型则返回 None
     """
-    device = gt_coords.device
+    # 判断是否有ground truth数据
+    has_gt = gt_coords is not None and gt_types is not None
+    
+    if has_gt:
+        device = gt_coords.device
+    else:
+        # 如果没有gt，从field_func获取device
+        if hasattr(field_func, 'parameters'):
+            device = next(field_func.parameters()).device
+        else:
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # 设置显示用的样本索引
     if display_sample_idx is None:
@@ -882,46 +892,55 @@ def visualize_1d_gradient_field_comparison(
     if isinstance(atom_types, int):
         atom_types = [atom_types]
     
-    gt_mask = (gt_types[sample_idx] != PADDING_INDEX)
-    gt_valid_coords = gt_coords[sample_idx][gt_mask]
-    gt_valid_types = gt_types[sample_idx][gt_mask]
-    
-    # 检查所有原子类型是否存在
-    available_atom_types = []
-    for atom_type in atom_types:
-        target_atoms = gt_valid_types == atom_type
-        if target_atoms.sum() > 0:
-            available_atom_types.append(atom_type)
-        else:
-            # 扩展原子类型名称列表以支持更多元素
-            atom_names = ['C', 'H', 'O', 'N', 'F', 'S', 'Cl', 'Br']
-            if atom_type < len(atom_names):
-                atom_name = atom_names[atom_type]
+    if has_gt:
+        gt_mask = (gt_types[sample_idx] != PADDING_INDEX)
+        gt_valid_coords = gt_coords[sample_idx][gt_mask]
+        gt_valid_types = gt_types[sample_idx][gt_mask]
+        
+        # 检查所有原子类型是否存在
+        available_atom_types = []
+        for atom_type in atom_types:
+            target_atoms = gt_valid_types == atom_type
+            if target_atoms.sum() > 0:
+                available_atom_types.append(atom_type)
             else:
-                atom_name = f"Type{atom_type}"
-            print(f"警告：样本 {display_sample_idx} 中没有类型为 {atom_name} 的原子")
-    
-    if not available_atom_types:
-        print("没有找到任何指定的原子类型")
-        return None
-    
-    if x_range is None:
-        x_min = gt_valid_coords[:, 0].min().item()
-        x_max = gt_valid_coords[:, 0].max().item()
-        margin = (x_max - x_min) * 0.2
-        x_range = (x_min - margin, x_max + margin)
-        print(f"自动计算 x 轴范围: {x_range}")
+                # 扩展原子类型名称列表以支持更多元素
+                atom_names = ['C', 'H', 'O', 'N', 'F', 'S', 'Cl', 'Br']
+                if atom_type < len(atom_names):
+                    atom_name = atom_names[atom_type]
+                else:
+                    atom_name = f"Type{atom_type}"
+                print(f"警告：样本 {display_sample_idx} 中没有类型为 {atom_name} 的原子")
+        
+        if not available_atom_types:
+            print("没有找到任何指定的原子类型")
+            return None
+        
+        if x_range is None:
+            x_min = gt_valid_coords[:, 0].min().item()
+            x_max = gt_valid_coords[:, 0].max().item()
+            margin = (x_max - x_min) * 0.2
+            x_range = (x_min - margin, x_max + margin)
+            print(f"自动计算 x 轴范围: {x_range}")
+    else:
+        # 没有ground truth时，所有指定的原子类型都可以绘制
+        available_atom_types = atom_types
+        
+        if x_range is None:
+            x_range = (-5.0, 5.0)  # 默认范围
+            print(f"使用默认 x 轴范围: {x_range}")
     
     x = torch.linspace(x_range[0], x_range[1], n_points, device=device)
     query_points = torch.zeros(n_points, 3, device=device)
     query_points[:, 0], query_points[:, 1], query_points[:, 2] = x, y_coord, z_coord
     
     with torch.no_grad():
-        gt_field = converter.mol2gnf(
-            gt_valid_coords.unsqueeze(0),
-            gt_valid_types.unsqueeze(0),
-            query_points.unsqueeze(0)
-        )
+        if has_gt:
+            gt_field = converter.mol2gnf(
+                gt_valid_coords.unsqueeze(0),
+                gt_valid_types.unsqueeze(0),
+                query_points.unsqueeze(0)
+            )
         pred_field = field_func(query_points.unsqueeze(0))
         # 确保预测场形状正确
         if pred_field.dim() == 4:  # [batch, n_points, n_atom_types, 3]
@@ -939,28 +958,39 @@ def visualize_1d_gradient_field_comparison(
             atom_name = f"Type{atom_type}"
         
         # 获取梯度场数据
-        gt_gradients_3d = gt_field[0, :, atom_type, :]
-        gt_gradients = torch.norm(gt_gradients_3d, dim=1)
-        gt_gradients_x, gt_gradients_y, gt_gradients_z = gt_gradients_3d[:, 0], gt_gradients_3d[:, 1], gt_gradients_3d[:, 2]
-        
         pred_gradients_3d = pred_field[:, atom_type, :]
         pred_gradients = torch.norm(pred_gradients_3d, dim=1)
         pred_gradients_x, pred_gradients_y, pred_gradients_z = pred_gradients_3d[:, 0], pred_gradients_3d[:, 1], pred_gradients_3d[:, 2]
         
-        # 获取原子位置
-        target_atoms = gt_valid_types == atom_type
-        atom_positions = gt_valid_coords[target_atoms, 0].cpu().numpy()
+        if has_gt:
+            gt_gradients_3d = gt_field[0, :, atom_type, :]
+            gt_gradients = torch.norm(gt_gradients_3d, dim=1)
+            gt_gradients_x, gt_gradients_y, gt_gradients_z = gt_gradients_3d[:, 0], gt_gradients_3d[:, 1], gt_gradients_3d[:, 2]
+            
+            # 获取原子位置
+            target_atoms = gt_valid_types == atom_type
+            atom_positions = gt_valid_coords[target_atoms, 0].cpu().numpy()
+        else:
+            atom_positions = np.array([])  # 没有原子位置信息
         
-        # 创建2×4的子图
-        fig, ((ax1, ax2, ax3, ax4), (ax5, ax6, ax7, ax8)) = plt.subplots(2, 4, figsize=(24, 12))
+        # 创建子图：有gt时2×4（对比图+误差分析），无gt时1×4（仅预测）
+        if has_gt:
+            fig, ((ax1, ax2, ax3, ax4), (ax5, ax6, ax7, ax8)) = plt.subplots(2, 4, figsize=(24, 12))
+        else:
+            fig, (ax1, ax2, ax3, ax4) = plt.subplots(1, 4, figsize=(24, 6))
         
-        # 子图1: 梯度场幅度对比
-        ax1.plot(x.cpu().numpy(), gt_gradients.cpu().numpy(), 
-                 label=f'Ground Truth ({atom_name})', 
-                 linewidth=2, color='blue', alpha=0.8)
-        ax1.plot(x.cpu().numpy(), pred_gradients.cpu().numpy(), 
-                 label=f'Predicted ({atom_name})', 
-                 linewidth=2, color='red', alpha=0.8, linestyle='--')
+        # 子图1: 梯度场幅度对比或仅预测
+        if has_gt:
+            ax1.plot(x.cpu().numpy(), gt_gradients.cpu().numpy(), 
+                     label=f'Ground Truth ({atom_name})', 
+                     linewidth=2, color='blue', alpha=0.8)
+            ax1.plot(x.cpu().numpy(), pred_gradients.cpu().numpy(), 
+                     label=f'Predicted ({atom_name})', 
+                     linewidth=2, color='red', alpha=0.8, linestyle='--')
+        else:
+            ax1.plot(x.cpu().numpy(), pred_gradients.cpu().numpy(), 
+                     label=f'Generated Field ({atom_name})', 
+                     linewidth=2, color='red', alpha=0.8)
         
         if len(atom_positions) > 0:
             for i, pos in enumerate(atom_positions):
@@ -976,19 +1006,39 @@ def visualize_1d_gradient_field_comparison(
         ax1.grid(True, alpha=0.3)
         ax1.legend(fontsize=11)
         
-        mse = torch.mean((gt_gradients - pred_gradients) ** 2).item()
-        mae = torch.mean(torch.abs(gt_gradients - pred_gradients)).item()
-        ax1.text(0.02, 0.98, f'MSE: {mse:.6f}\nMAE: {mae:.6f}', 
-                 transform=ax1.transAxes, verticalalignment='top',
-                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8), fontsize=10)
+        if has_gt:
+            mse = torch.mean((gt_gradients - pred_gradients) ** 2).item()
+            mae = torch.mean(torch.abs(gt_gradients - pred_gradients)).item()
+            ax1.text(0.02, 0.98, f'MSE: {mse:.6f}\nMAE: {mae:.6f}', 
+                     transform=ax1.transAxes, verticalalignment='top',
+                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8), fontsize=10)
+        else:
+            mean_val = pred_gradients.mean().item()
+            std_val = pred_gradients.std().item()
+            ax1.text(0.02, 0.98, f'Mean: {mean_val:.6f}\nStd: {std_val:.6f}', 
+                     transform=ax1.transAxes, verticalalignment='top',
+                     bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8), fontsize=10)
         
-        # 子图2: X方向分量对比
-        ax2.plot(x.cpu().numpy(), gt_gradients_x.cpu().numpy(), 
-                 label=f'Ground Truth X ({atom_name})', 
-                 linewidth=2, color='blue', alpha=0.8)
-        ax2.plot(x.cpu().numpy(), pred_gradients_x.cpu().numpy(), 
-                 label=f'Predicted X ({atom_name})', 
-                 linewidth=2, color='red', alpha=0.8, linestyle='--')
+        # 子图2: X方向分量对比或仅预测
+        if has_gt:
+            ax2.plot(x.cpu().numpy(), gt_gradients_x.cpu().numpy(), 
+                     label=f'Ground Truth X ({atom_name})', 
+                     linewidth=2, color='blue', alpha=0.8)
+            ax2.plot(x.cpu().numpy(), pred_gradients_x.cpu().numpy(), 
+                     label=f'Predicted X ({atom_name})', 
+                     linewidth=2, color='red', alpha=0.8, linestyle='--')
+            mse_x = torch.mean((gt_gradients_x - pred_gradients_x) ** 2).item()
+            mae_x = torch.mean(torch.abs(gt_gradients_x - pred_gradients_x)).item()
+            stat_text = f'MSE: {mse_x:.6f}\nMAE: {mae_x:.6f}'
+            stat_color = 'lightgreen'
+        else:
+            ax2.plot(x.cpu().numpy(), pred_gradients_x.cpu().numpy(), 
+                     label=f'Generated X ({atom_name})', 
+                     linewidth=2, color='red', alpha=0.8)
+            mean_x = pred_gradients_x.mean().item()
+            std_x = pred_gradients_x.std().item()
+            stat_text = f'Mean: {mean_x:.6f}\nStd: {std_x:.6f}'
+            stat_color = 'lightblue'
         
         if len(atom_positions) > 0:
             for i, pos in enumerate(atom_positions):
@@ -1001,20 +1051,30 @@ def visualize_1d_gradient_field_comparison(
                       f'(Positive = Right, Negative = Left)', fontsize=14)
         ax2.grid(True, alpha=0.3)
         ax2.legend(fontsize=11)
-        
-        mse_x = torch.mean((gt_gradients_x - pred_gradients_x) ** 2).item()
-        mae_x = torch.mean(torch.abs(gt_gradients_x - pred_gradients_x)).item()
-        ax2.text(0.02, 0.98, f'MSE: {mse_x:.6f}\nMAE: {mae_x:.6f}', 
+        ax2.text(0.02, 0.98, stat_text, 
                  transform=ax2.transAxes, verticalalignment='top',
-                 bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.8), fontsize=10)
+                 bbox=dict(boxstyle='round', facecolor=stat_color, alpha=0.8), fontsize=10)
         
-        # 子图3: Y方向分量对比
-        ax3.plot(x.cpu().numpy(), gt_gradients_y.cpu().numpy(), 
-                 label=f'Ground Truth Y ({atom_name})', 
-                 linewidth=2, color='blue', alpha=0.8)
-        ax3.plot(x.cpu().numpy(), pred_gradients_y.cpu().numpy(), 
-                 label=f'Predicted Y ({atom_name})', 
-                 linewidth=2, color='red', alpha=0.8, linestyle='--')
+        # 子图3: Y方向分量对比或仅预测
+        if has_gt:
+            ax3.plot(x.cpu().numpy(), gt_gradients_y.cpu().numpy(), 
+                     label=f'Ground Truth Y ({atom_name})', 
+                     linewidth=2, color='blue', alpha=0.8)
+            ax3.plot(x.cpu().numpy(), pred_gradients_y.cpu().numpy(), 
+                     label=f'Predicted Y ({atom_name})', 
+                     linewidth=2, color='red', alpha=0.8, linestyle='--')
+            mse_y = torch.mean((gt_gradients_y - pred_gradients_y) ** 2).item()
+            mae_y = torch.mean(torch.abs(gt_gradients_y - pred_gradients_y)).item()
+            stat_text = f'MSE: {mse_y:.6f}\nMAE: {mae_y:.6f}'
+            stat_color = 'lightgreen'
+        else:
+            ax3.plot(x.cpu().numpy(), pred_gradients_y.cpu().numpy(), 
+                     label=f'Generated Y ({atom_name})', 
+                     linewidth=2, color='red', alpha=0.8)
+            mean_y = pred_gradients_y.mean().item()
+            std_y = pred_gradients_y.std().item()
+            stat_text = f'Mean: {mean_y:.6f}\nStd: {std_y:.6f}'
+            stat_color = 'lightblue'
         
         if len(atom_positions) > 0:
             for i, pos in enumerate(atom_positions):
@@ -1027,20 +1087,30 @@ def visualize_1d_gradient_field_comparison(
                       f'(Positive = Up, Negative = Down)', fontsize=14)
         ax3.grid(True, alpha=0.3)
         ax3.legend(fontsize=11)
-        
-        mse_y = torch.mean((gt_gradients_y - pred_gradients_y) ** 2).item()
-        mae_y = torch.mean(torch.abs(gt_gradients_y - pred_gradients_y)).item()
-        ax3.text(0.02, 0.98, f'MSE: {mse_y:.6f}\nMAE: {mae_y:.6f}', 
+        ax3.text(0.02, 0.98, stat_text, 
                  transform=ax3.transAxes, verticalalignment='top',
-                 bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.8), fontsize=10)
+                 bbox=dict(boxstyle='round', facecolor=stat_color, alpha=0.8), fontsize=10)
         
-        # 子图4: Z方向分量对比
-        ax4.plot(x.cpu().numpy(), gt_gradients_z.cpu().numpy(), 
-                 label=f'Ground Truth Z ({atom_name})', 
-                 linewidth=2, color='blue', alpha=0.8)
-        ax4.plot(x.cpu().numpy(), pred_gradients_z.cpu().numpy(), 
-                 label=f'Predicted Z ({atom_name})', 
-                 linewidth=2, color='red', alpha=0.8, linestyle='--')
+        # 子图4: Z方向分量对比或仅预测
+        if has_gt:
+            ax4.plot(x.cpu().numpy(), gt_gradients_z.cpu().numpy(), 
+                     label=f'Ground Truth Z ({atom_name})', 
+                     linewidth=2, color='blue', alpha=0.8)
+            ax4.plot(x.cpu().numpy(), pred_gradients_z.cpu().numpy(), 
+                     label=f'Predicted Z ({atom_name})', 
+                     linewidth=2, color='red', alpha=0.8, linestyle='--')
+            mse_z = torch.mean((gt_gradients_z - pred_gradients_z) ** 2).item()
+            mae_z = torch.mean(torch.abs(gt_gradients_z - pred_gradients_z)).item()
+            stat_text = f'MSE: {mse_z:.6f}\nMAE: {mae_z:.6f}'
+            stat_color = 'lightgreen'
+        else:
+            ax4.plot(x.cpu().numpy(), pred_gradients_z.cpu().numpy(), 
+                     label=f'Generated Z ({atom_name})', 
+                     linewidth=2, color='red', alpha=0.8)
+            mean_z = pred_gradients_z.mean().item()
+            std_z = pred_gradients_z.std().item()
+            stat_text = f'Mean: {mean_z:.6f}\nStd: {std_z:.6f}'
+            stat_color = 'lightblue'
         
         if len(atom_positions) > 0:
             for i, pos in enumerate(atom_positions):
@@ -1053,104 +1123,103 @@ def visualize_1d_gradient_field_comparison(
                       f'(Positive = Forward, Negative = Backward)', fontsize=14)
         ax4.grid(True, alpha=0.3)
         ax4.legend(fontsize=11)
-        
-        mse_z = torch.mean((gt_gradients_z - pred_gradients_z) ** 2).item()
-        mae_z = torch.mean(torch.abs(gt_gradients_z - pred_gradients_z)).item()
-        ax4.text(0.02, 0.98, f'MSE: {mse_z:.6f}\nMAE: {mae_z:.6f}', 
+        ax4.text(0.02, 0.98, stat_text, 
                  transform=ax4.transAxes, verticalalignment='top',
-                 bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.8), fontsize=10)
+                 bbox=dict(boxstyle='round', facecolor=stat_color, alpha=0.8), fontsize=10)
         
-        # 子图5: 幅度误差分析
-        error = gt_gradients - pred_gradients
-        ax5.plot(x.cpu().numpy(), error.cpu().numpy(), 
-                 label='Magnitude Error (GT - Pred)', 
-                 linewidth=2, color='purple', alpha=0.8)
-        
-        if len(atom_positions) > 0:
-            for i, pos in enumerate(atom_positions):
-                ax5.axvline(x=pos, color='green', linestyle=':', alpha=0.7, linewidth=1.5)
-        
-        ax5.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
-        ax5.set_xlabel('X Position (Å)', fontsize=12)
-        ax5.set_ylabel('Magnitude Error', fontsize=12)
-        ax5.set_title(f'Magnitude Error Analysis - {atom_name} Atoms', fontsize=14)
-        ax5.grid(True, alpha=0.3)
-        ax5.legend(fontsize=11)
-        
-        error_mean = torch.mean(error).item()
-        error_std = torch.std(error).item()
-        ax5.text(0.02, 0.98, f'Error Mean: {error_mean:.6f}\nError Std: {error_std:.6f}', 
-                 transform=ax5.transAxes, verticalalignment='top',
-                 bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8), fontsize=10)
-        
-        # 子图6: X方向误差分析
-        error_x = gt_gradients_x - pred_gradients_x
-        ax6.plot(x.cpu().numpy(), error_x.cpu().numpy(), 
-                 label='X Component Error (GT - Pred)', 
-                 linewidth=2, color='orange', alpha=0.8)
-        
-        if len(atom_positions) > 0:
-            for i, pos in enumerate(atom_positions):
-                ax6.axvline(x=pos, color='green', linestyle=':', alpha=0.7, linewidth=1.5)
-        
-        ax6.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
-        ax6.set_xlabel('X Position (Å)', fontsize=12)
-        ax6.set_ylabel('X Component Error', fontsize=12)
-        ax6.set_title(f'X Direction Error Analysis - {atom_name} Atoms', fontsize=14)
-        ax6.grid(True, alpha=0.3)
-        ax6.legend(fontsize=11)
-        
-        error_x_mean = torch.mean(error_x).item()
-        error_x_std = torch.std(error_x).item()
-        ax6.text(0.02, 0.98, f'Error Mean: {error_x_mean:.6f}\nError Std: {error_x_std:.6f}', 
-                 transform=ax6.transAxes, verticalalignment='top',
-                 bbox=dict(boxstyle='round', facecolor='lightcoral', alpha=0.8), fontsize=10)
-        
-        # 子图7: Y方向误差分析
-        error_y = gt_gradients_y - pred_gradients_y
-        ax7.plot(x.cpu().numpy(), error_y.cpu().numpy(), 
-                 label='Y Component Error (GT - Pred)', 
-                 linewidth=2, color='purple', alpha=0.8)
-        
-        if len(atom_positions) > 0:
-            for i, pos in enumerate(atom_positions):
-                ax7.axvline(x=pos, color='green', linestyle=':', alpha=0.7, linewidth=1.5)
-        
-        ax7.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
-        ax7.set_xlabel('X Position (Å)', fontsize=12)
-        ax7.set_ylabel('Y Component Error', fontsize=12)
-        ax7.set_title(f'Y Direction Error Analysis - {atom_name} Atoms', fontsize=14)
-        ax7.grid(True, alpha=0.3)
-        ax7.legend(fontsize=11)
-        
-        error_y_mean = torch.mean(error_y).item()
-        error_y_std = torch.std(error_y).item()
-        ax7.text(0.02, 0.98, f'Error Mean: {error_y_mean:.6f}\nError Std: {error_y_std:.6f}', 
-                 transform=ax7.transAxes, verticalalignment='top',
-                 bbox=dict(boxstyle='round', facecolor='lightcoral', alpha=0.8), fontsize=10)
-        
-        # 子图8: Z方向误差分析
-        error_z = gt_gradients_z - pred_gradients_z
-        ax8.plot(x.cpu().numpy(), error_z.cpu().numpy(), 
-                 label='Z Component Error (GT - Pred)', 
-                 linewidth=2, color='brown', alpha=0.8)
-        
-        if len(atom_positions) > 0:
-            for i, pos in enumerate(atom_positions):
-                ax8.axvline(x=pos, color='green', linestyle=':', alpha=0.7, linewidth=1.5)
-        
-        ax8.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
-        ax8.set_xlabel('X Position (Å)', fontsize=12)
-        ax8.set_ylabel('Z Component Error', fontsize=12)
-        ax8.set_title(f'Z Direction Error Analysis - {atom_name} Atoms', fontsize=14)
-        ax8.grid(True, alpha=0.3)
-        ax8.legend(fontsize=11)
-        
-        error_z_mean = torch.mean(error_z).item()
-        error_z_std = torch.std(error_z).item()
-        ax8.text(0.02, 0.98, f'Error Mean: {error_z_mean:.6f}\nError Std: {error_z_std:.6f}', 
-                 transform=ax8.transAxes, verticalalignment='top',
-                 bbox=dict(boxstyle='round', facecolor='lightcoral', alpha=0.8), fontsize=10)
+        # 子图5-8: 误差分析（仅在有ground truth时绘制）
+        if has_gt:
+            # 子图5: 幅度误差分析
+            error = gt_gradients - pred_gradients
+            ax5.plot(x.cpu().numpy(), error.cpu().numpy(), 
+                     label='Magnitude Error (GT - Pred)', 
+                     linewidth=2, color='purple', alpha=0.8)
+            
+            if len(atom_positions) > 0:
+                for i, pos in enumerate(atom_positions):
+                    ax5.axvline(x=pos, color='green', linestyle=':', alpha=0.7, linewidth=1.5)
+            
+            ax5.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
+            ax5.set_xlabel('X Position (Å)', fontsize=12)
+            ax5.set_ylabel('Magnitude Error', fontsize=12)
+            ax5.set_title(f'Magnitude Error Analysis - {atom_name} Atoms', fontsize=14)
+            ax5.grid(True, alpha=0.3)
+            ax5.legend(fontsize=11)
+            
+            error_mean = torch.mean(error).item()
+            error_std = torch.std(error).item()
+            ax5.text(0.02, 0.98, f'Error Mean: {error_mean:.6f}\nError Std: {error_std:.6f}', 
+                     transform=ax5.transAxes, verticalalignment='top',
+                     bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8), fontsize=10)
+            
+            # 子图6: X方向误差分析
+            error_x = gt_gradients_x - pred_gradients_x
+            ax6.plot(x.cpu().numpy(), error_x.cpu().numpy(), 
+                     label='X Component Error (GT - Pred)', 
+                     linewidth=2, color='orange', alpha=0.8)
+            
+            if len(atom_positions) > 0:
+                for i, pos in enumerate(atom_positions):
+                    ax6.axvline(x=pos, color='green', linestyle=':', alpha=0.7, linewidth=1.5)
+            
+            ax6.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
+            ax6.set_xlabel('X Position (Å)', fontsize=12)
+            ax6.set_ylabel('X Component Error', fontsize=12)
+            ax6.set_title(f'X Direction Error Analysis - {atom_name} Atoms', fontsize=14)
+            ax6.grid(True, alpha=0.3)
+            ax6.legend(fontsize=11)
+            
+            error_x_mean = torch.mean(error_x).item()
+            error_x_std = torch.std(error_x).item()
+            ax6.text(0.02, 0.98, f'Error Mean: {error_x_mean:.6f}\nError Std: {error_x_std:.6f}', 
+                     transform=ax6.transAxes, verticalalignment='top',
+                     bbox=dict(boxstyle='round', facecolor='lightcoral', alpha=0.8), fontsize=10)
+            
+            # 子图7: Y方向误差分析
+            error_y = gt_gradients_y - pred_gradients_y
+            ax7.plot(x.cpu().numpy(), error_y.cpu().numpy(), 
+                     label='Y Component Error (GT - Pred)', 
+                     linewidth=2, color='purple', alpha=0.8)
+            
+            if len(atom_positions) > 0:
+                for i, pos in enumerate(atom_positions):
+                    ax7.axvline(x=pos, color='green', linestyle=':', alpha=0.7, linewidth=1.5)
+            
+            ax7.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
+            ax7.set_xlabel('X Position (Å)', fontsize=12)
+            ax7.set_ylabel('Y Component Error', fontsize=12)
+            ax7.set_title(f'Y Direction Error Analysis - {atom_name} Atoms', fontsize=14)
+            ax7.grid(True, alpha=0.3)
+            ax7.legend(fontsize=11)
+            
+            error_y_mean = torch.mean(error_y).item()
+            error_y_std = torch.std(error_y).item()
+            ax7.text(0.02, 0.98, f'Error Mean: {error_y_mean:.6f}\nError Std: {error_y_std:.6f}', 
+                     transform=ax7.transAxes, verticalalignment='top',
+                     bbox=dict(boxstyle='round', facecolor='lightcoral', alpha=0.8), fontsize=10)
+            
+            # 子图8: Z方向误差分析
+            error_z = gt_gradients_z - pred_gradients_z
+            ax8.plot(x.cpu().numpy(), error_z.cpu().numpy(), 
+                     label='Z Component Error (GT - Pred)', 
+                     linewidth=2, color='brown', alpha=0.8)
+            
+            if len(atom_positions) > 0:
+                for i, pos in enumerate(atom_positions):
+                    ax8.axvline(x=pos, color='green', linestyle=':', alpha=0.7, linewidth=1.5)
+            
+            ax8.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
+            ax8.set_xlabel('X Position (Å)', fontsize=12)
+            ax8.set_ylabel('Z Component Error', fontsize=12)
+            ax8.set_title(f'Z Direction Error Analysis - {atom_name} Atoms', fontsize=14)
+            ax8.grid(True, alpha=0.3)
+            ax8.legend(fontsize=11)
+            
+            error_z_mean = torch.mean(error_z).item()
+            error_z_std = torch.std(error_z).item()
+            ax8.text(0.02, 0.98, f'Error Mean: {error_z_mean:.6f}\nError Std: {error_z_std:.6f}', 
+                     transform=ax8.transAxes, verticalalignment='top',
+                     bbox=dict(boxstyle='round', facecolor='lightcoral', alpha=0.8), fontsize=10)
         
         plt.tight_layout()
         
@@ -1173,39 +1242,58 @@ def visualize_1d_gradient_field_comparison(
             plt.show()
         
         # 保存该原子类型的统计信息
-        all_results[atom_name] = {
+        result_dict = {
             'save_path': atom_save_path if save_path else None,
-            'mse': mse,
-            'mae': mae,
-            'mse_x': mse_x,
-            'mae_x': mae_x,
-            'mse_y': mse_y,
-            'mae_y': mae_y,
-            'mse_z': mse_z,
-            'mae_z': mae_z,
-            'error_mean': error_mean,
-            'error_std': error_std,
-            'error_x_mean': error_x_mean,
-            'error_x_std': error_x_std,
-            'error_y_mean': error_y_mean,
-            'error_y_std': error_y_std,
-            'error_z_mean': error_z_mean,
-            'error_z_std': error_z_std,
-            'gt_gradients': gt_gradients.cpu().numpy(),
             'pred_gradients': pred_gradients.cpu().numpy(),
-            'gt_gradients_x': gt_gradients_x.cpu().numpy(),
             'pred_gradients_x': pred_gradients_x.cpu().numpy(),
-            'gt_gradients_y': gt_gradients_y.cpu().numpy(),
             'pred_gradients_y': pred_gradients_y.cpu().numpy(),
-            'gt_gradients_z': gt_gradients_z.cpu().numpy(),
             'pred_gradients_z': pred_gradients_z.cpu().numpy(),
-            'error': error.cpu().numpy(),
-            'error_x': error_x.cpu().numpy(),
-            'error_y': error_y.cpu().numpy(),
-            'error_z': error_z.cpu().numpy(),
             'x_positions': x.cpu().numpy(),
-            'atom_positions': atom_positions
         }
+        
+        if has_gt:
+            result_dict.update({
+                'mse': mse,
+                'mae': mae,
+                'mse_x': mse_x,
+                'mae_x': mae_x,
+                'mse_y': mse_y,
+                'mae_y': mae_y,
+                'mse_z': mse_z,
+                'mae_z': mae_z,
+                'error_mean': error_mean,
+                'error_std': error_std,
+                'error_x_mean': error_x_mean,
+                'error_x_std': error_x_std,
+                'error_y_mean': error_y_mean,
+                'error_y_std': error_y_std,
+                'error_z_mean': error_z_mean,
+                'error_z_std': error_z_std,
+                'gt_gradients': gt_gradients.cpu().numpy(),
+                'gt_gradients_x': gt_gradients_x.cpu().numpy(),
+                'gt_gradients_y': gt_gradients_y.cpu().numpy(),
+                'gt_gradients_z': gt_gradients_z.cpu().numpy(),
+                'error': error.cpu().numpy(),
+                'error_x': error_x.cpu().numpy(),
+                'error_y': error_y.cpu().numpy(),
+                'error_z': error_z.cpu().numpy(),
+                'atom_positions': atom_positions
+            })
+        else:
+            result_dict.update({
+                'magnitude_mean': pred_gradients.mean().item(),
+                'magnitude_std': pred_gradients.std().item(),
+                'magnitude_max': pred_gradients.max().item(),
+                'magnitude_min': pred_gradients.min().item(),
+                'x_mean': pred_gradients_x.mean().item(),
+                'x_std': pred_gradients_x.std().item(),
+                'y_mean': pred_gradients_y.mean().item(),
+                'y_std': pred_gradients_y.std().item(),
+                'z_mean': pred_gradients_z.mean().item(),
+                'z_std': pred_gradients_z.std().item(),
+            })
+        
+        all_results[atom_name] = result_dict
     
     return {
         'all_results': all_results,

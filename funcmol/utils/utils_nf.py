@@ -20,7 +20,7 @@ except ImportError:
 
 
 
-def create_neural_field(config: dict, fabric: object) -> tuple:
+def create_neural_field(config: dict) -> tuple:
     """
     Creates and compiles the Encoder and Decoder neural network models based on the provided configuration.
 
@@ -39,7 +39,6 @@ def create_neural_field(config: dict, fabric: object) -> tuple:
                 - "encoder": A dictionary with the following keys:
                     - "level_channels" (list of int): The number of channels at each level of the encoder.
                     - "smaller" (bool, optional): A flag indicating whether to use a smaller encoder. Defaults to False.
-        fabric (object): An object that provides utility functions such as printing and model compilation.
 
     Returns:
         tuple: A tuple containing the compiled Encoder and Decoder models.
@@ -429,7 +428,6 @@ def set_requires_grad(module: nn.Module, tf: bool = False) -> None:
 def load_network(
     checkpoint: dict,
     net: nn.Module,
-    fabric: object,
     net_name: str = "dec",
     is_compile: bool = True,
     sd: str = None,
@@ -440,7 +438,6 @@ def load_network(
     Args:
         checkpoint (dict): A dictionary containing the checkpoint data.
         net (nn.Module): The neural network model to load the state dictionary into.
-        fabric (object): An object with a print method for logging (can be Lightning module or Fabric).
         net_name (str, optional): The key name for the network's state dictionary in the checkpoint. Defaults to "dec".
         is_compile (bool, optional): A flag indicating whether the network is compiled. Defaults to True.
         sd (str, optional): A specific key for the state dictionary in the checkpoint. If None, defaults to using net_name.
@@ -487,11 +484,7 @@ def load_network(
     # assert (weight_first_layer_before != weight_first_layer_after).item(), "loading did not work"
     # 现在的 net_dict 是一个dict，net_dict.keys()的第0个元素是"layers.0.weight"，对应的是grid_coords，它本来就不会更新，所以这里的assert一定会报错
     
-    # Handle both Lightning module and Fabric
-    if hasattr(fabric, 'print'):
-        fabric.print(f">> loaded {net_name}")
-    else:
-        print(f">> loaded {net_name}")
+    print(f">> loaded {net_name}")
 
     return net
 
@@ -574,7 +567,7 @@ def save_checkpoint(
     return loss_min_tot
 
 
-def load_neural_field(nf_checkpoint_or_path, fabric: object, config: dict = None) -> tuple:
+def load_neural_field(nf_checkpoint_or_path, config: dict = None) -> tuple:
     """
     Load and initialize the neural field encoder and decoder from a Lightning checkpoint.
     
@@ -584,7 +577,6 @@ def load_neural_field(nf_checkpoint_or_path, fabric: object, config: dict = None
 
     Args:
         nf_checkpoint_or_path: Either a dict containing the checkpoint data, or a string path to a .ckpt file.
-        fabric (object): The fabric object used for setting up the modules (can be Lightning module or Fabric).
         config (dict, optional): Configuration dictionary for initializing the encoder and decoder.
                                  If None, the configuration from the checkpoint will be used.
 
@@ -648,19 +640,8 @@ def load_neural_field(nf_checkpoint_or_path, fabric: object, config: dict = None
             config = nf_checkpoint["config"]
     
     # Initialize the decoder
-    enc, dec = create_neural_field(config, fabric)  # TODO: fix me
-    dec = Decoder({
-        "grid_size": config["dset"]["grid_size"],
-        "anchor_spacing": config["dset"]["anchor_spacing"],
-        "hidden_dim": config["decoder"]["hidden_dim"],
-        "n_layers": config["decoder"]["n_layers"],
-        "k_neighbors": config["decoder"]["k_neighbors"],
-        "n_channels": config["dset"]["n_channels"],
-        "code_dim": config["decoder"]["code_dim"],
-        "radius": config["decoder"].get("radius", 3.0),  # Add radius parameter with default
-        "cutoff": config["decoder"].get("cutoff", None)  # Add cutoff parameter with default
-    })
-    dec = load_network(nf_checkpoint, dec, fabric, net_name="dec")
+    enc, dec = create_neural_field(config)
+    dec = load_network(nf_checkpoint, dec, net_name="dec")
     # Disable torch.compile due to compatibility issues with torch_cluster
     # dec = torch.compile(dec)
     dec.eval()
@@ -675,7 +656,7 @@ def load_neural_field(nf_checkpoint_or_path, fabric: object, config: dict = None
         atom_k_neighbors=config["encoder"]["atom_k_neighbors"],
         anchor_spacing=config["dset"]["anchor_spacing"]
     )
-    enc = load_network(nf_checkpoint, enc, fabric, net_name="enc")
+    enc = load_network(nf_checkpoint, enc, net_name="enc")
     # Disable torch.compile for encoder due to torch_cluster compatibility issues
     # enc = torch.compile(enc)
     enc.eval()
@@ -686,10 +667,6 @@ def load_neural_field(nf_checkpoint_or_path, fabric: object, config: dict = None
     if hasattr(dec, '_orig_mod'):
         dec = dec._orig_mod
 
-    # Handle both Lightning module and Fabric
-    if hasattr(fabric, 'setup_module'):
-        dec = fabric.setup_module(dec)
-        enc = fabric.setup_module(enc)
     # For Lightning modules, we don't need setup_module as Lightning handles device placement
 
     print("Model loaded successfully!")

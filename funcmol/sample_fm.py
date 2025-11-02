@@ -104,8 +104,8 @@ def main(config: DictConfig) -> None:
 
     # 加载FuncMol denoiser
     with torch.no_grad():
-        funcmol = create_funcmol(config, fabric)
-        funcmol, code_stats = load_checkpoint_fm(funcmol, config["fm_pretrained_path"], fabric=fabric)
+        funcmol = create_funcmol(config)
+        funcmol, code_stats = load_checkpoint_fm(funcmol, config["fm_pretrained_path"])
         funcmol = funcmol.cuda()
         funcmol.eval()
         print("Loaded FuncMol denoiser")
@@ -113,7 +113,7 @@ def main(config: DictConfig) -> None:
         # 加载neural field decoder
         if config.get("nf_pretrained_path") is None:
             raise ValueError("nf_pretrained_path must be specified for denoiser mode")
-        encoder, decoder = load_neural_field(config["nf_pretrained_path"], fabric, config)
+        encoder, decoder = load_neural_field(config["nf_pretrained_path"], config)
         decoder = decoder.cuda()
         decoder.eval()
         decoder.set_code_stats(code_stats)

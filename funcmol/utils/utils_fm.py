@@ -59,55 +59,24 @@ def load_checkpoint_fm(
     model = model.cpu()
     
     if optimizer is not None:
-        load_network(checkpoint, model, fabric, is_compile=True, sd="funcmol_ema_state_dict", net_name="denoiser")
+        load_network(checkpoint, model, is_compile=True, sd="funcmol_ema_state_dict", net_name="denoiser")
         optimizer.load_state_dict(checkpoint["optimizer"])
         # Move model back to original device
         model = model.to(original_device)
         return model, optimizer, checkpoint["code_stats"]
     else:
-        load_network(checkpoint, model, fabric, is_compile=True, sd="funcmol_ema_state_dict", net_name="denoiser")
+        load_network(checkpoint, model, is_compile=True, sd="funcmol_ema_state_dict", net_name="denoiser")
         # Move model back to original device
         model = model.to(original_device)
-        fabric.print(f">> loaded model trained for {checkpoint['epoch']} epochs")
+        print(f">> loaded model trained for {checkpoint['epoch']} epochs")
         return model, checkpoint["code_stats"]
 
-
-def log_metrics(
-    exp_name: str,
-    epoch: int,
-    train_loss: float,
-    val_loss: float,
-    best_res: float,
-    time: float,
-    fabric: object
-):
-    """
-    Logs the metrics of a training experiment.
-
-    Args:
-        exp_name (str): The name of the experiment.
-        epoch (int): The current epoch number.
-        train_loss (float): The training loss value.
-        val_loss (float): The validation loss value.
-        best_res (float): The best result achieved so far.
-        time (float): The time taken for the epoch.
-        fabric (object): An object with a print method to output the log.
-
-    Returns:
-    None
-    """
-    str_ = f">> {exp_name} epoch: {epoch} ({time:.2f}s)\n"
-    str_ += f"[train_loss] {train_loss:.2f} |"
-    if val_loss is not None and best_res is not None:
-        str_ += f" | [val_loss] {val_loss:.2f} (best: {best_res:.2f})"
-    fabric.print(str_)
 
 def compute_codes(
     loader_field: torch.utils.data.DataLoader,
     enc: torch.nn.Module,
     config_nf: dict,
     split: str,
-    fabric: object,
     normalize_codes: bool,
     code_stats: dict=None,
 ) -> tuple:
@@ -119,7 +88,6 @@ def compute_codes(
         enc (torch.nn.Module): Encoder model to generate codes.
         config_nf (dict): Configuration dictionary for the neural field.
         split (str): Data split identifier (e.g., 'train', 'val', 'test').
-        fabric (object): Fabric object for distributed training.
         normalize_codes (bool): Whether to normalize the codes.
         code_stats (dict, optional): Optional dictionary to store code statistics. Defaults to None.
     Returns:
@@ -129,7 +97,6 @@ def compute_codes(
         loader_field,
         enc,
         config_nf,
-        fabric=fabric,
         to_cpu=True,
         code_stats=code_stats,
         n_samples=100_000,
@@ -144,7 +111,6 @@ def compute_codes(
 def compute_code_stats_offline(
     loader: torch.utils.data.DataLoader,
     split: str,
-    # fabric: object,
     normalize_codes: bool
 ) -> dict:
     """
@@ -206,7 +172,6 @@ def process_codes(
 
 def get_stats(
     codes: torch.Tensor,
-    # fabric: object = None,
     message: str = None,
 ):
     """

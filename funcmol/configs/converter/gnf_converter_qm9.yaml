@@ -2,7 +2,7 @@ sigma: 1
 n_iter: 3000  # 每次迭代都会调用decoder，很费时间，1000-2000
 # DBSCAN聚类参数
 eps: 0.15 # 形成簇的邻域半径，0.06
-min_samples: 30 # 形成簇的最小样本数，6
+min_samples: 20 # 形成簇的最小样本数，6
 sigma_ratios:
   C: 0.9    # 碳原子，较小的 sigma 使梯度场更集中
   H: 1.3    # 氢原子，较大的 sigma 使梯度场更分散

@@ -429,7 +429,7 @@ def main(config):
             
             # Compute codes for normalization
             _, code_stats = compute_codes(
-                loader_train, enc, config_nf, "train", None, config["normalize_codes"],
+                loader_train, enc, config_nf, "train", config["normalize_codes"],
                 code_stats=None
             )
         else:
