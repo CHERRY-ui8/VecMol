@@ -155,9 +155,9 @@ def main(config: DictConfig) -> None:
                 code_dim = config.get('encoder', {}).get('code_dim', 128)
                 batch_size = 1
                 
-                if diffusion_method == "new":
+                if diffusion_method == "new" or diffusion_method == "new_x0":
                     # DDPM采样
-                    print(f"Using DDPM sampling for sample {sample_idx}")
+                    print(f"Using DDPM sampling (method: {diffusion_method}) for sample {sample_idx}")
                     shape = (batch_size, grid_size**3, code_dim)
                     with torch.no_grad():
                         denoised_codes_3d = funcmol.sample_ddpm(shape, code_stats=code_stats, progress=True)

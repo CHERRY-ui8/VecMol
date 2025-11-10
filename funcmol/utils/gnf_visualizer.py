@@ -140,8 +140,310 @@ class MoleculeVisualizer:
         ax.set_zlim(z_min, z_max)
         ax.set_box_aspect([1, 1, 1])
 
+# 原子颜色映射
+ATOM_COLORS = {
+    0: 'black',  # C
+    1: 'gray',   # H
+    2: 'red',    # O
+    3: 'blue',   # N
+    4: 'green'   # F
+}
+
+def _setup_3d_axis(ax: plt.Axes, coords_list: List[np.ndarray], margin: float = 0.5):
+    """设置 3D 坐标轴的通用属性（独立函数版本）。
+
+    Args:
+        ax: 3D 绘图轴
+        coords_list: 坐标数组列表，用于确定轴范围
+        margin: 坐标轴边距
+    """
+    ax.set_xlabel('X (Å)')
+    ax.set_ylabel('Y (Å)')
+    ax.set_zlabel('Z (Å)')
+    ax.grid(True, alpha=0.3)
+    
+    all_coords = np.vstack(coords_list)
+    x_min, x_max = all_coords[:, 0].min() - margin, all_coords[:, 0].max() + margin
+    y_min, y_max = all_coords[:, 1].min() - margin, all_coords[:, 1].max() + margin
+    z_min, z_max = all_coords[:, 2].min() - margin, all_coords[:, 2].max() + margin
+    
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_max)
+    ax.set_zlim(z_min, z_max)
+    ax.set_box_aspect([1, 1, 1])
+
+def visualize_generation_step(
+    current_points: torch.Tensor,
+    iteration: int,
+    save_path: str,
+    current_types: torch.Tensor,
+    fixed_axis_limits: Optional[Dict] = None):
+    """可视化分子生成过程的单个步骤（独立函数版本）。
+    
+    Args:
+        current_points: 当前点位置，形状 [N, 3]
+        iteration: 迭代次数
+        save_path: 保存路径
+        current_types: 当前原子类型，形状 [N]
+        fixed_axis_limits: 可选的固定坐标轴范围字典
+    """
+    fig = plt.figure(figsize=(8, 8))
+    ax = fig.add_subplot(111, projection='3d')
+    
+    points_np = current_points.detach().cpu().numpy()
+    if current_types is not None:
+        types_np = current_types.detach().cpu().numpy()
+        for atom_type in range(5):
+            mask = (types_np == atom_type)
+            if mask.sum() > 0:
+                ax.scatter(points_np[mask, 0], points_np[mask, 1], points_np[mask, 2], 
+                          c=ATOM_COLORS[atom_type], marker='.', s=20, 
+                          label=f'{["C", "H", "O", "N", "F"][atom_type]}', alpha=0.5)
+    else:
+        ax.scatter(points_np[:, 0], points_np[:, 1], points_np[:, 2], 
+                  c='blue', marker='.', s=20, label='Generated Points', alpha=0.5)
+    
+    # 设置坐标轴
+    if fixed_axis_limits is not None:
+        # 使用固定的坐标轴范围
+        ax.set_xlim(fixed_axis_limits['x_min'], fixed_axis_limits['x_max'])
+        ax.set_ylim(fixed_axis_limits['y_min'], fixed_axis_limits['y_max'])
+        ax.set_zlim(fixed_axis_limits['z_min'], fixed_axis_limits['z_max'])
+        ax.set_xlabel('X (Å)')
+        ax.set_ylabel('Y (Å)')
+        ax.set_zlabel('Z (Å)')
+        ax.grid(True, alpha=0.3)
+    elif len(points_np) > 0:
+        # 动态调整坐标轴范围
+        _setup_3d_axis(ax, [points_np], margin=1.0)
+    
+    ax.view_init(elev=30, azim=60)
+    ax.set_box_aspect([1, 1, 1])
+    
+    ax.set_title(f"Generated Molecule - Iteration {iteration}")
+    ax.legend(loc='upper right', bbox_to_anchor=(1.0, 1.0))
+    
+    # 确保保存目录存在
+    save_dir = os.path.dirname(save_path)
+    if save_dir and not os.path.exists(save_dir):
+        os.makedirs(save_dir, exist_ok=True)
+    
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+def visualize_generated_molecule(
+    final_points: torch.Tensor,
+    final_types: torch.Tensor,
+    save_path: str):
+    """可视化最终生成的分子（独立函数版本）。
+    
+    Args:
+        final_points: 最终点位置，形状 [N, 3]
+        final_types: 最终原子类型，形状 [N]
+        save_path: 保存路径
+    """
+    fig = plt.figure(figsize=(12, 10))
+    ax = fig.add_subplot(111, projection='3d')
+    
+    points_np = final_points.detach().cpu().numpy()
+    if final_types is not None and len(final_types) > 0:
+        types_np = final_types.detach().cpu().numpy()
+        for atom_type in range(5):
+            mask = (types_np == atom_type)
+            if mask.sum() > 0:
+                ax.scatter(points_np[mask, 0], points_np[mask, 1], points_np[mask, 2], 
+                          c=ATOM_COLORS[atom_type], marker='o', s=150, 
+                          label=f'{["C", "H", "O", "N", "F"][atom_type]}', alpha=0.9)
+    else:
+        ax.scatter(points_np[:, 0], points_np[:, 1], points_np[:, 2], 
+                  c='blue', marker='o', s=150, label='Generated Molecule', alpha=0.9)
+    
+    # 设置坐标轴
+    if len(points_np) > 0:
+        _setup_3d_axis(ax, [points_np], margin=1.0)
+    
+    ax.view_init(elev=30, azim=60)
+    ax.set_box_aspect([1, 1, 1])
+    
+    ax.set_title("Generated Molecule (Final Result)")
+    ax.legend(loc='upper right', bbox_to_anchor=(1.0, 1.0))
+    
+    # 确保保存目录存在
+    save_dir = os.path.dirname(save_path)
+    if save_dir and not os.path.exists(save_dir):
+        os.makedirs(save_dir, exist_ok=True)
+    
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+def visualize_molecule_comparison(
+    orig_coords: torch.Tensor, 
+    recon_coords: torch.Tensor,
+    orig_types: Optional[torch.Tensor] = None,
+    recon_types: Optional[torch.Tensor] = None,
+    save_path: Optional[str] = None,
+    title: str = "Molecule Comparison"):
+    """可视化原始分子和重建分子的对比（独立函数版本）。
+
+    Args:
+        orig_coords: 原始分子坐标，形状 [N, 3]
+        recon_coords: 重建分子坐标，形状 [M, 3]
+        orig_types: 原始原子类型，形状 [N]
+        recon_types: 重建原子类型，形状 [M]
+        save_path: 保存路径，若为 None 则显示图像
+        title: 图像标题
+
+    Returns:
+        matplotlib Figure 对象
+    """
+    fig = plt.figure(figsize=(15, 7))
+    
+    ax1 = fig.add_subplot(131, projection='3d')
+    orig_coords_np = orig_coords.detach().cpu().numpy()
+    
+    if orig_types is not None:
+        orig_types_np = orig_types.detach().cpu().numpy()
+        for atom_type in range(5):
+            mask = (orig_types_np == atom_type)
+            if mask.sum() > 0:
+                ax1.scatter(orig_coords_np[mask, 0], orig_coords_np[mask, 1], orig_coords_np[mask, 2], 
+                           c=ATOM_COLORS[atom_type], marker='o', s=100, 
+                           label=f'Original {["C", "H", "O", "N", "F"][atom_type]}')
+    else:
+        ax1.scatter(orig_coords_np[:, 0], orig_coords_np[:, 1], orig_coords_np[:, 2], 
+                   c='blue', marker='o', s=100, label='Original', alpha=0.8)
+    ax1.set_title("Original Molecule")
+    ax1.legend(loc='upper right', bbox_to_anchor=(1.0, 1.0))
+    
+    ax2 = fig.add_subplot(132, projection='3d')
+    recon_coords_np = recon_coords.detach().cpu().numpy()
+    
+    if recon_types is not None:
+        recon_types_np = recon_types.detach().cpu().numpy()
+        for atom_type in range(5):
+            mask = (recon_types_np == atom_type)
+            if mask.sum() > 0:
+                ax2.scatter(recon_coords_np[mask, 0], recon_coords_np[mask, 1], recon_coords_np[mask, 2], 
+                           c=ATOM_COLORS[atom_type], marker='o', s=100, 
+                           label=f'Reconstructed {["C", "H", "O", "N", "F"][atom_type]}')
+    else:
+        ax2.scatter(recon_coords_np[:, 0], recon_coords_np[:, 1], recon_coords_np[:, 2], 
+                   c='red', marker='o', s=100, label='Reconstructed', alpha=0.8)
+    ax2.set_title("Reconstructed Molecule")
+    ax2.legend(loc='upper right', bbox_to_anchor=(1.0, 1.0))
+    
+    ax3 = fig.add_subplot(133, projection='3d')
+    
+    if orig_types is not None:
+        for atom_type in range(5):
+            mask = (orig_types_np == atom_type)
+            if mask.sum() > 0:
+                ax3.scatter(orig_coords_np[mask, 0], orig_coords_np[mask, 1], orig_coords_np[mask, 2], 
+                           c=ATOM_COLORS[atom_type], marker='o', s=100, alpha=0.5, 
+                           label=f'Original {["C", "H", "O", "N", "F"][atom_type]}')
+    
+    if recon_types is not None:
+        for atom_type in range(5):
+            mask = (recon_types_np == atom_type)
+            if mask.sum() > 0:
+                ax3.scatter(recon_coords_np[mask, 0], recon_coords_np[mask, 1], recon_coords_np[mask, 2], 
+                           c=ATOM_COLORS[atom_type], marker='s', s=100, alpha=0.5, 
+                           label=f'Reconstructed {["C", "H", "O", "N", "F"][atom_type]}')
+    else:
+        ax3.scatter(recon_coords_np[:, 0], recon_coords_np[:, 1], recon_coords_np[:, 2], 
+                   c='red', marker='s', s=100, alpha=0.5, label='Reconstructed')
+    ax3.set_title("Comparison")
+    ax3.legend(loc='upper right', bbox_to_anchor=(1.0, 1.0))
+    
+    coords_list = [orig_coords_np, recon_coords_np]
+    for ax in [ax1, ax2, ax3]:
+        _setup_3d_axis(ax, coords_list, margin=1.0)
+        ax.view_init(elev=30, azim=60)
+    
+    plt.suptitle(title, fontsize=16)
+    plt.tight_layout()
+    
+    if save_path:
+        # 确保保存目录存在
+        save_dir = os.path.dirname(save_path)
+        if save_dir and not os.path.exists(save_dir):
+            os.makedirs(save_dir, exist_ok=True)
+            print(f"Created directory: {save_dir}")
+        
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    return fig
+
+def visualize_reconstruction_step(
+    coords: torch.Tensor,
+    current_points: torch.Tensor,
+    iteration: int,
+    save_path: str,
+    coords_types: Optional[torch.Tensor] = None,
+    points_types: Optional[torch.Tensor] = None):
+    """可视化重建过程的单个步骤（独立函数版本）。
+    
+    Args:
+        coords: 真实坐标，形状 [N, 3]
+        current_points: 当前点位置，形状 [M, 3]
+        iteration: 迭代次数
+        save_path: 保存路径
+        coords_types: 真实原子类型，形状 [N]
+        points_types: 当前原子类型，形状 [M]
+    """
+    fig = plt.figure(figsize=(8, 8))
+    ax = fig.add_subplot(111, projection='3d')
+    
+    coords_np = coords.detach().cpu().numpy()
+    if coords_types is not None:
+        coords_types_np = coords_types.detach().cpu().numpy()
+        for atom_type in range(5):
+            mask = (coords_types_np == atom_type)
+            if mask.sum() > 0:
+                ax.scatter(coords_np[mask, 0], coords_np[mask, 1], coords_np[mask, 2], 
+                          c=ATOM_COLORS[atom_type], marker='o', s=100, 
+                          label=f'Original {["C", "H", "O", "N", "F"][atom_type]}', alpha=0.7)
+    else:
+        ax.scatter(coords_np[:, 0], coords_np[:, 1], coords_np[:, 2], 
+                  c='blue', marker='o', s=100, label='Original', alpha=0.8)
+    
+    points_np = current_points.detach().cpu().numpy()
+    if points_types is not None:
+        points_types_np = points_types.detach().cpu().numpy()
+        for atom_type in range(5):
+            mask = (points_types_np == atom_type)
+            if mask.sum() > 0:
+                ax.scatter(points_np[mask, 0], points_np[mask, 1], points_np[mask, 2],
+                          c=ATOM_COLORS[atom_type], marker='.', s=20, 
+                          label=f'Current {["C", "H", "O", "N", "F"][atom_type]}', alpha=0.5)
+    else:
+        ax.scatter(points_np[:, 0], points_np[:, 1], points_np[:, 2], 
+                  c='red', marker='.', s=20, label='Current Points', alpha=0.5)
+    
+    coords_list = [coords_np, points_np]
+    _setup_3d_axis(ax, coords_list, margin=1.0)
+    
+    ax.view_init(elev=30, azim=60)
+    ax.set_box_aspect([1, 1, 1])
+    
+    ax.set_title(f"Iteration {iteration}")
+    ax.legend(loc='upper right', bbox_to_anchor=(1.0, 1.0))
+    
+    # 确保保存目录存在
+    save_dir = os.path.dirname(save_path)
+    if save_dir and not os.path.exists(save_dir):
+        os.makedirs(save_dir, exist_ok=True)
+        print(f"Created directory: {save_dir}")
+    
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+
 class GNFVisualizer(MoleculeVisualizer):
-    """GNF 重建过程可视化类，生成分子对比图和重建动画。"""
+    """GNF 重建过程可视化类，生成分子对比图和重建动画。
+    
+    注意：大部分可视化功能已提取为独立函数。此类主要用于 create_reconstruction_animation 方法。
+    """
     
     def __init__(self, output_dir: str = None):
         """初始化可视化器。
@@ -163,159 +465,6 @@ class GNFVisualizer(MoleculeVisualizer):
         self.metrics = MoleculeMetrics()
         os.makedirs(self.output_dir, exist_ok=True)
     
-    def visualize_molecule_comparison(self, 
-                                     orig_coords: torch.Tensor, 
-                                     recon_coords: torch.Tensor,
-                                     orig_types: Optional[torch.Tensor] = None,
-                                     recon_types: Optional[torch.Tensor] = None,
-                                     save_path: Optional[str] = None,
-                                     title: str = "Molecule Comparison"):
-        """可视化原始分子和重建分子的对比。
-
-        Args:
-            orig_coords: 原始分子坐标，形状 [N, 3]
-            recon_coords: 重建分子坐标，形状 [M, 3]
-            orig_types: 原始原子类型，形状 [N]
-            recon_types: 重建原子类型，形状 [M]
-            save_path: 保存路径，若为 None 则显示图像
-            title: 图像标题
-
-        Returns:
-            matplotlib Figure 对象
-        """
-        fig = plt.figure(figsize=(15, 7))
-        
-        ax1 = fig.add_subplot(131, projection='3d')
-        orig_coords_np = orig_coords.detach().cpu().numpy()
-        
-        if orig_types is not None:
-            orig_types_np = orig_types.detach().cpu().numpy()
-            for atom_type in range(5):
-                mask = (orig_types_np == atom_type)
-                if mask.sum() > 0:
-                    ax1.scatter(orig_coords_np[mask, 0], orig_coords_np[mask, 1], orig_coords_np[mask, 2], 
-                               c=self.atom_colors[atom_type], marker='o', s=100, 
-                               label=f'Original {["C", "H", "O", "N", "F"][atom_type]}')
-        else:
-            ax1.scatter(orig_coords_np[:, 0], orig_coords_np[:, 1], orig_coords_np[:, 2], 
-                       c='blue', marker='o', s=100, label='Original', alpha=0.8)
-        ax1.set_title("Original Molecule")
-        ax1.legend(loc='upper right', bbox_to_anchor=(1.0, 1.0))
-        
-        ax2 = fig.add_subplot(132, projection='3d')
-        recon_coords_np = recon_coords.detach().cpu().numpy()
-        
-        if recon_types is not None:
-            recon_types_np = recon_types.detach().cpu().numpy()
-            for atom_type in range(5):
-                mask = (recon_types_np == atom_type)
-                if mask.sum() > 0:
-                    ax2.scatter(recon_coords_np[mask, 0], recon_coords_np[mask, 1], recon_coords_np[mask, 2], 
-                               c=self.atom_colors[atom_type], marker='o', s=100, 
-                               label=f'Reconstructed {["C", "H", "O", "N", "F"][atom_type]}')
-        else:
-            ax2.scatter(recon_coords_np[:, 0], recon_coords_np[:, 1], recon_coords_np[:, 2], 
-                       c='red', marker='o', s=100, label='Reconstructed', alpha=0.8)
-        ax2.set_title("Reconstructed Molecule")
-        ax2.legend(loc='upper right', bbox_to_anchor=(1.0, 1.0))
-        
-        ax3 = fig.add_subplot(133, projection='3d')
-        
-        if orig_types is not None:
-            for atom_type in range(5):
-                mask = (orig_types_np == atom_type)
-                if mask.sum() > 0:
-                    ax3.scatter(orig_coords_np[mask, 0], orig_coords_np[mask, 1], orig_coords_np[mask, 2], 
-                               c=self.atom_colors[atom_type], marker='o', s=100, alpha=0.5, 
-                               label=f'Original {["C", "H", "O", "N", "F"][atom_type]}')
-        
-        if recon_types is not None:
-            for atom_type in range(5):
-                mask = (recon_types_np == atom_type)
-                if mask.sum() > 0:
-                    ax3.scatter(recon_coords_np[mask, 0], recon_coords_np[mask, 1], recon_coords_np[mask, 2], 
-                               c=self.atom_colors[atom_type], marker='s', s=100, alpha=0.5, 
-                               label=f'Reconstructed {["C", "H", "O", "N", "F"][atom_type]}')
-        else:
-            ax3.scatter(recon_coords_np[:, 0], recon_coords_np[:, 1], recon_coords_np[:, 2], 
-                       c='red', marker='s', s=100, alpha=0.5, label='Reconstructed')
-        ax3.set_title("Comparison")
-        ax3.legend(loc='upper right', bbox_to_anchor=(1.0, 1.0))
-        
-        coords_list = [orig_coords_np, recon_coords_np]
-        for ax in [ax1, ax2, ax3]:
-            self._setup_3d_axis(ax, coords_list, margin=1.0)
-            ax.view_init(elev=30, azim=60)
-        
-        plt.suptitle(title, fontsize=16)
-        plt.tight_layout()
-        
-        if save_path:
-            # 确保保存目录存在
-            save_dir = os.path.dirname(save_path)
-            if save_dir and not os.path.exists(save_dir):
-                os.makedirs(save_dir, exist_ok=True)
-                print(f"Created directory: {save_dir}")
-            
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            plt.close()
-        
-        return fig
-    
-    def visualize_reconstruction_step(self, 
-                                     coords: torch.Tensor,
-                                     current_points: torch.Tensor,
-                                     iteration: int,
-                                     save_path: str,
-                                     coords_types: Optional[torch.Tensor] = None,
-                                     points_types: Optional[torch.Tensor] = None):
-        """可视化重建过程的单个步骤"""
-        fig = plt.figure(figsize=(8, 8))
-        ax = fig.add_subplot(111, projection='3d')
-        
-        coords_np = coords.detach().cpu().numpy()
-        if coords_types is not None:
-            coords_types_np = coords_types.detach().cpu().numpy()
-            for atom_type in range(5):
-                mask = (coords_types_np == atom_type)
-                if mask.sum() > 0:
-                    ax.scatter(coords_np[mask, 0], coords_np[mask, 1], coords_np[mask, 2], 
-                              c=self.atom_colors[atom_type], marker='o', s=100, 
-                              label=f'Original {["C", "H", "O", "N", "F"][atom_type]}', alpha=0.7)
-        else:
-            ax.scatter(coords_np[:, 0], coords_np[:, 1], coords_np[:, 2], 
-                      c='blue', marker='o', s=100, label='Original', alpha=0.8)
-        
-        points_np = current_points.detach().cpu().numpy()
-        if points_types is not None:
-            points_types_np = points_types.detach().cpu().numpy()
-            for atom_type in range(5):
-                mask = (points_types_np == atom_type)
-                if mask.sum() > 0:
-                    ax.scatter(points_np[mask, 0], points_np[mask, 1], points_np[mask, 2],
-                              c=self.atom_colors[atom_type], marker='.', s=20, 
-                              label=f'Current {["C", "H", "O", "N", "F"][atom_type]}', alpha=0.5)
-        else:
-            ax.scatter(points_np[:, 0], points_np[:, 1], points_np[:, 2], 
-                      c='red', marker='.', s=20, label='Current Points', alpha=0.5)
-        
-        coords_list = [coords_np, points_np]
-        self._setup_3d_axis(ax, coords_list, margin=1.0)
-        
-        ax.view_init(elev=30, azim=60)
-        ax.set_box_aspect([1, 1, 1])
-        
-        ax.set_title(f"Iteration {iteration}")
-        ax.legend(loc='upper right', bbox_to_anchor=(1.0, 1.0))
-        
-        # 确保保存目录存在
-        save_dir = os.path.dirname(save_path)
-        if save_dir and not os.path.exists(save_dir):
-            os.makedirs(save_dir, exist_ok=True)
-            print(f"Created directory: {save_dir}")
-        
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
     
     def create_reconstruction_animation(self,
                                        gt_coords: torch.Tensor,
@@ -401,7 +550,7 @@ class GNFVisualizer(MoleculeVisualizer):
                     current_points = torch.empty((0, 3), device=device)
                     current_types = torch.empty((0,), device=device)
                 
-                self.visualize_reconstruction_step(
+                visualize_reconstruction_step(
                     gt_valid_coords, current_points, i, frame_path, 
                     gt_valid_types, current_types
                 )
@@ -471,7 +620,7 @@ class GNFVisualizer(MoleculeVisualizer):
             final_types = torch.empty((0,), device=device)
         
         comparison_path = os.path.join(self.recon_dir, f"{animation_name}_final.png")
-        self.visualize_molecule_comparison(
+        visualize_molecule_comparison(
             gt_valid_coords,
             final_points,
             gt_valid_types,
@@ -491,353 +640,6 @@ class GNFVisualizer(MoleculeVisualizer):
             'final_kl_2to1': metrics_history['kl_2to1'][-1] if metrics_history['kl_2to1'] else float('inf')
         }
 
-    def create_generation_animation(self,
-                                   converter: GNFConverter,
-                                   field_func=None,
-                                   pred_field: Optional[torch.Tensor] = None,
-                                   sample_idx: int = 0,
-                                   save_interval: int = 50,
-                                   create_1d_plots: bool = True,
-                                   use_recon_dir: bool = True,
-                                   fixed_axis: bool = True,
-                                   use_intelligent_sampling: bool = False,
-                                   decoder=None,
-                                   codes=None,
-                                   fabric=None) -> Dict[str, Any]:
-        """创建分子生成过程的动画
-        
-        从 codes 生成的场函数开始，通过梯度下降找到原子位置，生成完整的分子结构。
-        不需要任何 ground truth 参考。
-        
-        Args:
-            converter: GNF 转换器，用于将场函数转换为原子位置
-            field_func: 场函数，输入查询点 [B, n_points, 3]，输出场信息 [B, n_points, n_atom_types, 3]（可选）
-            pred_field: 预计算的场值，形状 [n_points, n_atom_types, 3]（可选）
-            sample_idx: 样本索引
-            save_interval: 保存帧的间隔
-            create_1d_plots: 是否创建1D场可视化
-            use_recon_dir: 是否使用recon子目录，False时直接在主目录下生成文件
-            fixed_axis: 是否使用固定坐标轴，True时坐标轴范围在第一帧确定后不再变化
-            use_intelligent_sampling: 是否使用智能采样（与field_recon.py相同的方法）
-            decoder: 解码器（智能采样时需要）
-            codes: 分子代码（智能采样时需要）
-            fabric: 日志对象（智能采样时需要）
-            
-        Returns:
-            包含动画路径、最终结果和指标历史的字典
-        """
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
-        # 验证参数
-        if field_func is None and pred_field is None:
-            raise ValueError("必须提供 field_func 或 pred_field 中的一个")
-        if field_func is not None and pred_field is not None:
-            raise ValueError("不能同时提供 field_func 和 pred_field")
-        
-        # 选择输出目录
-        if use_recon_dir:
-            output_dir = self.recon_dir
-        else:
-            output_dir = self.output_dir
-        
-        print(f"\nStarting generation for molecule {sample_idx}")
-        
-        all_atom_types = list(range(5))
-        
-        # 初始化随机点
-        if use_intelligent_sampling and decoder is not None and codes is not None:
-            # 使用与 field_recon.py 相同的智能采样方法
-            print("Using intelligent sampling method...")
-            init_min, init_max = -7.0, 7.0
-            n_candidates = converter.n_query_points * converter.gradient_sampling_candidate_multiplier
-            candidate_points = torch.rand(n_candidates, 3, device=device) * (init_max - init_min) + init_min
-            
-            # 计算候选点的梯度场强度
-            candidate_batch = candidate_points.unsqueeze(0)  # [1, n_candidates, 3]
-            
-            try:
-                with torch.no_grad():
-                    candidate_field = decoder(candidate_batch, codes)
-            except Exception as e:
-                if fabric:
-                    fabric.print(f">> ERROR in decoder call: {e}")
-                raise e
-            
-            # 为每个原子类型进行智能采样
-            z_dict = {}
-            for t in all_atom_types:
-                candidate_grad = candidate_field[0, :, t, :]  # [n_candidates, 3]
-                grad_magnitudes = torch.norm(candidate_grad, dim=1)  # [n_candidates]
-                probabilities = torch.softmax(grad_magnitudes / converter.gradient_sampling_temperature, dim=0)
-                sampled_indices = torch.multinomial(probabilities, converter.n_query_points, replacement=False)
-                z_dict[t] = candidate_points[sampled_indices]  # [n_query_points, 3]
-        else:
-            # 使用简单的均匀随机采样
-            init_min = torch.tensor([-3.0, -3.0, -3.0], device=device)
-            init_max = torch.tensor([3.0, 3.0, 3.0], device=device)
-            
-            z_dict = {}
-            for atom_type in all_atom_types:
-                z_dict[atom_type] = torch.rand(converter.n_query_points, 3, device=device) * (init_max - init_min) + init_min
-        
-        frame_paths = []
-        metrics_history = {
-            'iterations': [],
-            'convergence': []  # 记录收敛情况
-        }
-        
-        # 如果使用固定坐标轴，在第一帧确定坐标轴范围
-        fixed_axis_limits = None
-        
-        for i in range(converter.n_iter):
-            with torch.no_grad():
-                for atom_type in all_atom_types:
-                    z = z_dict[atom_type]
-                    gradients = field_func(z)
-                    # 确保梯度场形状正确
-                    if gradients.dim() == 4:  # [batch, n_points, n_atom_types, 3]
-                        gradients = gradients[0]  # 取第一个batch
-                    
-                    type_gradients = gradients[:, atom_type, :]
-                    
-                    z_dict[atom_type] = z + torch.tensor(converter.step_size, device=z.device) * type_gradients
-            
-            if i % save_interval == 0 or i == converter.n_iter - 1:
-                frame_path = os.path.join(output_dir, f"frame_gen_sample_{sample_idx}_{i:04d}.png")
-                
-                all_points = []
-                all_types = []
-                for atom_type in all_atom_types:
-                    points = z_dict[atom_type]
-                    if len(points) > 0:
-                        all_points.append(points)
-                        all_types.extend([atom_type] * len(points))
-                
-                if all_points:
-                    current_points = torch.cat(all_points, dim=0)
-                    current_types = torch.tensor(all_types, device=device)
-                else:
-                    current_points = torch.empty((0, 3), device=device)
-                    current_types = torch.empty((0,), device=device)
-                
-                # 只显示生成的分子，不显示"原始分子"
-                # 如果是第一帧且使用固定坐标轴，确定坐标轴范围
-                if i == 0 and fixed_axis and len(current_points) > 0:
-                    points_np = current_points.detach().cpu().numpy()
-                    margin = 1.0
-                    fixed_axis_limits = {
-                        'x_min': points_np[:, 0].min() - margin,
-                        'x_max': points_np[:, 0].max() + margin,
-                        'y_min': points_np[:, 1].min() - margin,
-                        'y_max': points_np[:, 1].max() + margin,
-                        'z_min': points_np[:, 2].min() - margin,
-                        'z_max': points_np[:, 2].max() + margin
-                    }
-                
-                self.visualize_generation_step(
-                    current_points, i, frame_path, current_types, fixed_axis_limits
-                )
-                frame_paths.append(frame_path)
-                
-                # 计算收敛指标（点之间的平均距离变化）
-                if len(current_points) > 1:
-                    distances = torch.pdist(current_points)
-                    convergence = torch.std(distances).item()
-                    metrics_history['convergence'].append(convergence)
-        
-        gif_path = os.path.join(output_dir, f"funcmol_gen_sample_{sample_idx}.gif")
-        with imageio.get_writer(gif_path, mode='I', duration=0.1, fps=15, loop=1) as writer:
-            for frame_path in frame_paths:
-                try:
-                    # 检查文件是否存在且大小大于0
-                    if not os.path.exists(frame_path):
-                        print(f"Warning: Frame file {frame_path} does not exist, skipping...")
-                        continue
-                    
-                    # 等待文件完全写入
-                    import time
-                    time.sleep(0.01)  # 短暂等待确保文件写入完成
-                    
-                    # 检查文件大小
-                    if os.path.getsize(frame_path) == 0:
-                        print(f"Warning: Frame file {frame_path} is empty, skipping...")
-                        continue
-                    
-                    frame = imageio.imread(frame_path)
-                    writer.append_data(frame)
-                    
-                except Exception as e:
-                    print(f"Warning: Failed to read frame {frame_path}: {e}")
-                    continue
-                finally:
-                    # 确保清理文件
-                    try:
-                        if os.path.exists(frame_path):
-                            os.remove(frame_path)
-                    except:
-                        pass
-        
-        # 生成最终分子结构
-        final_points = []
-        final_types = []
-        for atom_type in all_atom_types:
-            points = z_dict[atom_type].detach().cpu().numpy()
-            if len(points) > 0:
-                merged_points = converter._merge_points(points)
-                if len(merged_points) > 0:
-                    final_points.append(torch.from_numpy(merged_points).to(device))
-                    final_types.extend([atom_type] * len(merged_points))
-        
-        if final_points:
-            final_points = torch.cat(final_points, dim=0)
-            final_types = torch.tensor(final_types, device=device)
-        else:
-            final_points = torch.empty((0, 3), device=device)
-            final_types = torch.empty((0,), device=device)
-        
-        # 保存最终生成的分子
-        final_path = os.path.join(output_dir, f"funcmol_gen_sample_{sample_idx}_final.png")
-        self.visualize_generated_molecule(
-            final_points, final_types, save_path=final_path
-        )
-        
-        # 创建1D场可视化（如果启用）
-        field_1d_results = None
-        if create_1d_plots:
-            try:
-                # 创建1D场可视化目录
-                field_1d_dir = os.path.join(output_dir, "field_1d")
-                os.makedirs(field_1d_dir, exist_ok=True)
-                
-                # 生成1D场可视化
-                field_1d_save_path = os.path.join(field_1d_dir, f"field_1d_sample_{sample_idx}.png")
-                if field_func is not None:
-                    field_1d_results = visualize_1d_gradient_field_generation(
-                        field_func=field_func,
-                        sample_idx=sample_idx,
-                        atom_types=[0, 1, 2, 3, 4],  # C, H, O, N, F
-                        x_range=None,  # 使用默认范围
-                        n_points=3000,
-                        y_coord=0.0,
-                        z_coord=0.0,
-                        save_path=field_1d_save_path
-                    )
-                else:
-                    # 使用预计算的field值
-                    field_1d_results = visualize_1d_gradient_field_generation_with_field(
-                        pred_field=pred_field,
-                        sample_idx=sample_idx,
-                        atom_types=[0, 1, 2, 3, 4],  # C, H, O, N, F
-                        x_range=None,  # 使用默认范围
-                        n_points=3000,
-                        y_coord=0.0,
-                        z_coord=0.0,
-                        save_path=field_1d_save_path
-                    )
-                print(f"1D field visualization created for sample {sample_idx}")
-            except Exception as e:
-                print(f"Warning: Failed to create 1D field visualization for sample {sample_idx}: {e}")
-                field_1d_results = None
-
-        return {
-            'gif_path': gif_path,
-            'final_path': final_path,
-            'metrics_history': metrics_history,
-            'final_points': final_points,
-            'final_types': final_types,
-            'final_convergence': metrics_history['convergence'][-1] if metrics_history['convergence'] else float('inf'),
-            'field_1d_results': field_1d_results
-        }
-    
-    def visualize_generation_step(self, 
-                                 current_points: torch.Tensor,
-                                 iteration: int,
-                                 save_path: str,
-                                 current_types: torch.Tensor,
-                                 fixed_axis_limits: Optional[Dict] = None):
-        """可视化分子生成过程的单个步骤"""
-        fig = plt.figure(figsize=(8, 8))  # 改为与reconstruction_step一致
-        ax = fig.add_subplot(111, projection='3d')
-        
-        points_np = current_points.detach().cpu().numpy()
-        if current_types is not None:
-            types_np = current_types.detach().cpu().numpy()
-            for atom_type in range(5):
-                mask = (types_np == atom_type)
-                if mask.sum() > 0:
-                    ax.scatter(points_np[mask, 0], points_np[mask, 1], points_np[mask, 2], 
-                              c=self.atom_colors[atom_type], marker='.', s=20, 
-                              label=f'{["C", "H", "O", "N", "F"][atom_type]}', alpha=0.5)
-        else:
-            ax.scatter(points_np[:, 0], points_np[:, 1], points_np[:, 2], 
-                      c='blue', marker='.', s=20, label='Generated Points', alpha=0.5)
-        
-        # 设置坐标轴
-        if fixed_axis_limits is not None:
-            # 使用固定的坐标轴范围
-            ax.set_xlim(fixed_axis_limits['x_min'], fixed_axis_limits['x_max'])
-            ax.set_ylim(fixed_axis_limits['y_min'], fixed_axis_limits['y_max'])
-            ax.set_zlim(fixed_axis_limits['z_min'], fixed_axis_limits['z_max'])
-            ax.set_xlabel('X (Å)')
-            ax.set_ylabel('Y (Å)')
-            ax.set_zlabel('Z (Å)')
-            ax.grid(True, alpha=0.3)
-        elif len(points_np) > 0:
-            # 动态调整坐标轴范围
-            self._setup_3d_axis(ax, [points_np], margin=1.0)
-        
-        ax.view_init(elev=30, azim=60)
-        ax.set_box_aspect([1, 1, 1])
-        
-        ax.set_title(f"Generated Molecule - Iteration {iteration}")
-        ax.legend(loc='upper right', bbox_to_anchor=(1.0, 1.0))
-        
-        # 确保保存目录存在
-        save_dir = os.path.dirname(save_path)
-        if save_dir and not os.path.exists(save_dir):
-            os.makedirs(save_dir, exist_ok=True)
-        
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
-    
-    def visualize_generated_molecule(self,
-                                   final_points: torch.Tensor,
-                                   final_types: torch.Tensor,
-                                   save_path: str):
-        """可视化最终生成的分子"""
-        fig = plt.figure(figsize=(12, 10))
-        ax = fig.add_subplot(111, projection='3d')
-        
-        points_np = final_points.detach().cpu().numpy()
-        if final_types is not None and len(final_types) > 0:
-            types_np = final_types.detach().cpu().numpy()
-            for atom_type in range(5):
-                mask = (types_np == atom_type)
-                if mask.sum() > 0:
-                    ax.scatter(points_np[mask, 0], points_np[mask, 1], points_np[mask, 2], 
-                              c=self.atom_colors[atom_type], marker='o', s=150, 
-                              label=f'{["C", "H", "O", "N", "F"][atom_type]}', alpha=0.9)
-        else:
-            ax.scatter(points_np[:, 0], points_np[:, 1], points_np[:, 2], 
-                      c='blue', marker='o', s=150, label='Generated Molecule', alpha=0.9)
-        
-        # 设置坐标轴
-        if len(points_np) > 0:
-            self._setup_3d_axis(ax, [points_np], margin=1.0)
-        
-        ax.view_init(elev=30, azim=60)
-        ax.set_box_aspect([1, 1, 1])
-        
-        ax.set_title("Generated Molecule (Final Result)")
-        ax.legend(loc='upper right', bbox_to_anchor=(1.0, 1.0))
-        
-        # 确保保存目录存在
-        save_dir = os.path.dirname(save_path)
-        if save_dir and not os.path.exists(save_dir):
-            os.makedirs(save_dir, exist_ok=True)
-        
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
 
 def visualize_1d_gradient_field_comparison(
     gt_coords: Optional[torch.Tensor] = None,
@@ -927,7 +729,7 @@ def visualize_1d_gradient_field_comparison(
         available_atom_types = atom_types
         
         if x_range is None:
-            x_range = (-5.0, 5.0)  # 默认范围
+            x_range = (-11.0, 11.0)  # 默认范围
             print(f"使用默认 x 轴范围: {x_range}")
     
     x = torch.linspace(x_range[0], x_range[1], n_points, device=device)
@@ -1333,7 +1135,7 @@ def visualize_1d_gradient_field_generation(
     
     # 设置默认x范围
     if x_range is None:
-        x_range = (-5.0, 5.0)  # 默认范围
+        x_range = (-11.0, 11.0)  # 默认范围
         print(f"使用默认 x 轴范围: {x_range}")
     
     x = torch.linspace(x_range[0], x_range[1], n_points, device=device)
@@ -1507,7 +1309,7 @@ def visualize_1d_gradient_field_generation_with_field(
     
     # 设置默认x范围
     if x_range is None:
-        x_range = (-5.0, 5.0)  # 默认范围
+        x_range = (-11.0, 11.0)  # 默认范围
         print(f"使用默认 x 轴范围: {x_range}")
     
     # 为每个原子类型创建单独的2×4图

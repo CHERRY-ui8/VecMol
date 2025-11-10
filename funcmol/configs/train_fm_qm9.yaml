@@ -23,9 +23,12 @@ ddpm:
   dropout: 0.1
   
   # 扩散过程配置
-  beta_start: 0.0005
-  beta_end: 0.05
-  num_timesteps: 100 # 100or1000！！！
+  # beta_start: 0.0005
+  # beta_end: 0.05
+  # num_timesteps: 100 
+  beta_start: 0.0001
+  beta_end: 0.02
+  num_timesteps: 1000
   schedule: "linear"  # 可选: "linear", "cosine", "sigmoid"
   
   # Sigmoid调度参数（仅当schedule为"sigmoid"时使用）
@@ -52,7 +55,7 @@ num_epochs: 50000
 num_iterations: 50000  # 总迭代次数，用于学习率调度
 dset:
   batch_size: 16
-  num_workers: 0
+  num_workers: 2
 
 ckpt_every_n_epochs: 5  # 每隔多少epoch保存一次ckpt
 decoder:

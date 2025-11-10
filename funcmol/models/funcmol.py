@@ -62,10 +62,8 @@ class FuncMol(nn.Module):
                 use_radius_graph=config.get("denoiser", {}).get("use_radius_graph", True),
                 device=self.device
             ).to(self.device)
-            self.diffusion_consts = create_diffusion_constants(config)
-            # 将扩散常数移动到正确的设备
-            for key in self.diffusion_consts:
-                self.diffusion_consts[key] = self.diffusion_consts[key].to(self.device)
+            # 创建扩散常数并直接放在目标设备上
+            self.diffusion_consts = create_diffusion_constants(config, device=self.device)
             self.num_timesteps = config.get("ddpm", {}).get("num_timesteps", 1000)
         else:
             # 使用原有方法

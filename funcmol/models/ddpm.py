@@ -28,48 +28,64 @@ def get_beta_schedule(beta_start: float, beta_end: float, num_timesteps: int,
     if schedule == "linear":
         betas = np.linspace(beta_start, beta_end, num_timesteps, dtype=np.float64)
     elif schedule == "cosine":
+        # 修复：使用正确的边界，避免alphas_cumprod[-1]=0的问题
         s = 0.008
-        steps = num_timesteps + 1
-        x = np.linspace(0, steps, steps)
-        alphas_cumprod = np.cos(((x / steps) + s) / (1 + s) * np.pi * 0.5) ** 2
+        timesteps = num_timesteps
+        x = np.linspace(0, timesteps, timesteps + 1)
+        alphas_cumprod = np.cos(((x / timesteps) + s) / (1 + s) * np.pi * 0.5) ** 2
         alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
         betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
-        # betas = np.clip(betas, 0, 0.999)
     elif schedule == "sigmoid":
         # Use w parameter for sigmoid steepness
-        betas = np.linspace(-w, w, num_timesteps)
-        betas = sigmoid(betas) * (beta_end - beta_start) + beta_start
-        # betas = np.clip(betas, 0, 0.999)
+        xs = np.linspace(-w, w, num_timesteps)
+        betas = sigmoid(xs) * (beta_end - beta_start) + beta_start
     else:
         raise NotImplementedError(f"Schedule {schedule} not implemented")
+    
+    # 数值稳定性：clamp betas到合理范围
+    betas = np.clip(betas, 1e-8, 0.999)
     return torch.tensor(betas, dtype=torch.float32)
 
 
-def prepare_diffusion_constants(betas: torch.Tensor) -> Dict[str, torch.Tensor]:
+def prepare_diffusion_constants(betas: torch.Tensor, device: Optional[torch.device] = None) -> Dict[str, torch.Tensor]:
     """
     准备扩散过程的常数
     
     Args:
         betas: β序列
+        device: 目标设备（如果提供，所有常数将放在该设备上）
     
     Returns:
         包含所有扩散常数的字典
     """
+    if device is not None:
+        betas = betas.to(device)
+    
     alphas = 1.0 - betas
     alphas_cumprod = torch.cumprod(alphas, dim=0)
-    alphas_cumprod_prev = torch.cat([torch.tensor([1.0]), alphas_cumprod[:-1]], dim=0)
+    alphas_cumprod_prev = torch.cat([
+        torch.tensor([1.0], device=betas.device, dtype=betas.dtype), 
+        alphas_cumprod[:-1]
+    ], dim=0)
+
+    # 数值稳定性：使用eps防止除0和sqrt(0)
+    eps = 1e-20
+    
+    # 计算posterior_variance时防止除0
+    one_minus_alphas_cumprod = (1 - alphas_cumprod).clamp(min=eps)
+    posterior_variance = (betas * (1 - alphas_cumprod_prev) / one_minus_alphas_cumprod).clamp(min=1e-20)
 
     return {
         "betas": betas,
         "alphas": alphas,
         "alphas_cumprod": alphas_cumprod,
         "alphas_cumprod_prev": alphas_cumprod_prev,
-        "sqrt_alphas_cumprod": torch.sqrt(alphas_cumprod),
-        "sqrt_one_minus_alphas_cumprod": torch.sqrt(1 - alphas_cumprod),
-        "sqrt_alphas_cumprod_prev": torch.sqrt(alphas_cumprod_prev),
-        "sqrt_one_minus_alphas_cumprod_prev": torch.sqrt(1 - alphas_cumprod_prev),
-        "sqrt_recip_alphas": torch.sqrt(1.0 / alphas),
-        "posterior_variance": betas * (1 - alphas_cumprod_prev) / (1 - alphas_cumprod),
+        "sqrt_alphas_cumprod": torch.sqrt(alphas_cumprod.clamp(min=eps)),
+        "sqrt_one_minus_alphas_cumprod": torch.sqrt(one_minus_alphas_cumprod),
+        "sqrt_alphas_cumprod_prev": torch.sqrt(alphas_cumprod_prev.clamp(min=eps)),
+        "sqrt_one_minus_alphas_cumprod_prev": torch.sqrt((1 - alphas_cumprod_prev).clamp(min=eps)),
+        "sqrt_recip_alphas": torch.sqrt((1.0 / alphas).clamp(min=eps)),
+        "posterior_variance": posterior_variance,
     }
 
 
@@ -92,6 +108,9 @@ def q_sample(x_start: torch.Tensor, t: torch.Tensor, diffusion_consts: Dict[str,
     """
     if noise is None:
         noise = torch.randn_like(x_start)
+    else:
+        # 确保noise在正确的设备上
+        noise = noise.to(x_start.device)
     
     sqrt_alphas_cumprod_t = extract(diffusion_consts["sqrt_alphas_cumprod"], t, x_start)
     sqrt_one_minus_alphas_cumprod_t = extract(diffusion_consts["sqrt_one_minus_alphas_cumprod"], t, x_start)
@@ -104,17 +123,25 @@ def extract(a: torch.Tensor, t: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     从时间序列a中取出对应t的值，并扩展维度匹配x
     
     Args:
-        a: 时间序列张量
-        t: 时间步索引
-        x: 目标张量，用于确定输出形状
+        a: 时间序列张量 [T]
+        t: 时间步索引 [B]
+        x: 目标张量，用于确定输出形状 [B, ...]
     
     Returns:
-        扩展后的时间步值
+        扩展后的时间步值 [B, 1, 1, ...] (匹配x的形状)
     """
-    t = t.to(a.device)
-    out = a[t].to(x.device)
-    while len(out.shape) < len(x.shape):
-        out = out.unsqueeze(-1)
+    # 确保t在a的设备上，然后索引
+    if t.device != a.device:
+        t = t.to(a.device)
+    out = a[t]
+    
+    # 移动到x的设备
+    if out.device != x.device:
+        out = out.to(x.device)
+    
+    # 扩展维度以匹配x的形状: [B] -> [B, 1, 1, ...]
+    # 使用view更高效
+    out = out.view((t.shape[0],) + (1,) * (x.dim() - 1))
     return out
 
 
@@ -133,12 +160,23 @@ def get_time_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
         时间嵌入 [B, dim]
     """
     device = t.device
-    half_dim = dim // 2
-    embeddings = math.log(10000) / (half_dim - 1)
-    embeddings = torch.exp(torch.arange(half_dim, device=device) * -embeddings)
-    embeddings = t[:, None] * embeddings[None, :]
-    embeddings = torch.cat((embeddings.sin(), embeddings.cos()), dim=-1)
-    return embeddings
+    half = dim // 2
+    
+    # 数值稳定性：防止half_dim-1为0
+    if half > 1:
+        exponents = torch.arange(half, device=device, dtype=torch.float32) / (half - 1)
+    else:
+        exponents = torch.zeros(half, device=device, dtype=torch.float32)
+    
+    freqs = torch.exp(-math.log(10000.0) * exponents)
+    args = t.float().unsqueeze(1) * freqs.unsqueeze(0)
+    emb = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
+    
+    # 处理奇数维度：在末尾补0
+    if dim % 2 == 1:
+        emb = torch.cat([emb, torch.zeros(emb.shape[0], 1, device=device)], dim=-1)
+    
+    return emb
 
 
 # ===========================
@@ -209,7 +247,7 @@ def p_sample_loop(model: nn.Module, shape: Tuple[int, ...], diffusion_consts: Di
 
 @torch.no_grad()
 def p_sample_x0(model: nn.Module, x_t: torch.Tensor, t: torch.Tensor, 
-                diffusion_consts: Dict[str, torch.Tensor]) -> torch.Tensor:
+                diffusion_consts: Dict[str, torch.Tensor], clip_denoised: bool = False) -> torch.Tensor:
     """
     单步反向采样（预测x0版本）
     
@@ -218,6 +256,7 @@ def p_sample_x0(model: nn.Module, x_t: torch.Tensor, t: torch.Tensor,
         x_t: 当前状态 [B, N*N*N, code_dim]
         t: 时间步 [B]
         diffusion_consts: 扩散常数
+        clip_denoised: 是否将predicted_x0裁剪到合理范围（可选，用于数值稳定性）
     
     Returns:
         去噪后的状态 [B, N*N*N, code_dim]
@@ -225,17 +264,38 @@ def p_sample_x0(model: nn.Module, x_t: torch.Tensor, t: torch.Tensor,
     # 预测x0
     predicted_x0 = model(x_t, t)
     
-    # 获取需要的常数
-    sqrt_alphas_cumprod_prev_t = extract(diffusion_consts["sqrt_alphas_cumprod_prev"], t, x_t)
-    sqrt_one_minus_alphas_cumprod_prev_t = extract(diffusion_consts["sqrt_one_minus_alphas_cumprod_prev"], t, x_t)
+    # 可选的裁剪操作（用于数值稳定性）
+    if clip_denoised:
+        # 根据数据范围裁剪，这里假设数据已归一化到[-1, 1]或类似范围
+        # 可以根据实际数据分布调整
+        predicted_x0 = torch.clamp(predicted_x0, -1.0, 1.0)
     
+    # 获取需要的常数
+    betas_t = extract(diffusion_consts["betas"], t, x_t)
+    sqrt_alphas_cumprod_t = extract(diffusion_consts["sqrt_alphas_cumprod"], t, x_t)
+    sqrt_one_minus_alphas_cumprod_t = extract(diffusion_consts["sqrt_one_minus_alphas_cumprod"], t, x_t)
+    posterior_variance_t = extract(diffusion_consts["posterior_variance"], t, x_t)
+    
+    # 注意：对于batched采样，当前实现假设所有batch item在同一时间步
+    # 如果未来需要支持不同batch item不同时间步，需要改为按元素判断
     if t[0] == 0:
         # 最后一步，直接返回预测的x0
         return predicted_x0
     else:
-        # 从预测的x0计算x_{t-1}
+        # 从预测的x0计算x_{t-1}的均值
+        # 正确的后验分布公式：
+        # 方法：从predicted_x0计算predicted_noise，然后使用标准公式
+        # predicted_noise = (x_t - sqrt(alpha_t) * predicted_x0) / sqrt(1 - alpha_t)
+        predicted_noise = (x_t - sqrt_alphas_cumprod_t * predicted_x0) / sqrt_one_minus_alphas_cumprod_t
+        
+        # 使用标准的DDPM采样公式计算x_{t-1}的均值
+        # model_mean = (1 / sqrt(alpha_t)) * (x_t - (beta_t / sqrt(1 - alpha_t)) * predicted_noise)
+        sqrt_recip_alphas_t = extract(diffusion_consts["sqrt_recip_alphas"], t, x_t)
+        model_mean = sqrt_recip_alphas_t * (x_t - betas_t / sqrt_one_minus_alphas_cumprod_t * predicted_noise)
+        
+        # 添加噪声（使用后验方差）
         noise = torch.randn_like(x_t)
-        x_prev = sqrt_alphas_cumprod_prev_t * predicted_x0 + sqrt_one_minus_alphas_cumprod_prev_t * noise
+        x_prev = model_mean + torch.sqrt(posterior_variance_t) * noise
         return x_prev
 
 
@@ -335,7 +395,16 @@ def compute_ddpm_loss_x0(model: nn.Module, x_0: torch.Tensor, diffusion_consts: 
     predicted_x0 = model(x_t, t)
     
     # 计算损失：直接预测x0
-    loss = F.mse_loss(predicted_x0, x_0)
+    # 注意：对于预测x0的版本，通常不需要时间步权重，因为预测x0比预测噪声更稳定
+    loss = F.mse_loss(predicted_x0, x_0, reduction='mean')
+    
+    # 数值稳定性检查：如果loss过大，可能是数值问题
+    if torch.isnan(loss) or torch.isinf(loss):
+        print("[WARNING] Loss is NaN or Inf in compute_ddpm_loss_x0")
+        print(f"  predicted_x0: min={predicted_x0.min().item():.6f}, max={predicted_x0.max().item():.6f}, mean={predicted_x0.mean().item():.6f}")
+        print(f"  x_0: min={x_0.min().item():.6f}, max={x_0.max().item():.6f}, mean={x_0.mean().item():.6f}")
+        # 返回一个小的非零值以避免训练崩溃
+        loss = torch.tensor(1e-6, device=device, requires_grad=True)
     
     return loss
 
@@ -346,12 +415,13 @@ def compute_ddpm_loss_x0(model: nn.Module, x_0: torch.Tensor, diffusion_consts: 
 def sigmoid(x):
     return 1 / (np.exp(-x) + 1)
 
-def create_diffusion_constants(config: dict) -> Dict[str, torch.Tensor]:
+def create_diffusion_constants(config: dict, device: Optional[torch.device] = None) -> Dict[str, torch.Tensor]:
     """
     创建扩散常数
     
     Args:
         config: 配置字典
+        device: 目标设备（如果提供，所有常数将放在该设备上）
     
     Returns:
         扩散常数字典
@@ -364,4 +434,4 @@ def create_diffusion_constants(config: dict) -> Dict[str, torch.Tensor]:
         schedule=ddpm_config.get("schedule", "linear"),
         w=ddpm_config.get("w", 6.0),
     )
-    return prepare_diffusion_constants(betas)
+    return prepare_diffusion_constants(betas, device=device)

@@ -614,18 +614,20 @@ def create_gnf_converter(config: dict) -> GNFConverter:
         step_size = method_config["step_size"]
         sig_sf = method_config["sig_sf"]
         sig_mag = method_config["sig_mag"]
+        eps = method_config.get("eps", default_config["eps"])
+        min_samples = method_config.get("min_samples", default_config["min_samples"])
     else:
         # 使用默认配置，强制获取
         n_query_points = default_config["n_query_points"]
         step_size = default_config["step_size"]
         sig_sf = default_config["sig_sf"]
         sig_mag = default_config["sig_mag"]
+        eps = default_config["eps"]
+        min_samples = default_config["min_samples"]
     
     # 获取其他必需参数，强制从配置中获取，不允许默认值
     sigma = gnf_config["sigma"]
     n_iter = gnf_config["n_iter"]
-    eps = gnf_config["eps"]
-    min_samples = gnf_config["min_samples"]
     temperature = gnf_config["temperature"]
     logsumexp_eps = gnf_config["logsumexp_eps"]
     inverse_square_strength = gnf_config["inverse_square_strength"]
@@ -634,6 +636,11 @@ def create_gnf_converter(config: dict) -> GNFConverter:
     # 训练版专有的两个梯度采样参数，这里一并纳入，便于统一
     gradient_sampling_candidate_multiplier = gnf_config["gradient_sampling_candidate_multiplier"]
     gradient_sampling_temperature = gnf_config["gradient_sampling_temperature"]
+    
+    # 早停相关参数（可选，默认关闭早停）
+    enable_early_stopping = gnf_config.get("enable_early_stopping", False)
+    convergence_threshold = gnf_config.get("convergence_threshold", 1e-6)
+    min_iterations = gnf_config.get("min_iterations", 50)
     
     return GNFConverter(
         sigma=sigma,
@@ -652,7 +659,10 @@ def create_gnf_converter(config: dict) -> GNFConverter:
         sig_mag=sig_mag,
         gradient_sampling_candidate_multiplier=gradient_sampling_candidate_multiplier,
         gradient_sampling_temperature=gradient_sampling_temperature,
-        n_atom_types=n_atom_types  # 添加原子类型数量参数
+        n_atom_types=n_atom_types,  # 添加原子类型数量参数
+        enable_early_stopping=enable_early_stopping,
+        convergence_threshold=convergence_threshold,
+        min_iterations=min_iterations
     )
 
 

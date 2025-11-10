@@ -34,7 +34,10 @@ class GNFConverter(nn.Module):
                 sig_mag: float = 0.45,  # magnitude的sigma参数
                 gradient_sampling_candidate_multiplier: int = 10,  # 梯度采样候选点倍数
                 gradient_sampling_temperature: float = 0.1,  # 梯度采样温度参数
-                n_atom_types: int = 5):  # 原子类型数量，默认为5以保持向后兼容
+                n_atom_types: int = 5,  # 原子类型数量，默认为5以保持向后兼容
+                enable_early_stopping: bool = True,  # 是否启用早停机制
+                convergence_threshold: float = 1e-6,  # 收敛阈值（梯度模长变化）
+                min_iterations: int = 50):  # 最少迭代次数（早停前必须达到的最小迭代数）
         super().__init__()
         self.sigma = sigma
         self.n_query_points = n_query_points
@@ -53,6 +56,9 @@ class GNFConverter(nn.Module):
         self.gradient_sampling_candidate_multiplier = gradient_sampling_candidate_multiplier  # 保存梯度采样候选点倍数
         self.gradient_sampling_temperature = gradient_sampling_temperature  # 保存梯度采样温度参数
         self.n_atom_types = n_atom_types  # 保存原子类型数量
+        self.enable_early_stopping = enable_early_stopping  # 是否启用早停机制
+        self.convergence_threshold = convergence_threshold  # 收敛阈值
+        self.min_iterations = min_iterations  # 最少迭代次数
         
         # 为不同类型的原子设置不同的 sigma 参数
         # We model hydrogen explicitly and consider 5 chemical elements for QM9 (C, H, O, N, F), 
@@ -281,7 +287,8 @@ class GNFConverter(nn.Module):
 
     def _process_atom_types_matrix(self, current_codes: torch.Tensor, n_atom_types: int, 
                                  n_query_points: int, device: torch.device, 
-                                 decoder: nn.Module, fabric: object = None) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+                                 decoder: nn.Module, fabric: object = None,
+                                 iteration_callback: Optional[callable] = None) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
         """
         完全矩阵化处理所有原子类型，避免所有循环。
         使用图结构思想：构建同种原子内部连边的图，一次性处理所有原子类型。
@@ -351,7 +358,8 @@ class GNFConverter(nn.Module):
             
             # 批量梯度上升
             final_points = self._batch_gradient_ascent(
-                combined_points, combined_types, current_codes, device, decoder, fabric
+                combined_points, combined_types, current_codes, device, decoder, fabric,
+                iteration_callback=iteration_callback
             )
             
             # 按原子类型分离结果并进行聚类
@@ -371,7 +379,8 @@ class GNFConverter(nn.Module):
 
     def _batch_gradient_ascent(self, points: torch.Tensor, atom_types: torch.Tensor,
                               current_codes: torch.Tensor, device: torch.device,
-                              decoder: nn.Module, fabric: object = None) -> torch.Tensor:
+                              decoder: nn.Module, fabric: object = None,
+                              iteration_callback: Optional[callable] = None) -> torch.Tensor:
         """
         批量梯度上升，对所有原子类型的点同时进行梯度上升。
         支持自适应停止：当梯度变化很小时提前停止。
@@ -382,14 +391,13 @@ class GNFConverter(nn.Module):
             current_codes: 当前编码 [1, code_dim]
             device: 设备
             fabric: 日志对象
+            iteration_callback: 可选的回调函数，在每次迭代时调用，参数为 (iteration_idx, current_points, atom_types)
             
         Returns:
             final_points: 最终点位置 [n_total_points, 3]
         """
         z = points.clone()
         prev_grad_norm = None
-        convergence_threshold = 1e-6  # 收敛阈值
-        min_iterations = 50  # 最少迭代次数
         
         for iter_idx in range(self.n_iter):
             z_batch = z.unsqueeze(0)  # [1, n_total_points, 3]
@@ -417,16 +425,24 @@ class GNFConverter(nn.Module):
                 # 计算当前梯度的模长
                 current_grad_norm = torch.norm(grad, dim=-1).mean().item()
                 
-                # 检查收敛条件（在最少迭代次数之后）
-                if iter_idx >= min_iterations and prev_grad_norm is not None:
-                    grad_change = abs(current_grad_norm - prev_grad_norm)
-                    if grad_change < convergence_threshold:
-                        break
+                # 检查收敛条件（仅在启用早停时）
+                if self.enable_early_stopping:
+                    if iter_idx >= self.min_iterations and prev_grad_norm is not None:
+                        grad_change = abs(current_grad_norm - prev_grad_norm)
+                        if grad_change < self.convergence_threshold:
+                            # 在停止前调用一次回调
+                            if iteration_callback is not None:
+                                iteration_callback(iter_idx, z.clone(), atom_types)
+                            break
                 
                 prev_grad_norm = current_grad_norm
                 
                 # 更新采样点位置
                 z = z + adjusted_step_sizes * grad
+                
+                # 调用迭代回调（如果提供）
+                if iteration_callback is not None:
+                    iteration_callback(iter_idx, z.clone(), atom_types)
                 
                 # 完全移除内存清理以避免干扰梯度上升过程
                 # 让PyTorch自动管理内存
@@ -450,13 +466,19 @@ class GNFConverter(nn.Module):
 
     def gnf2mol(self, decoder: nn.Module, codes: torch.Tensor,
                 atom_types: Optional[torch.Tensor] = None,
-                fabric: object = None) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+                fabric: object = None,
+                save_interval: Optional[int] = None,
+                visualization_callback: Optional[callable] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         直接用梯度场重建分子坐标。
         Args:
             decoder: 解码器模型，用于动态计算向量场
             codes: [batch, grid_size**3, code_dim]  # 编码器的输出
             atom_types: 可选的原子类型
+            fabric: 日志对象
+            save_interval: 可选的保存间隔，用于可视化。如果提供，会在每 save_interval 步调用 visualization_callback
+            visualization_callback: 可选的可视化回调函数，参数为 (iteration_idx, all_points_dict, batch_idx)
+                                   其中 all_points_dict 是一个字典，键为原子类型索引，值为该类型的所有点 [n_points, 3]
         Returns:
             (final_coords, final_types)
         """
@@ -482,9 +504,30 @@ class GNFConverter(nn.Module):
             if torch.isnan(current_codes).any() or torch.isinf(current_codes).any():
                 continue
             
+            # 如果提供了可视化回调，创建一个迭代回调函数
+            iteration_callback = None
+            if save_interval is not None and visualization_callback is not None:
+                def create_iteration_callback(batch_idx, n_atom_types, save_interval_val, n_iter_val):
+                    def callback(iter_idx, current_points, atom_types):
+                        # 只在指定间隔时调用可视化回调
+                        if iter_idx % save_interval_val == 0 or iter_idx == n_iter_val - 1:
+                            # 按原子类型分离点
+                            all_points_dict = {}
+                            for t in range(n_atom_types):
+                                type_mask = (atom_types == t)
+                                if type_mask.any():
+                                    all_points_dict[t] = current_points[type_mask].clone()
+                                else:
+                                    all_points_dict[t] = torch.empty((0, 3), device=current_points.device)
+                            visualization_callback(iter_idx, all_points_dict, batch_idx)
+                    return callback
+                
+                iteration_callback = create_iteration_callback(b, n_atom_types, save_interval, self.n_iter)
+            
             # 矩阵化处理所有原子类型
             coords_list, types_list = self._process_atom_types_matrix(
-                current_codes, n_atom_types, n_query_points, device, decoder, fabric
+                current_codes, n_atom_types, n_query_points, device, decoder, fabric,
+                iteration_callback=iteration_callback
             )
             
             # 合并所有类型
