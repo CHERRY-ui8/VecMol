@@ -184,7 +184,7 @@ def get_time_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
 # ===========================
 @torch.no_grad()
 def p_sample(model: nn.Module, x_t: torch.Tensor, t: torch.Tensor, 
-             diffusion_consts: Dict[str, torch.Tensor]) -> torch.Tensor:
+             diffusion_consts: Dict[str, torch.Tensor], clip_denoised: bool = False) -> torch.Tensor:
     """
     单步反向采样
     
@@ -193,6 +193,7 @@ def p_sample(model: nn.Module, x_t: torch.Tensor, t: torch.Tensor,
         x_t: 当前状态 [B, N*N*N, code_dim]
         t: 时间步 [B]
         diffusion_consts: 扩散常数
+        clip_denoised: 是否将去噪后的结果裁剪到合理范围（用于数值稳定性）
     
     Returns:
         去噪后的状态 [B, N*N*N, code_dim]
@@ -204,20 +205,37 @@ def p_sample(model: nn.Module, x_t: torch.Tensor, t: torch.Tensor,
     # 预测噪声
     predicted_noise = model(x_t, t)
     
+    # 数值稳定性：防止除零和数值溢出
+    # 添加小的epsilon防止sqrt_one_minus_alphas_cumprod_t接近0时的不稳定
+    eps = 1e-8
+    sqrt_one_minus_alphas_cumprod_t_safe = torch.clamp(sqrt_one_minus_alphas_cumprod_t, min=eps)
+    
     # 计算模型均值
-    model_mean = sqrt_recip_alphas_t * (x_t - betas_t / sqrt_one_minus_alphas_cumprod_t * predicted_noise)
+    model_mean = sqrt_recip_alphas_t * (x_t - betas_t / sqrt_one_minus_alphas_cumprod_t_safe * predicted_noise)
+    
+    # 数值稳定性：裁剪model_mean到合理范围
+    if clip_denoised:
+        # 根据归一化后的codes范围裁剪（通常归一化后范围在[-3, 3]左右）
+        model_mean = torch.clamp(model_mean, -3.0, 3.0)
+    
     posterior_variance_t = extract(diffusion_consts["posterior_variance"], t, x_t)
 
     if t[0] == 0:
         return model_mean
     else:
         noise = torch.randn_like(x_t)
-        return model_mean + torch.sqrt(posterior_variance_t) * noise
+        x_prev = model_mean + torch.sqrt(posterior_variance_t) * noise
+        
+        # 数值稳定性：最终结果也进行裁剪
+        if clip_denoised:
+            x_prev = torch.clamp(x_prev, -3.0, 3.0)
+        
+        return x_prev
 
 
 @torch.no_grad()
 def p_sample_loop(model: nn.Module, shape: Tuple[int, ...], diffusion_consts: Dict[str, torch.Tensor], 
-                  device: torch.device, progress: bool = True) -> torch.Tensor:
+                  device: torch.device, progress: bool = True, clip_denoised: bool = False) -> torch.Tensor:
     """
     完整的反向采样循环（预测噪声epsilon版本）
     
@@ -227,6 +245,7 @@ def p_sample_loop(model: nn.Module, shape: Tuple[int, ...], diffusion_consts: Di
         diffusion_consts: 扩散常数
         device: 设备
         progress: 是否显示进度条
+        clip_denoised: 是否将去噪后的结果裁剪到合理范围（用于数值稳定性）
     
     Returns:
         生成的样本 [B, N*N*N, code_dim]
@@ -240,7 +259,7 @@ def p_sample_loop(model: nn.Module, shape: Tuple[int, ...], diffusion_consts: Di
     
     for i in iterator:
         t = torch.full((shape[0],), i, device=device, dtype=torch.long)
-        x_t = p_sample(model, x_t, t, diffusion_consts)
+        x_t = p_sample(model, x_t, t, diffusion_consts, clip_denoised=clip_denoised)
     
     return x_t
 
@@ -266,9 +285,9 @@ def p_sample_x0(model: nn.Module, x_t: torch.Tensor, t: torch.Tensor,
     
     # 可选的裁剪操作（用于数值稳定性）
     if clip_denoised:
-        # 根据数据范围裁剪，这里假设数据已归一化到[-1, 1]或类似范围
-        # 可以根据实际数据分布调整
-        predicted_x0 = torch.clamp(predicted_x0, -1.0, 1.0)
+        # 根据数据范围裁剪，这里假设数据已归一化到[-3, 3]或类似范围
+        # 可以根据实际数据分布调整（归一化后的codes通常在[-3, 3]范围内）
+        predicted_x0 = torch.clamp(predicted_x0, -3.0, 3.0)
     
     # 获取需要的常数
     betas_t = extract(diffusion_consts["betas"], t, x_t)
@@ -276,8 +295,6 @@ def p_sample_x0(model: nn.Module, x_t: torch.Tensor, t: torch.Tensor,
     sqrt_one_minus_alphas_cumprod_t = extract(diffusion_consts["sqrt_one_minus_alphas_cumprod"], t, x_t)
     posterior_variance_t = extract(diffusion_consts["posterior_variance"], t, x_t)
     
-    # 注意：对于batched采样，当前实现假设所有batch item在同一时间步
-    # 如果未来需要支持不同batch item不同时间步，需要改为按元素判断
     if t[0] == 0:
         # 最后一步，直接返回预测的x0
         return predicted_x0
@@ -296,12 +313,17 @@ def p_sample_x0(model: nn.Module, x_t: torch.Tensor, t: torch.Tensor,
         # 添加噪声（使用后验方差）
         noise = torch.randn_like(x_t)
         x_prev = model_mean + torch.sqrt(posterior_variance_t) * noise
+        
+        # 数值稳定性：最终结果也进行裁剪
+        if clip_denoised:
+            x_prev = torch.clamp(x_prev, -3.0, 3.0)
+        
         return x_prev
 
 
 @torch.no_grad()
 def p_sample_loop_x0(model: nn.Module, shape: Tuple[int, ...], diffusion_consts: Dict[str, torch.Tensor], 
-                     device: torch.device, progress: bool = True) -> torch.Tensor:
+                     device: torch.device, progress: bool = True, clip_denoised: bool = False) -> torch.Tensor:
     """
     完整的反向采样循环（预测x0版本）
     
@@ -311,6 +333,7 @@ def p_sample_loop_x0(model: nn.Module, shape: Tuple[int, ...], diffusion_consts:
         diffusion_consts: 扩散常数
         device: 设备
         progress: 是否显示进度条
+        clip_denoised: 是否将predicted_x0裁剪到合理范围（用于数值稳定性，默认False）
     
     Returns:
         生成的样本 [B, N*N*N, code_dim]
@@ -324,7 +347,7 @@ def p_sample_loop_x0(model: nn.Module, shape: Tuple[int, ...], diffusion_consts:
     
     for i in iterator:
         t = torch.full((shape[0],), i, device=device, dtype=torch.long)
-        x_t = p_sample_x0(model, x_t, t, diffusion_consts)
+        x_t = p_sample_x0(model, x_t, t, diffusion_consts, clip_denoised=clip_denoised)
     
     return x_t
 

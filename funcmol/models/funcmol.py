@@ -205,23 +205,24 @@ class FuncMol(nn.Module):
             raise ValueError("DDPM training step only available for 'new' or 'new_x0' diffusion method")
 
     @torch.no_grad()
-    def sample_ddpm(self, shape: tuple, code_stats=None, progress: bool = True) -> torch.Tensor:
+    def sample_ddpm(self, shape: tuple, code_stats=None, progress: bool = True, clip_denoised: bool = False) -> torch.Tensor:
         """
         DDPM采样
         
         Args:
             shape: 输出形状 (batch_size, N*N*N, code_dim)
             progress: 是否显示进度条
+            clip_denoised: 是否将去噪后的结果裁剪到合理范围（用于数值稳定性，默认False）
         
         Returns:
             生成的样本 [B, N*N*N, code_dim]
         """
         if self.diffusion_method == "new":
             self.net.eval()
-            sampled = p_sample_loop(self.net, shape, self.diffusion_consts, self.device, progress)
+            sampled = p_sample_loop(self.net, shape, self.diffusion_consts, self.device, progress, clip_denoised=clip_denoised)
         elif self.diffusion_method == "new_x0":
             self.net.eval()
-            sampled = p_sample_loop_x0(self.net, shape, self.diffusion_consts, self.device, progress)
+            sampled = p_sample_loop_x0(self.net, shape, self.diffusion_consts, self.device, progress, clip_denoised=clip_denoised)
         else:
             raise ValueError("DDPM sampling only available for 'new' or 'new_x0' diffusion method")
         

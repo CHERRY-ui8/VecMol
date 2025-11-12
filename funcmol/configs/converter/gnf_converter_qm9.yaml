@@ -32,7 +32,7 @@ method_configs:
 
   tanh:
     n_query_points: 1000 
-    step_size: 0.15  # 保持原有步长，tanh方法梯度场较强 0.02
+    step_size: 0.1  #  0.02
     sig_sf: 0.1
     sig_mag: 2
     # DBSCAN聚类参数

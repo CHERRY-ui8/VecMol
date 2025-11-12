@@ -32,6 +32,7 @@ from funcmol.utils.utils_fm import (
     compute_code_stats_offline, compute_codes,
     load_checkpoint_state_fm
 )
+from funcmol.utils.data_augmentation import augment_codes
 from funcmol.models.adamw import AdamW
 from funcmol.models.ema import ModelEma
 from funcmol.utils.utils_nf import infer_codes_occs_batch, load_neural_field, normalize_code
@@ -141,6 +142,21 @@ class FuncmolLightningModule(pl.LightningModule):
         """DDPM训练步骤"""
         # 获取codes
         codes, _ = self._process_batch(batch)
+        
+        # 应用数据增强（仅在训练时）
+        if self.training and self.config.get("use_data_augmentation", True):
+            grid_size = self.config["dset"]["grid_size"]
+            anchor_spacing = self.config["dset"]["anchor_spacing"]
+            apply_rotation = self.config.get("data_augmentation", {}).get("apply_rotation", True)
+            apply_translation = self.config.get("data_augmentation", {}).get("apply_translation", False)
+            
+            codes = augment_codes(
+                codes, 
+                grid_size=grid_size, 
+                anchor_spacing=anchor_spacing,
+                apply_rotation=apply_rotation,
+                apply_translation=apply_translation
+            )
         
         # 添加调试信息
         # if batch_idx == 0:  # 只在第一个batch打印
