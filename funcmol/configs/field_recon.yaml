@@ -5,34 +5,27 @@ defaults:
   - converter: gnf_converter_qm9  # 或 gnf_converter_drugs
   - encoder: gnn  # 添加 encoder 配置
   - decoder: decoder_global  # 添加 decoder 配置
-  - denoiser: gnn  # 添加 denoiser 配置
   - override hydra/job_logging: custom
   - _self_
 
 # 评估参数
-max_samples: 2  # 要评估的样本数量，null表示使用整个数据集，也可以指定具体数量如100
+max_samples: 20  # 要评估的样本数量，null表示使用整个数据集，也可以指定具体数量如100
 split: val  # 数据集分割：train/val/test，默认使用val数据集
 seed: 1234  # 随机种子，确保采样结果可重现
 
 # Field模式设置
-field_mode: denoiser_field  # 'gt_field', 'nf_field', 或 'denoiser_field'
-
-# FuncMol denoiser 参数
-smooth_sigma: 0.5  # 噪声平滑参数，用于 denoiser_field 模式
+field_mode: nf_field  # 'gt_field' 或 'nf_field'
 
 # Field方法设置
 field_methods: ['tanh']  # 要比较的field方法，现在已经确定了使用tanh方法
 
-# 模型路径（仅在nf_field或denoiser_field模式下需要）
-nf_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251024/lightning_logs/version_0/checkpoints/model-epoch=409.ckpt
+# 模型路径（仅在nf_field模式下需要）
+# nf_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251024/lightning_logs/version_0/checkpoints/model-epoch=409.ckpt
+nf_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251120/lightning_logs/version_0/checkpoints/model-epoch=259.ckpt
 # 注意：输出目录将基于此路径自动创建，如: exps/neural_field/nf_qm9_20250804_153549_358664
-
-# FuncMol denoiser路径（仅在denoiser_field模式下需要）
-fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251029/lightning_logs/version_0/checkpoints/model-epoch=199.ckpt
-# 注意：输出目录将基于此路径自动创建，如: exps/funcmol/fm_qm9_20250804_153549_358664
 
 # Hydra 设置
 hydra:
   run:
-    dir: ../exps/field_evaluation # NOTE：可能需要修改
+    dir: ../exps/field_evaluation # NOTE：不得不设置一个这个参数
 

@@ -129,7 +129,59 @@ def analyze_qm9_atoms(data_dir="/datapool/data2/home/pxg/data/hyc/funcmol-main-n
             percentage = stats[element]['total'] / total_all_atoms * 100
             print(f"  {element}: {percentage:.2f}%")
     
-    return stats, all_atom_counts
+    return stats, all_atom_counts, total_atoms_per_mol
+
+
+def save_statistics_to_file(stats, total_atoms_per_mol, output_path):
+    """
+    将统计结果保存到文件
+    
+    Args:
+        stats: 统计信息字典
+        total_atoms_per_mol: 每个分子的总原子数数组
+        output_path: 输出文件路径
+    """
+    elements = ['C', 'H', 'O', 'N', 'F']
+    total_all_atoms = sum([stats[e]['total'] for e in elements if e in stats])
+    
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write("QM9 Dataset Statistics\n")
+        f.write("=" * 60 + "\n\n")
+        f.write(f"Total Molecules: {len(total_atoms_per_mol)}\n\n")
+        f.write("Atom Type Statistics:\n")
+        f.write("-" * 60 + "\n\n")
+        
+        for element in elements:
+            if element in stats:
+                proportion = stats[element]['total'] / total_all_atoms * 100
+                f.write(f"{element} Atoms:\n")
+                f.write(f"  Mean per molecule: {stats[element]['mean']:.2f} ± {stats[element]['std']:.2f}\n")
+                f.write(f"  Median: {stats[element]['median']:.1f}\n")
+                f.write(f"  Range: {stats[element]['min']} - {stats[element]['max']}\n")
+                f.write(f"  Total: {stats[element]['total']:,}\n")
+                f.write(f"  Proportion of total atoms: {proportion:.2f}%\n\n")
+        
+        f.write("Total Atoms per Molecule:\n")
+        f.write("-" * 60 + "\n")
+        f.write(f"  Mean: {np.mean(total_atoms_per_mol):.2f} ± {np.std(total_atoms_per_mol):.2f}\n")
+        f.write(f"  Median: {np.median(total_atoms_per_mol):.1f}\n")
+        f.write(f"  Range: {np.min(total_atoms_per_mol)} - {np.max(total_atoms_per_mol)}\n\n")
+        
+        f.write("Atom Type Proportions (by count):\n")
+        f.write("-" * 60 + "\n")
+        for element in elements:
+            if element in stats:
+                percentage = stats[element]['total'] / total_all_atoms * 100
+                f.write(f"  {element}: {percentage:.2f}%\n")
+    
+    print(f"\n统计结果已保存到: {output_path}")
+
 
 if __name__ == "__main__":
-    stats, all_atom_counts = analyze_qm9_atoms()
+    stats, all_atom_counts, total_atoms_per_mol = analyze_qm9_atoms()
+    
+    # 保存统计结果到文件
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    output_path = os.path.join(script_dir, "funcmol", "analysis", "qm9_statistics.txt")
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    save_statistics_to_file(stats, total_atoms_per_mol, output_path)

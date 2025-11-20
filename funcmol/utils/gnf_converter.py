@@ -287,7 +287,7 @@ class GNFConverter(nn.Module):
 
     def _process_atom_types_matrix(self, current_codes: torch.Tensor, n_atom_types: int, 
                                  n_query_points: int, device: torch.device, 
-                                 decoder: nn.Module, fabric: object = None,
+                                 decoder: nn.Module,
                                  iteration_callback: Optional[callable] = None) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
         """
         完全矩阵化处理所有原子类型，避免所有循环。
@@ -298,7 +298,6 @@ class GNFConverter(nn.Module):
             n_atom_types: 原子类型数量
             n_query_points: 查询点数量
             device: 设备
-            fabric: 日志对象
             
         Returns:
             (coords_list, types_list): 坐标和类型列表
@@ -317,8 +316,6 @@ class GNFConverter(nn.Module):
                 candidate_field = decoder(candidate_batch, current_codes)
             # 移除强制内存清理，让PyTorch自动管理
         except Exception as e:
-            if fabric:
-                fabric.print(f">> ERROR in decoder call: {e}")
             raise e
         
         # 2. 完全矩阵化采样 - 一次性处理所有原子类型
@@ -358,7 +355,7 @@ class GNFConverter(nn.Module):
             
             # 批量梯度上升
             final_points = self._batch_gradient_ascent(
-                combined_points, combined_types, current_codes, device, decoder, fabric,
+                combined_points, combined_types, current_codes, device, decoder,
                 iteration_callback=iteration_callback
             )
             
@@ -379,7 +376,7 @@ class GNFConverter(nn.Module):
 
     def _batch_gradient_ascent(self, points: torch.Tensor, atom_types: torch.Tensor,
                               current_codes: torch.Tensor, device: torch.device,
-                              decoder: nn.Module, fabric: object = None,
+                              decoder: nn.Module,
                               iteration_callback: Optional[callable] = None) -> torch.Tensor:
         """
         批量梯度上升，对所有原子类型的点同时进行梯度上升。
@@ -390,7 +387,6 @@ class GNFConverter(nn.Module):
             atom_types: 原子类型 [n_total_points]
             current_codes: 当前编码 [1, code_dim]
             device: 设备
-            fabric: 日志对象
             iteration_callback: 可选的回调函数，在每次迭代时调用，参数为 (iteration_idx, current_points, atom_types)
             
         Returns:
@@ -444,16 +440,7 @@ class GNFConverter(nn.Module):
                 if iteration_callback is not None:
                     iteration_callback(iter_idx, z.clone(), atom_types)
                 
-                # 完全移除内存清理以避免干扰梯度上升过程
-                # 让PyTorch自动管理内存
-                if fabric and iter_idx % 50 == 0:
-                    allocated = torch.cuda.memory_allocated() / 1024**3
-                    reserved = torch.cuda.memory_reserved() / 1024**3
-                    fabric.print(f">>     Memory status at iteration {iter_idx}: Allocated={allocated:.2f}GB, Reserved={reserved:.2f}GB")
-                
-            except (RuntimeError, ValueError, IndexError) as e:
-                if fabric:
-                    fabric.print(f">> ERROR in batch gradient ascent iteration {iter_idx}: {e}")
+            except (RuntimeError, ValueError, IndexError):
                 # 发生错误时也清理内存
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -465,8 +452,7 @@ class GNFConverter(nn.Module):
         return z
 
     def gnf2mol(self, decoder: nn.Module, codes: torch.Tensor,
-                atom_types: Optional[torch.Tensor] = None,
-                fabric: object = None,
+                _atom_types: Optional[torch.Tensor] = None,
                 save_interval: Optional[int] = None,
                 visualization_callback: Optional[callable] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
@@ -474,8 +460,7 @@ class GNFConverter(nn.Module):
         Args:
             decoder: 解码器模型，用于动态计算向量场
             codes: [batch, grid_size**3, code_dim]  # 编码器的输出
-            atom_types: 可选的原子类型
-            fabric: 日志对象
+            _atom_types: 可选的原子类型（当前未使用，保留用于接口兼容性）
             save_interval: 可选的保存间隔，用于可视化。如果提供，会在每 save_interval 步调用 visualization_callback
             visualization_callback: 可选的可视化回调函数，参数为 (iteration_idx, all_points_dict, batch_idx)
                                    其中 all_points_dict 是一个字典，键为原子类型索引，值为该类型的所有点 [n_points, 3]
@@ -526,8 +511,8 @@ class GNFConverter(nn.Module):
             
             # 矩阵化处理所有原子类型
             coords_list, types_list = self._process_atom_types_matrix(
-                current_codes, n_atom_types, n_query_points, device, decoder, fabric,
-                iteration_callback=iteration_callback
+                current_codes, n_atom_types, n_query_points, device, decoder,
+                iteration_callback
             )
             
             # 合并所有类型

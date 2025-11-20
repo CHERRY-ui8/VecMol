@@ -111,7 +111,6 @@ class EGNNVectorField(nn.Module):
                  code_dim: int = 128,
                  cutoff: float = None,
                  anchor_spacing: float = 2.0,
-                #  device=None,
                  k_neighbors: int = 32):  # 添加k_neighbors参数
         """
         Initialize the EGNN Vector Field model.

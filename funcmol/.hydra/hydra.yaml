@@ -111,11 +111,11 @@ hydra:
   overrides:
     hydra:
     - hydra.run.dir="/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/funcmol"
-    - hydra.job.name=train_ddp_process_4
+    - hydra.job.name=train_ddp_process_1
     - hydra.mode=RUN
     task: []
   job:
-    name: train_ddp_process_4
+    name: train_ddp_process_1
     chdir: null
     override_dirname: ''
     id: ???

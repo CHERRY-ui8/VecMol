@@ -15,7 +15,10 @@ exp_dir: ../exps/neural_field
 # exp_name: "nf_${dset.dset_name}/${now:%Y%m%d}/${now:%H%M%S}_${now:%f}"
 exp_name: "nf_${dset.dset_name}/${now:%Y%m%d}"
 dirname: "${exp_dir}/${exp_name}"
-reload_model_path: null
+
+# For continue training and finetune decoder
+reload_model_path: "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251024/lightning_logs/version_0/checkpoints/model-epoch=409.ckpt"
+
 auto_resume: False  # 是否自动加载最新的checkpoint继续训练
 n_samples: None
 
@@ -25,6 +28,33 @@ n_epochs: 1000
 eval_every: 5
 use_ema: False
 lr_decay: False
+
+# Fine-tuning settings: freeze encoder and only train decoder
+finetune_decoder:
+  enabled: False  # 是否启用decoder微调模式（冻结encoder，只训练decoder）
+  freeze_encoder: True  # 是否冻结encoder（在微调模式下自动为True）
+  code_augmentation:
+    enabled: True  # 微调模式下自动启用codes扰动
+    noise_std: 0.003  # 高斯噪声标准差
+
+# DEPRECATED: code augmentation for training robustness (仅在非微调模式下、重新训练时使用)
+code_augmentation:
+  enabled: False  # 是否启用codes扰动
+  noise_std: 0.01  # 高斯噪声标准差
+
+# Loss weighting: 对更重要的区域（原子附近、field变化大的区域）加权
+loss_weighting:
+  enabled: True  # 是否启用loss加权
+  # weight = atom_distance_weight × atom_distance 
+  #        + field_magnitude_weight × field_magnitude
+  #        + atom_density_weight × atom_density
+  atom_distance_weight: 1.0  # 原子距离权重（距离原子越近权重越大）
+  field_magnitude_weight: 1.2  # field变化权重（field范数越大权重越大，提高以更关注field变化大的区域）
+  atom_density_weight: 0.8  # 原子密度权重（周围原子越多权重越大，0表示不使用，提高以更关注原子密集区）
+
+  atom_distance_scale: 1.5  # 原子距离衰减尺度（越小，距离衰减越快。1.5使衰减更平缓，覆盖更多重要区域）
+  field_magnitude_power: 0.5  # field范数的幂次（用于调整field权重的敏感度，0.5是合理的平方根压缩）
+  atom_density_radius: 2.5  # 原子密度计算半径（埃单位，在此半径内的原子会被计入密度。2.5覆盖更多相互作用区域）
 
 # set the running dir
 hydra:

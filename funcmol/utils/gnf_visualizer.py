@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Any, Union
 import torch
 import numpy as np
+import matplotlib
 import matplotlib.pyplot as plt
 import imageio.v2 as imageio
 from omegaconf import OmegaConf
@@ -470,17 +471,19 @@ class GNFVisualizer(MoleculeVisualizer):
                                        gt_coords: torch.Tensor,
                                        gt_types: torch.Tensor,
                                        converter: GNFConverter,
-                                       field_func,
+                                       decoder: torch.nn.Module,
+                                       codes: torch.Tensor,
                                        save_interval: int = 50,
                                        animation_name: str = "reconstruction",
                                        sample_idx: int = 0) -> Dict[str, Any]:
-        """创建分子重建过程的动画
+        """创建分子重建过程的动画（使用gnf2mol方法，与field_recon.py完全一致）
 
         Args:
             gt_coords: 真实分子坐标，形状 [batch, n_atoms, 3]
             gt_types: 真实原子类型，形状 [batch, n_atoms]
             converter: GNF 转换器
-            field_func: 梯度场函数，接受points参数并返回梯度场
+            decoder: 解码器模型
+            codes: 编码向量
             save_interval: 保存帧的间隔
             animation_name: 动画文件名前缀
             sample_idx: 样本索引
@@ -497,19 +500,7 @@ class GNFVisualizer(MoleculeVisualizer):
         print(f"\nStarting reconstruction for molecule {sample_idx}")
         print(f"Ground truth atoms: {len(gt_valid_coords)}")
         
-        all_atom_types = list(range(5))
-        
-        coords_min = gt_valid_coords.min(dim=0)[0]
-        coords_max = gt_valid_coords.max(dim=0)[0]
-        coords_range = coords_max - coords_min
-        margin = coords_range * 0.5
-        init_min = coords_min - margin
-        init_max = coords_max + margin
-        
-        z_dict = {}
-        for atom_type in all_atom_types:
-            z_dict[atom_type] = torch.rand(converter.n_query_points, 3, device=device) * (init_max - init_min) + init_min
-        
+        # 使用gnf2mol方法创建重建动画（与field_recon.py完全一致）
         frame_paths = []
         metrics_history = {
             'iterations': [],
@@ -519,71 +510,82 @@ class GNFVisualizer(MoleculeVisualizer):
             'kl_2to1': []
         }
         
-        for i in range(converter.n_iter):
-            with torch.no_grad():
-                for atom_type in all_atom_types:
-                    z = z_dict[atom_type]
-                    gradients = field_func(z)
-                    # 确保梯度场形状正确
-                    if gradients.dim() == 4:  # [batch, n_points, n_atom_types, 3]
-                        gradients = gradients[0]  # 取第一个batch
-                    
-                    type_gradients = gradients[:, atom_type, :]
-                    
-                    z_dict[atom_type] = z + torch.tensor(converter.step_size, device=z.device) * type_gradients
+        # 创建可视化回调函数
+        def visualization_callback(iter_idx, all_points_dict, batch_idx=0):
+            """在每次迭代时保存可视化帧并计算指标"""
+            _ = batch_idx  # 未使用，但需要保持接口一致
+            # 合并所有原子类型的点
+            all_points = []
+            all_types = []
+            for atom_type in range(5):  # C, H, O, N, F
+                if atom_type in all_points_dict and len(all_points_dict[atom_type]) > 0:
+                    points = all_points_dict[atom_type]
+                    all_points.append(points)
+                    all_types.extend([atom_type] * len(points))
             
-            if i % save_interval == 0 or i == converter.n_iter - 1:
-                frame_path = os.path.join(self.recon_dir, f"frame_sample_{sample_idx}_{i:04d}.png")
-                
-                all_points = []
-                all_types = []
-                for atom_type in all_atom_types:
-                    points = z_dict[atom_type]
-                    if len(points) > 0:
-                        all_points.append(points)
-                        all_types.extend([atom_type] * len(points))
-                
-                if all_points:
-                    current_points = torch.cat(all_points, dim=0)
-                    current_types = torch.tensor(all_types, device=device)
-                else:
-                    current_points = torch.empty((0, 3), device=device)
-                    current_types = torch.empty((0,), device=device)
-                
-                visualize_reconstruction_step(
-                    gt_valid_coords, current_points, i, frame_path, 
-                    gt_valid_types, current_types
+            if all_points:
+                current_points = torch.cat(all_points, dim=0)
+                current_types = torch.tensor(all_types, device=device)
+            else:
+                current_points = torch.empty((0, 3), device=device)
+                current_types = torch.empty((0,), device=device, dtype=torch.long)
+            
+            # 保存帧
+            frame_path = os.path.join(self.recon_dir, f"frame_sample_{sample_idx}_{iter_idx:04d}.png")
+            visualize_reconstruction_step(
+                gt_valid_coords, current_points, iter_idx, frame_path,
+                gt_valid_types, current_types
+            )
+            frame_paths.append(frame_path)
+            
+            # 计算指标
+            if len(current_points) > 0:
+                metrics_history['iterations'].append(iter_idx)
+                metrics_history['loss'].append(
+                    self.metrics.compute_reconstruction_loss_scalar(gt_valid_coords, current_points)
                 )
-                frame_paths.append(frame_path)
-                
-                if len(current_points) > 0:
-                    metrics_history['iterations'].append(i)
-                    metrics_history['loss'].append(
-                        self.metrics.compute_reconstruction_loss_scalar(gt_valid_coords, current_points)
-                    )
-                    metrics_history['rmsd'].append(
-                        self.metrics.compute_rmsd_scalar(gt_valid_coords, current_points)
-                    )
-                    kl_1to2, kl_2to1 = self.metrics.compute_kl_divergences_scalar(
-                        gt_valid_coords, current_points
-                    )
-                    metrics_history['kl_1to2'].append(kl_1to2)
-                    metrics_history['kl_2to1'].append(kl_2to1)
+                metrics_history['rmsd'].append(
+                    self.metrics.compute_rmsd_scalar(gt_valid_coords, current_points)
+                )
+                kl_1to2, kl_2to1 = self.metrics.compute_kl_divergences_scalar(
+                    gt_valid_coords, current_points
+                )
+                metrics_history['kl_1to2'].append(kl_1to2)
+                metrics_history['kl_2to1'].append(kl_2to1)
         
+        # 使用gnf2mol方法进行重建（与field_recon.py完全一致）
+        recon_coords, recon_types = converter.gnf2mol(
+            decoder,
+            codes,
+            save_interval=save_interval,
+            visualization_callback=visualization_callback
+        )
+        
+        # 处理最终结果
+        recon_coords_device = recon_coords[0].to(device)
+        recon_types_device = recon_types[0].to(device)
+        
+        # 过滤掉填充的原子（值为-1）
+        valid_mask = recon_types_device != -1
+        if valid_mask.any():
+            final_points = recon_coords_device[valid_mask]
+            final_types = recon_types_device[valid_mask]
+        else:
+            final_points = torch.empty((0, 3), device=device)
+            final_types = torch.empty((0,), device=device, dtype=torch.long)
+        
+        # 创建GIF动画
         gif_path = os.path.join(self.recon_dir, f"{animation_name}.gif")
         with imageio.get_writer(gif_path, mode='I', duration=0.1, fps=15, loop=1) as writer:
             for frame_path in frame_paths:
                 try:
-                    # 检查文件是否存在且大小大于0
                     if not os.path.exists(frame_path):
                         print(f"Warning: Frame file {frame_path} does not exist, skipping...")
                         continue
                     
-                    # 等待文件完全写入
                     import time
                     time.sleep(0.01)  # 短暂等待确保文件写入完成
                     
-                    # 检查文件大小
                     if os.path.getsize(frame_path) == 0:
                         print(f"Warning: Frame file {frame_path} is empty, skipping...")
                         continue
@@ -595,30 +597,14 @@ class GNFVisualizer(MoleculeVisualizer):
                     print(f"Warning: Failed to read frame {frame_path}: {e}")
                     continue
                 finally:
-                    # 确保清理文件
+                    # 清理临时帧文件
                     try:
                         if os.path.exists(frame_path):
                             os.remove(frame_path)
                     except:
                         pass
         
-        final_points = []
-        final_types = []
-        for atom_type in all_atom_types:
-            points = z_dict[atom_type].detach().cpu().numpy()
-            if len(points) > 0:
-                merged_points = converter._merge_points(points)
-                if len(merged_points) > 0:
-                    final_points.append(torch.from_numpy(merged_points).to(device))
-                    final_types.extend([atom_type] * len(merged_points))
-        
-        if final_points:
-            final_points = torch.cat(final_points, dim=0)
-            final_types = torch.tensor(final_types, device=device)
-        else:
-            final_points = torch.empty((0, 3), device=device)
-            final_types = torch.empty((0,), device=device)
-        
+        # 保存最终对比图
         comparison_path = os.path.join(self.recon_dir, f"{animation_name}_final.png")
         visualize_molecule_comparison(
             gt_valid_coords,
@@ -1427,6 +1413,293 @@ def visualize_1d_gradient_field_generation_with_field(
         'all_results': all_results,
         'available_atom_types': atom_types
     }
+
+def create_visualization_callback(
+    output_dir: str,
+    frame_prefix: str,
+    codes_device: torch.device,
+    n_atom_types: int = 5,
+    fixed_axis_limits_dict: Optional[Dict] = None
+) -> Tuple[callable, List[str], Dict]:
+    """创建通用的可视化回调函数，用于在重建过程中保存可视化帧。
+    
+    Args:
+        output_dir: 输出目录路径
+        frame_prefix: 帧文件前缀（例如 "frame_aug_original"）
+        codes_device: codes所在的设备
+        n_atom_types: 原子类型数量，默认为5（C, H, O, N, F）
+        fixed_axis_limits_dict: 可选的固定坐标轴限制字典，用于存储和更新坐标轴范围
+        
+    Returns:
+        Tuple[callable, List[str], Dict]:
+            - visualization_callback: 回调函数
+            - frame_paths: 存储帧路径的列表
+            - fixed_axis_limits_dict: 坐标轴限制字典（如果传入None，会创建新的）
+    """
+    frame_paths = []
+    if fixed_axis_limits_dict is None:
+        fixed_axis_limits_dict = {'limits': None}
+    
+    def visualization_callback(iter_idx, all_points_dict, batch_idx=0):
+        """在每次迭代时保存可视化帧"""
+        _ = batch_idx  # 未使用，但需要保持接口一致
+        # 合并所有原子类型的点
+        all_points = []
+        all_types = []
+        for atom_type in range(n_atom_types):
+            if atom_type in all_points_dict and len(all_points_dict[atom_type]) > 0:
+                points = all_points_dict[atom_type]
+                all_points.append(points)
+                all_types.extend([atom_type] * len(points))
+        
+        if all_points:
+            current_points = torch.cat(all_points, dim=0)
+            current_types = torch.tensor(all_types, device=current_points.device)
+        else:
+            current_points = torch.empty((0, 3), device=codes_device)
+            current_types = torch.empty((0,), device=codes_device, dtype=torch.long)
+        
+        # 如果是第一帧，确定固定坐标轴范围
+        if iter_idx == 0 and len(current_points) > 0:
+            points_np = current_points.detach().cpu().numpy()
+            margin = 1.0
+            fixed_axis_limits_dict['limits'] = {
+                'x_min': points_np[:, 0].min() - margin,
+                'x_max': points_np[:, 0].max() + margin,
+                'y_min': points_np[:, 1].min() - margin,
+                'y_max': points_np[:, 1].max() + margin,
+                'z_min': points_np[:, 2].min() - margin,
+                'z_max': points_np[:, 2].max() + margin
+            }
+        
+        # 保存帧
+        frame_path = os.path.join(output_dir, f"{frame_prefix}_{iter_idx:04d}.png")
+        visualize_generation_step(
+            current_points, iter_idx, frame_path, current_types, fixed_axis_limits_dict['limits']
+        )
+        frame_paths.append(frame_path)
+    
+    return visualization_callback, frame_paths, fixed_axis_limits_dict
+
+
+def create_gif_from_frames(
+    frame_paths: List[str],
+    gif_path: str,
+    duration: float = 0.1,
+    fps: int = 15,
+    loop: int = 1,
+    cleanup_frames: bool = True
+) -> None:
+    """从帧文件列表创建GIF动画。
+    
+    Args:
+        frame_paths: 帧文件路径列表
+        gif_path: 输出GIF文件路径
+        duration: 每帧持续时间（秒）
+        fps: 帧率
+        loop: 循环次数（0表示无限循环）
+        cleanup_frames: 是否在创建GIF后删除临时帧文件
+    """
+    import time
+    
+    # 确保输出目录存在
+    gif_dir = os.path.dirname(gif_path)
+    if gif_dir and not os.path.exists(gif_dir):
+        os.makedirs(gif_dir, exist_ok=True)
+    
+    with imageio.get_writer(gif_path, mode='I', duration=duration, fps=fps, loop=loop) as writer:
+        for frame_path in frame_paths:
+            try:
+                if not os.path.exists(frame_path):
+                    print(f"Warning: Frame file {frame_path} does not exist, skipping...")
+                    continue
+                
+                time.sleep(0.01)  # 短暂等待确保文件写入完成
+                
+                if os.path.getsize(frame_path) == 0:
+                    print(f"Warning: Frame file {frame_path} is empty, skipping...")
+                    continue
+                
+                frame = imageio.imread(frame_path)
+                writer.append_data(frame)
+                
+            except Exception as e:
+                print(f"Warning: Failed to read frame {frame_path}: {e}")
+                continue
+            finally:
+                # 清理临时帧文件
+                if cleanup_frames:
+                    try:
+                        if os.path.exists(frame_path):
+                            os.remove(frame_path)
+                    except:
+                        pass
+
+
+def visualize_1d_gradient_field_augmentation_comparison(
+    field_funcs: Dict[str, callable],
+    atom_types: Optional[Union[int, List[int]]] = None,
+    x_range: Optional[tuple] = None,
+    n_points: int = 3000,
+    y_coord: float = 0.0,
+    z_coord: float = 0.0,
+    save_path: Optional[str] = None,
+    sample_idx: int = 0,
+) -> Optional[Dict[str, Any]]:
+    """可视化数据增强后4种codes的1d梯度场对比。
+    
+    Args:
+        field_funcs: 字典，键为增强类型名称（如'original', 'rotation', 'translation', 'both'），值为对应的field_func
+        atom_types: 原子类型列表或单个原子类型（0=C, 1=H, 2=O, 3=N, 4=F），None时默认为[0,1,2,3,4]
+        x_range: x 轴范围，None 时使用默认范围
+        n_points: 采样点数
+        y_coord: y 坐标固定值
+        z_coord: z 坐标固定值
+        save_path: 保存路径前缀，None 时不保存
+        sample_idx: 样本索引，用于文件名
+
+    Returns:
+        包含梯度场统计信息和数据的字典
+    """
+    # 设置matplotlib使用默认字体，避免字体问题
+    matplotlib.rcParams['font.family'] = 'DejaVu Sans'
+    matplotlib.rcParams['font.sans-serif'] = ['DejaVu Sans']
+    matplotlib.rcParams['axes.unicode_minus'] = False  # 避免负号显示问题
+    
+    # 确保 atom_types 是列表
+    if atom_types is None:
+        atom_types = [0, 1, 2, 3, 4]
+    if isinstance(atom_types, int):
+        atom_types = [atom_types]
+    
+    # 获取设备
+    first_field_func = list(field_funcs.values())[0]
+    if hasattr(first_field_func, 'parameters'):
+        device = next(first_field_func.parameters()).device
+    else:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    # 设置默认x范围
+    if x_range is None:
+        x_range = (-11.0, 11.0)  # 默认范围
+        print(f"使用默认 x 轴范围: {x_range}")
+    
+    x = torch.linspace(x_range[0], x_range[1], n_points, device=device)
+    query_points = torch.zeros(n_points, 3, device=device)
+    query_points[:, 0], query_points[:, 1], query_points[:, 2] = x, y_coord, z_coord
+    
+    # 计算所有增强类型的梯度场
+    all_fields = {}
+    with torch.no_grad():
+        for aug_type, field_func in field_funcs.items():
+            pred_field = field_func(query_points.unsqueeze(0))
+            # 确保预测场形状正确
+            if pred_field.dim() == 4:  # [batch, n_points, n_atom_types, 3]
+                pred_field = pred_field[0]  # 取第一个batch
+            all_fields[aug_type] = pred_field
+    
+    # 为每个原子类型创建对比图
+    all_results = {}
+    aug_type_names = {
+        'original': 'Original',
+        'rotation': 'Rotation',
+        'translation': 'Translation',
+        'both': 'Rotation+Translation'
+    }
+    colors = {
+        'original': 'blue',
+        'rotation': 'red',
+        'translation': 'green',
+        'both': 'orange'
+    }
+    
+    for atom_type in atom_types:
+        # 扩展原子类型名称列表以支持更多元素
+        atom_names = ["C", "H", "O", "N", "F", "S", "Cl", "Br"]
+        if atom_type < len(atom_names):
+            atom_name = atom_names[atom_type]
+        else:
+            atom_name = f"Type{atom_type}"
+        
+        # 创建1×4的子图（只保留magnitude和X、Y、Z分量对比）
+        fig, (ax1, ax2, ax3, ax4) = plt.subplots(1, 4, figsize=(24, 6))
+        
+        # 为每种增强类型计算梯度场数据
+        aug_data = {}
+        for aug_type, field in all_fields.items():
+            pred_gradients_3d = field[:, atom_type, :]
+            pred_gradients = torch.norm(pred_gradients_3d, dim=1)
+            pred_gradients_x = pred_gradients_3d[:, 0]
+            pred_gradients_y = pred_gradients_3d[:, 1]
+            pred_gradients_z = pred_gradients_3d[:, 2]
+            aug_data[aug_type] = {
+                'magnitude': pred_gradients,
+                'x': pred_gradients_x,
+                'y': pred_gradients_y,
+                'z': pred_gradients_z
+            }
+        
+        # 子图1: 梯度场幅度对比
+        for aug_type in field_funcs.keys():
+            ax1.plot(x.cpu().numpy(), aug_data[aug_type]['magnitude'].cpu().numpy(),
+                    label=aug_type_names.get(aug_type, aug_type),
+                    linewidth=2, color=colors.get(aug_type, 'black'), alpha=0.8)
+        ax1.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
+        ax1.set_xlabel('X Position (Å)', fontsize=12)
+        ax1.set_ylabel('Gradient Field Magnitude', fontsize=12)
+        ax1.set_title(f'Gradient Field Magnitude - {atom_name} Atoms\n'
+                      f'Sample {sample_idx}, Line: y={y_coord:.2f}, z={z_coord:.2f}', fontsize=14)
+        ax1.grid(True, alpha=0.3)
+        ax1.legend(fontsize=11)
+        
+        # 子图2-4: X, Y, Z方向分量对比
+        for component, ax in [('x', ax2), ('y', ax3), ('z', ax4)]:
+            for aug_type in field_funcs.keys():
+                ax.plot(x.cpu().numpy(), aug_data[aug_type][component].cpu().numpy(),
+                       label=aug_type_names.get(aug_type, aug_type),
+                       linewidth=2, color=colors.get(aug_type, 'black'), alpha=0.8)
+            ax.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
+            ax.set_xlabel('X Position (Å)', fontsize=12)
+            ax.set_ylabel(f'Gradient {component.upper()} Component', fontsize=12)
+            ax.set_title(f'Gradient {component.upper()} Component - {atom_name}', fontsize=14)
+            ax.grid(True, alpha=0.3)
+            ax.legend(fontsize=11)
+        
+        plt.tight_layout()
+        
+        # 保存图像
+        if save_path is not None:
+            atom_save_path = f"{save_path}_atom_{atom_name}.png"
+            with plt.rc_context({'text.usetex': False, 'font.family': 'DejaVu Sans'}):
+                plt.savefig(atom_save_path, dpi=150, bbox_inches='tight')
+            print(f"Field 1D augmentation comparison (atom_type={atom_name}) saved to: {atom_save_path}")
+        else:
+            plt.show()
+        
+        # 关闭图形以释放内存
+        plt.close(fig)
+        
+        # 计算统计信息
+        stats = {}
+        for aug_type in field_funcs.keys():
+            magnitude = aug_data[aug_type]['magnitude']
+            stats[aug_type] = {
+                'magnitude_mean': magnitude.mean().item(),
+                'magnitude_std': magnitude.std().item(),
+                'magnitude_max': magnitude.max().item(),
+                'magnitude_min': magnitude.min().item()
+            }
+        
+        all_results[atom_name] = {
+            'save_path': atom_save_path if save_path is not None else None,
+            'stats': stats
+        }
+    
+    return {
+        'all_results': all_results,
+        'available_atom_types': atom_types
+    }
+
 
 def setup_environment(devices: str = "1", accelerator: str = "cpu", precision: str = "32-true") -> Tuple[Fabric, torch.device]:
     """初始化运行环境。

@@ -13,5 +13,5 @@ subsampling_ratio: 2
 
 num_workers: 4
 batch_size: 32
-lr_enc: 1e-4 # 之前是2e-4，但是发现训练到后期loss震荡严重，所以调小
-lr_dec: 2e-4 # 之前是1e-3，但是发现训练到后期loss震荡严重，所以调小
+lr_enc: 1e-4
+lr_dec: 2e-4 # 非微调模式下是2e-4，微调是3e-5

@@ -85,6 +85,8 @@ def prepare_diffusion_constants(betas: torch.Tensor, device: Optional[torch.devi
         "sqrt_alphas_cumprod_prev": torch.sqrt(alphas_cumprod_prev.clamp(min=eps)),
         "sqrt_one_minus_alphas_cumprod_prev": torch.sqrt((1 - alphas_cumprod_prev).clamp(min=eps)),
         "sqrt_recip_alphas": torch.sqrt((1.0 / alphas).clamp(min=eps)),
+        "sqrt_alphas": torch.sqrt(alphas.clamp(min=eps)),  # 单步量 sqrt(α_t)
+        "sqrt_beta": torch.sqrt((1.0 - alphas).clamp(min=eps)),  # 单步量 sqrt(β_t) = sqrt(1 - α_t)
         "posterior_variance": posterior_variance,
     }
 
@@ -291,24 +293,27 @@ def p_sample_x0(model: nn.Module, x_t: torch.Tensor, t: torch.Tensor,
     
     # 获取需要的常数
     betas_t = extract(diffusion_consts["betas"], t, x_t)
-    sqrt_alphas_cumprod_t = extract(diffusion_consts["sqrt_alphas_cumprod"], t, x_t)
-    sqrt_one_minus_alphas_cumprod_t = extract(diffusion_consts["sqrt_one_minus_alphas_cumprod"], t, x_t)
+    alphas_cumprod_t = extract(diffusion_consts["alphas_cumprod"], t, x_t)  # 累计量 α̅_t
+    alphas_cumprod_prev_t = extract(diffusion_consts["alphas_cumprod_prev"], t, x_t)  # 累计量 α̅_{t-1}
+    sqrt_alphas_t = extract(diffusion_consts["sqrt_alphas"], t, x_t)  # 单步量 sqrt(α_t)
+    sqrt_alphas_cumprod_prev_t = extract(diffusion_consts["sqrt_alphas_cumprod_prev"], t, x_t)  # 累计量 sqrt(α̅_{t-1})
     posterior_variance_t = extract(diffusion_consts["posterior_variance"], t, x_t)
     
     if t[0] == 0:
         # 最后一步，直接返回预测的x0
         return predicted_x0
     else:
-        # 从预测的x0计算x_{t-1}的均值
-        # 正确的后验分布公式：
-        # 方法：从predicted_x0计算predicted_noise，然后使用标准公式
-        # predicted_noise = (x_t - sqrt(alpha_t) * predicted_x0) / sqrt(1 - alpha_t)
-        predicted_noise = (x_t - sqrt_alphas_cumprod_t * predicted_x0) / sqrt_one_minus_alphas_cumprod_t
+        # 使用DDPM标准的采样公式计算x_{t-1}的均值
+        # μ_t = (√(α̅_{t-1}) * β_t / (1 - α̅_t)) * x_t + (√(α_t) * (1 - α̅_{t-1}) / (1 - α̅_t)) * x̂_0
+        eps = 1e-8
+        one_minus_alphas_cumprod_t = (1.0 - alphas_cumprod_t).clamp(min=eps)
+        one_minus_alphas_cumprod_prev_t = (1.0 - alphas_cumprod_prev_t).clamp(min=eps)
         
-        # 使用标准的DDPM采样公式计算x_{t-1}的均值
-        # model_mean = (1 / sqrt(alpha_t)) * (x_t - (beta_t / sqrt(1 - alpha_t)) * predicted_noise)
-        sqrt_recip_alphas_t = extract(diffusion_consts["sqrt_recip_alphas"], t, x_t)
-        model_mean = sqrt_recip_alphas_t * (x_t - betas_t / sqrt_one_minus_alphas_cumprod_t * predicted_noise)
+        # 计算model_mean：直接使用predicted_x0，不需要先计算predicted_noise
+        model_mean = (
+            sqrt_alphas_cumprod_prev_t * betas_t / one_minus_alphas_cumprod_t * x_t
+            + sqrt_alphas_t * one_minus_alphas_cumprod_prev_t / one_minus_alphas_cumprod_t * predicted_x0
+        )
         
         # 添加噪声（使用后验方差）
         noise = torch.randn_like(x_t)
@@ -390,42 +395,102 @@ def compute_ddpm_loss(model: nn.Module, x_0: torch.Tensor, diffusion_consts: Dic
 
 
 def compute_ddpm_loss_x0(model: nn.Module, x_0: torch.Tensor, diffusion_consts: Dict[str, torch.Tensor], 
-                         device: torch.device) -> torch.Tensor:
+                         device: torch.device, use_t_weighted_loss: bool = True) -> torch.Tensor:
     """
-    计算DDPM训练损失（预测x0版本）
+    计算DDPM训练损失（预测x0版本，计算x_{t-1}的加权损失）
     
     Args:
         model: 去噪模型，预测x0
         x_0: 原始数据 [B, N*N*N, code_dim]
         diffusion_consts: 扩散常数
         device: 设备
+        use_t_weighted_loss: 是否使用时间步加权（默认True）
     
     Returns:
         训练损失
     """
     batch_size = x_0.shape[0]
+    num_timesteps = diffusion_consts["betas"].shape[0]
     
-    # 随机采样时间步
-    t = torch.randint(0, diffusion_consts["betas"].shape[0], (batch_size,), device=device).long()
+    # 随机采样时间步（确保t > 0，因为需要计算x_{t-1}）
+    # 对于t=0的情况，x_{t-1}就是x_0，需要特殊处理
+    t = torch.randint(1, num_timesteps, (batch_size,), device=device).long()
     
-    # 生成噪声
-    noise = torch.randn_like(x_0)
+    # 生成噪声（用于前向扩散到x_t）
+    noise_t = torch.randn_like(x_0)
     
-    # 前向扩散
-    x_t = q_sample(x_0, t, diffusion_consts, noise)
+    # 前向扩散：从x_0到x_t
+    x_t = q_sample(x_0, t, diffusion_consts, noise_t)
     
     # 预测x0
     predicted_x0 = model(x_t, t)
     
-    # 计算损失：直接预测x0
-    # 注意：对于预测x0的版本，通常不需要时间步权重，因为预测x0比预测噪声更稳定
-    loss = F.mse_loss(predicted_x0, x_0, reduction='mean')
+    # 数值稳定性：裁剪predicted_x0
+    predicted_x0 = torch.clamp(predicted_x0, -3.0, 3.0)
     
-    # 数值稳定性检查：如果loss过大，可能是数值问题
+    # 计算t-1（确保不会小于0）
+    t_prev = t - 1
+    
+    # 从预测的x0计算predicted_x_{t-1}的均值（不添加随机噪声）
+    # 使用DDPM官方的x₀预测采样公式，直接使用predicted_x0计算model_mean
+    betas_t = extract(diffusion_consts["betas"], t, x_t)
+    alphas_cumprod_t = extract(diffusion_consts["alphas_cumprod"], t, x_t)  # 累计量 α̅_t
+    alphas_cumprod_prev_t = extract(diffusion_consts["alphas_cumprod_prev"], t, x_t)  # 累计量 α̅_{t-1}
+    sqrt_alphas_t = extract(diffusion_consts["sqrt_alphas"], t, x_t)  # 单步量 sqrt(α_t)
+    sqrt_alphas_cumprod_prev_t = extract(diffusion_consts["sqrt_alphas_cumprod_prev"], t, x_t)  # 累计量 sqrt(α̅_{t-1})
+    
+    # 使用DDPM官方的x₀预测采样公式计算x_{t-1}的均值
+    # μ_t = (√(α̅_{t-1}) * β_t / (1 - α̅_t)) * x_t + (√(α_t) * (1 - α̅_{t-1}) / (1 - α̅_t)) * x̂_0
+    eps = 1e-8
+    one_minus_alphas_cumprod_t = (1.0 - alphas_cumprod_t).clamp(min=eps)
+    one_minus_alphas_cumprod_prev_t = (1.0 - alphas_cumprod_prev_t).clamp(min=eps)
+    
+    # 计算predicted_x_{t-1}的均值：直接使用predicted_x0，不需要先计算predicted_noise
+    model_mean = (
+        sqrt_alphas_cumprod_prev_t * betas_t / one_minus_alphas_cumprod_t * x_t
+        + sqrt_alphas_t * one_minus_alphas_cumprod_prev_t / one_minus_alphas_cumprod_t * predicted_x0
+    )
+    predicted_x_t_prev = model_mean
+    
+    # 计算真实的x_{t-1}（从x_0前向扩散到t-1步）
+    # 需要为每个样本生成对应的噪声
+    noise_t_prev = torch.randn_like(x_0)
+    true_x_t_prev = q_sample(x_0, t_prev, diffusion_consts, noise_t_prev)
+    
+    # 计算每个样本的loss（element-wise）
+    loss_per_sample = F.mse_loss(predicted_x_t_prev, true_x_t_prev, reduction='none')
+    # 对空间维度求平均：[B, N*N*N, code_dim] -> [B]
+    loss_per_sample = loss_per_sample.mean(dim=(1, 2))
+    
+    # 根据时间步t进行加权
+    if use_t_weighted_loss:
+        # 权重策略：可以使用多种方式
+        # 方式1：线性权重，t越大权重越大（因为t越大，去噪任务越难）
+        # weights = (t.float() / num_timesteps)  # [B]
+        
+        # 方式2：使用alphas_cumprod作为权重（更符合DDPM的理论）
+        alphas_cumprod_t = extract(diffusion_consts["alphas_cumprod"], t, x_t)
+        # 权重与(1 - alphas_cumprod_t)成正比，t越大权重越大
+        weights = (1.0 - alphas_cumprod_t.squeeze()).clamp(min=1e-8)  # [B]
+        
+        # 方式3：使用beta_t作为权重
+        # weights = betas_t.squeeze().clamp(min=1e-8)  # [B]
+        
+        # 归一化权重（可选，保持loss scale稳定）
+        weights = weights / weights.mean()
+        
+        # 加权平均
+        loss = (loss_per_sample * weights).mean()
+    else:
+        # 不使用加权，直接平均
+        loss = loss_per_sample.mean()
+    
+    # 数值稳定性检查
     if torch.isnan(loss) or torch.isinf(loss):
         print("[WARNING] Loss is NaN or Inf in compute_ddpm_loss_x0")
-        print(f"  predicted_x0: min={predicted_x0.min().item():.6f}, max={predicted_x0.max().item():.6f}, mean={predicted_x0.mean().item():.6f}")
-        print(f"  x_0: min={x_0.min().item():.6f}, max={x_0.max().item():.6f}, mean={x_0.mean().item():.6f}")
+        print(f"  predicted_x_t_prev: min={predicted_x_t_prev.min().item():.6f}, max={predicted_x_t_prev.max().item():.6f}, mean={predicted_x_t_prev.mean().item():.6f}")
+        print(f"  true_x_t_prev: min={true_x_t_prev.min().item():.6f}, max={true_x_t_prev.max().item():.6f}, mean={true_x_t_prev.mean().item():.6f}")
+        print(f"  t range: min={t.min().item()}, max={t.max().item()}")
         # 返回一个小的非零值以避免训练崩溃
         loss = torch.tensor(1e-6, device=device, requires_grad=True)
     

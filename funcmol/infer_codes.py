@@ -5,6 +5,8 @@ import torch
 from tqdm import tqdm
 import time
 import hydra
+import math
+import random
 # 添加当前目录到Python路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -13,8 +15,142 @@ import torch._dynamo
 torch._dynamo.config.suppress_errors = True
 
 from funcmol.utils.utils_nf import load_neural_field
-from funcmol.utils.utils_base import setup_fabric
 from funcmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
+
+
+def _random_rot_matrix(device=None) -> torch.Tensor:
+    """生成随机旋转矩阵（绕x, y, z轴）
+    
+    Returns:
+        torch.Tensor: 旋转矩阵 (3x3)
+    """
+    theta = random.uniform(0, 2) * math.pi
+    rot_x = torch.tensor(
+        [
+            [1, 0, 0],
+            [0, math.cos(theta), -math.sin(theta)],
+            [0, math.sin(theta), math.cos(theta)],
+        ],
+        device=device
+    )
+    theta = random.uniform(0, 2) * math.pi
+    rot_y = torch.tensor(
+        [
+            [math.cos(theta), 0, -math.sin(theta)],
+            [0, 1, 0],
+            [math.sin(theta), 0, math.cos(theta)],
+        ],
+        device=device
+    )
+    theta = random.uniform(0, 2) * math.pi
+    rot_z = torch.tensor(
+        [
+            [math.cos(theta), -math.sin(theta), 0],
+            [math.sin(theta), math.cos(theta), 0],
+            [0, 0, 1],
+        ],
+        device=device
+    )
+    return rot_z @ rot_y @ rot_x
+
+
+def apply_rotation_to_batch(batch, device):
+    """对batch中的分子坐标应用随机旋转
+    
+    Args:
+        batch: torch_geometric Batch对象
+        device: 设备
+        
+    Returns:
+        增强后的batch
+    """
+    # 创建新的batch副本
+    augmented_batch = batch.clone()
+    
+    # 获取坐标
+    coords = batch.pos  # [total_atoms, 3]
+    
+    # 计算每个分子的中心
+    from torch_geometric.utils import to_dense_batch
+    coords_dense, mask = to_dense_batch(coords, batch.batch, fill_value=0.0)
+    # coords_dense: [B, max_atoms, 3]
+    
+    # 对每个分子应用旋转
+    batch_size = coords_dense.shape[0]
+    
+    for b in range(batch_size):
+        # 获取当前分子的有效坐标
+        valid_mask = mask[b]  # [max_atoms]
+        mol_coords = coords_dense[b][valid_mask]  # [n_atoms, 3]
+        
+        if mol_coords.shape[0] > 0:
+            # 计算中心
+            center = mol_coords.mean(dim=0, keepdim=True)  # [1, 3]
+            
+            # 生成旋转矩阵
+            rot_matrix = _random_rot_matrix(device=device)
+            
+            # 应用旋转
+            mol_coords_centered = mol_coords - center
+            mol_coords_rotated = mol_coords_centered @ rot_matrix.T
+            mol_coords_rotated = mol_coords_rotated + center
+            
+            # 更新coords_dense
+            coords_dense[b][valid_mask] = mol_coords_rotated
+    
+    # 将dense格式转换回flat格式
+    augmented_coords = []
+    for b in range(batch_size):
+        valid_mask = mask[b]
+        augmented_coords.append(coords_dense[b][valid_mask])
+    augmented_batch.pos = torch.cat(augmented_coords, dim=0)
+    
+    return augmented_batch
+
+
+def apply_translation_to_batch(batch, anchor_spacing, device):
+    """对batch中的分子坐标应用随机平移
+    
+    Args:
+        batch: torch_geometric Batch对象
+        anchor_spacing: 锚点间距（单位：埃）
+        device: 设备
+        
+    Returns:
+        增强后的batch
+    """
+    # 创建新的batch副本
+    augmented_batch = batch.clone()
+    
+    # 获取坐标
+    coords = batch.pos  # [total_atoms, 3]
+    
+    # 计算平移距离：1/2个anchor_spacing
+    translation_distance = anchor_spacing / 2.0
+    
+    # 对每个分子应用不同的平移
+    from torch_geometric.utils import to_dense_batch
+    coords_dense, mask = to_dense_batch(coords, batch.batch, fill_value=0.0)
+    # coords_dense: [B, max_atoms, 3]
+    
+    batch_size = coords_dense.shape[0]
+    
+    for b in range(batch_size):
+        # 生成随机平移向量（在[-translation_distance, translation_distance]范围内）
+        translation = (torch.rand(3, device=device) * 2 - 1) * translation_distance  # [3]
+        
+        # 应用平移
+        valid_mask = mask[b]  # [max_atoms]
+        coords_dense[b][valid_mask] = coords_dense[b][valid_mask] + translation.unsqueeze(0)
+    
+    # 将dense格式转换回flat格式
+    augmented_coords = []
+    for b in range(batch_size):
+        valid_mask = mask[b]
+        augmented_coords.append(coords_dense[b][valid_mask])
+    augmented_batch.pos = torch.cat(augmented_coords, dim=0)
+    
+    return augmented_batch
 
 
 @hydra.main(config_path="configs", config_name="infer_codes", version_base=None)
@@ -37,9 +173,14 @@ def main(config):
     
     config["dirname"] = dirname
     
-    # initial setup
-    fabric = setup_fabric(config)
-
+    # 设置设备
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # 设置随机种子
+    torch.manual_seed(config.get("seed", 1234))
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(config.get("seed", 1234))
+    
     # 加载Lightning checkpoint
     # 使用 weights_only=False 以支持包含 omegaconf.DictConfig 的 checkpoint
     checkpoint = torch.load(nf_pretrained_path, map_location='cpu', weights_only=False)
@@ -61,7 +202,7 @@ def main(config):
         else:
             config_model[key] = config[key]
     config = config_model  # update config with checkpoint config
-    enc, _ = load_neural_field(checkpoint, fabric, config)
+    enc, _ = load_neural_field(checkpoint, config)
 
     # 创建GNFConverter实例用于数据加载
     gnf_converter = create_gnf_converter(config)
@@ -70,40 +211,152 @@ def main(config):
     loader = create_field_loaders(config, gnf_converter, split=config["split"])
 
     # Print config
-    fabric.print(f">> config: {config}")
-    fabric.print(f">> seed: {config['seed']}")
+    print(f">> config: {config}")
+    print(f">> seed: {config['seed']}")
 
     # create output directory
-    fabric.print(">> saving codes in", config["dirname"])
+    print(">> saving codes in", config["dirname"])
     os.makedirs(config["dirname"], exist_ok=True)
 
-    # check if codes already exist
-    codes_file_path = os.path.join(config["dirname"], "codes.pt")
-    if os.path.exists(codes_file_path):
-        fabric.print(f">> codes file already exists: {codes_file_path}")
-        fabric.print(">> skipping code inference")
-        return
+    # 获取数据增强配置
+    # 数据增强只应该在训练集上使用，验证集和测试集应该使用原始数据
+    split = config.get("split", "train")
+    use_data_augmentation_config = config.get("use_data_augmentation", False)
+    use_data_augmentation = use_data_augmentation_config and (split == "train")
+    num_augmentations = config.get("num_augmentations", 1)  # 每个分子生成多少个增强版本（包括原始版本）
+    apply_rotation = config.get("data_augmentation", {}).get("apply_rotation", True)
+    apply_translation = config.get("data_augmentation", {}).get("apply_translation", True)
+    anchor_spacing = config.get("dset", {}).get("anchor_spacing", 1.5)
+    
+    # 如果不是训练集，强制禁用数据增强
+    if split != "train" and use_data_augmentation_config:
+        num_augmentations = 1
 
+    # check if codes already exist (检查所有增强版本的文件)
+    all_codes_exist = True
+    for aug_idx in range(num_augmentations):
+        codes_file_path = os.path.join(config["dirname"], f"codes_{aug_idx:03d}.pt")
+        if not os.path.exists(codes_file_path):
+            all_codes_exist = False
+            break
+    
+    if all_codes_exist:
+        print(f">> all codes files already exist in {config['dirname']}")
+        print(">> skipping code inference")
+        return
+    
+    if use_data_augmentation:
+        print(">> Data augmentation enabled:")
+        print(f"   - num_augmentations: {num_augmentations}")
+        print(f"   - apply_rotation: {apply_rotation}")
+        print(f"   - apply_translation: {apply_translation}")
+        print(f"   - anchor_spacing: {anchor_spacing}")
+    
     # start eval
-    fabric.print(f">> start code inference in {config['split']} split")
+    print(f">> start code inference in {config['split']} split")
     enc.eval()
 
+    # 创建临时目录存储每个batch的codes
+    temp_dir = os.path.join(config["dirname"], "temp_batches")
+    os.makedirs(temp_dir, exist_ok=True)
+
     with torch.no_grad():
-        codes = []
         t0 = time.time()
+        batch_idx = 0
         for batch in tqdm(loader):
-            codes_batch = enc(batch)
-            codes.append(codes_batch.detach().cpu())
+            batch = batch.to(device)
+            
+            # 对每个batch，生成多个增强版本并infer codes
+            for aug_idx in range(num_augmentations):
+                if aug_idx == 0:
+                    # 第一个版本：原始版本（不增强）
+                    augmented_batch = batch
+                else:
+                    # 后续版本：应用数据增强
+                    augmented_batch = batch.clone()
+                    
+                    # 应用旋转
+                    if apply_rotation:
+                        augmented_batch = apply_rotation_to_batch(augmented_batch, device)
+                    
+                    # 应用平移
+                    if apply_translation:
+                        augmented_batch = apply_translation_to_batch(augmented_batch, anchor_spacing, device)
+                
+                # Infer codes
+                codes_batch = enc(augmented_batch)
+                codes_batch_cpu = codes_batch.detach().cpu()
+                
+                # 立即保存到临时文件
+                temp_file = os.path.join(temp_dir, f"codes_{aug_idx:03d}_batch_{batch_idx:06d}.pt")
+                torch.save(codes_batch_cpu, temp_file)
+                del codes_batch_cpu  # 立即释放内存
+            
+            batch_idx += 1
+            # 每处理完一个batch就释放GPU内存
+            del batch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         
-        fabric.print(f">> saving codes to {codes_file_path}")
-        codes = torch.cat(codes, dim=0)
-        torch.save(codes, codes_file_path)
-        del codes
+        # 合并所有batch的codes文件（使用增量合并避免内存溢出）
+        print(f">> merging batch files to final codes files...")
+        merge_batch_size = 10  # 每次合并的batch数量，避免一次性加载太多
+        
+        for aug_idx in range(num_augmentations):
+            # 获取该增强版本的所有batch文件
+            batch_files = sorted([
+                os.path.join(temp_dir, f)
+                for f in os.listdir(temp_dir)
+                if f.startswith(f"codes_{aug_idx:03d}_batch_") and f.endswith(".pt")
+            ])
+            
+            if not batch_files:
+                continue
+            
+            codes_file_path = os.path.join(config["dirname"], f"codes_{aug_idx:03d}.pt")
+            
+            # 分块合并：每次合并merge_batch_size个batch
+            merged_codes_list = []
+            for i in range(0, len(batch_files), merge_batch_size):
+                batch_chunk = batch_files[i:i + merge_batch_size]
+                
+                # 加载当前chunk的所有batch
+                chunk_codes = []
+                for batch_file in batch_chunk:
+                    codes = torch.load(batch_file, weights_only=False)
+                    chunk_codes.append(codes)
+                    os.remove(batch_file)  # 立即删除临时文件
+                
+                # 合并当前chunk
+                merged_chunk = torch.cat(chunk_codes, dim=0)
+                merged_codes_list.append(merged_chunk)
+                del chunk_codes, merged_chunk
+                
+                # 如果累积的chunks太多，先合并一部分
+                if len(merged_codes_list) >= 5:
+                    temp_merged = torch.cat(merged_codes_list, dim=0)
+                    merged_codes_list = [temp_merged]
+                    del temp_merged
+            
+            # 最终合并并保存
+            if merged_codes_list:
+                final_codes = torch.cat(merged_codes_list, dim=0)
+                torch.save(final_codes, codes_file_path)
+                print(f"   - saved codes_{aug_idx:03d}.pt: shape {final_codes.shape}")
+                del final_codes, merged_codes_list
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+        
+        # 删除临时目录
+        try:
+            os.rmdir(temp_dir)
+        except OSError:
+            pass  # 目录可能不为空，忽略错误
 
         elapsed_time = time.time() - t0
         hours, rem = divmod(elapsed_time, 3600)
         minutes, seconds = divmod(rem, 60)
-        fabric.print(f">> code inference completed in: {int(hours):0>2}h:{int(minutes):0>2}m:{seconds:05.2f}s")
+        print(f">> code inference completed in: {int(hours):0>2}h:{int(minutes):0>2}m:{seconds:05.2f}s")
 
 
 if __name__ == "__main__":

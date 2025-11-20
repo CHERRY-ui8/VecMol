@@ -1,8 +1,14 @@
 import os
 import random
+import pickle
+import threading
 
 import torch
+import lmdb
 from torch.utils.data import Dataset, Subset
+
+# 进程本地存储，用于在多进程环境下管理LMDB连接
+_thread_local = threading.local()
 
 
 class CodeDataset(Dataset):
@@ -31,48 +37,150 @@ class CodeDataset(Dataset):
         self.split = split
         self.codes_dir = os.path.join(codes_dir, self.split)
 
-        # get list of codes
-        self.list_codes = [
-            f for f in os.listdir(self.codes_dir)
-            if os.path.isfile(os.path.join(self.codes_dir, f)) and \
-            f.startswith("codes") and f.endswith(".pt")
-        ]
-        # 简化：不再使用数据增强，直接加载codes.pt
-        if "codes.pt" in self.list_codes:
-            self.list_codes = ["codes.pt"]
+        # 检查是否存在LMDB数据库
+        lmdb_path = os.path.join(self.codes_dir, "codes.lmdb")
+        keys_path = os.path.join(self.codes_dir, "codes_keys.pt")
+        
+        if os.path.exists(lmdb_path) and os.path.exists(keys_path):
+            # 使用LMDB数据库
+            self._use_lmdb_database(lmdb_path, keys_path)
         else:
-            # 兼容旧格式：如果有编号的codes文件，使用第一个
-            self.list_codes.sort()
-            if self.list_codes:
-                self.list_codes = [self.list_codes[0]]
-        self.num_augmentations = 0  # 不再使用数据增强
-        self.load_codes(0)
+            # 使用传统方式加载
+            # get list of codes
+            self.list_codes = [
+                f for f in os.listdir(self.codes_dir)
+                if os.path.isfile(os.path.join(self.codes_dir, f)) and \
+                f.startswith("codes") and f.endswith(".pt")
+            ]
+            
+            # 优先使用 codes.pt（向后兼容）
+            if "codes.pt" in self.list_codes:
+                self.list_codes = ["codes.pt"]
+                self.num_augmentations = 0
+            else:
+                # 查找所有 codes_XXX.pt 文件（新格式）
+                numbered_codes = [f for f in self.list_codes if f.startswith("codes_") and f.endswith(".pt")]
+                if numbered_codes:
+                    # 按编号排序
+                    numbered_codes.sort()
+                    self.list_codes = numbered_codes
+                    self.num_augmentations = len(numbered_codes)
+                else:
+                    # 兼容旧格式：如果有其他codes文件，使用第一个
+                    self.list_codes.sort()
+                    if self.list_codes:
+                        self.list_codes = [self.list_codes[0]]
+                    else:
+                        raise FileNotFoundError(f"No codes files found in {self.codes_dir}")
+                    self.num_augmentations = 0
+            
+            self.use_lmdb = False
+            self.load_codes()
+
+    def _use_lmdb_database(self, lmdb_path, keys_path):
+        """使用LMDB数据库加载数据"""
+        self.lmdb_path = lmdb_path
+        self.keys = torch.load(keys_path, weights_only=False)  # 直接加载keys文件
+        self.db = None
+        self.use_lmdb = True
+        
+        print(f"  | Using LMDB database: {lmdb_path}")
+        print(f"  | Database contains {len(self.keys)} codes")
+    
+    def _connect_db(self):
+        """建立只读数据库连接 - 进程安全版本"""
+        if self.db is None:
+            # 使用线程本地存储确保每个worker进程有独立的连接
+            if not hasattr(_thread_local, 'lmdb_connections'):
+                _thread_local.lmdb_connections = {}
+            
+            # 为每个LMDB路径创建独立的连接
+            if self.lmdb_path not in _thread_local.lmdb_connections:
+                _thread_local.lmdb_connections[self.lmdb_path] = lmdb.open(
+                    self.lmdb_path,
+                    map_size=10*(1024*1024*1024),   # 10GB
+                    create=False,
+                    subdir=True,
+                    readonly=True,
+                    lock=False,
+                    readahead=False,
+                    meminit=False,
+                )
+            
+            self.db = _thread_local.lmdb_connections[self.lmdb_path]
 
     def __len__(self):
+        if hasattr(self, 'use_lmdb') and self.use_lmdb:
+            return len(self.keys)
         return self.curr_codes.shape[0]
 
     def __getitem__(self, index):
-        return self.curr_codes[index]
+        if hasattr(self, 'use_lmdb') and self.use_lmdb:
+            return self._getitem_lmdb(index)
+        else:
+            return self.curr_codes[index]
+    
+    def _getitem_lmdb(self, index):
+        """LMDB模式下的数据获取 - 进程安全版本"""
+        # 确保数据库连接在worker进程中建立
+        if self.db is None:
+            self._connect_db()
+        
+        key = self.keys[index]
+        # 确保key是bytes格式，因为LMDB需要bytes
+        if isinstance(key, str):
+            key = key.encode('utf-8')
+        
+        # 使用更安全的事务处理
+        try:
+            with self.db.begin() as txn:
+                code_raw = pickle.loads(txn.get(key))
+        except Exception as e:
+            # 如果事务失败，重新连接数据库
+            print(f"LMDB transaction failed, reconnecting: {e}")
+            self._close_db()
+            self._connect_db()
+            with self.db.begin() as txn:
+                code_raw = pickle.loads(txn.get(key))
+        
+        return code_raw
+    
+    def _close_db(self):
+        """关闭数据库连接"""
+        if self.db is not None:
+            self.db = None
+            # 注意：不关闭共享连接，让其他worker继续使用
 
     def load_codes(self, index=None) -> None:
         """
-        Load codes from the available codes file.
+        Load codes from the available codes files.
 
         Args:
-            index (int, optional): The index of the code to load. If None, uses the first (and only) file.
+            index (int, optional): The index of the code to load. If None, loads all files and concatenates them.
 
         Returns:
             None
 
         Side Effects:
-            - Sets `self.curr_codes` to the loaded codes from the codes file.
-            - Prints the path of the loaded codes.
+            - Sets `self.curr_codes` to the loaded codes from the codes file(s).
+            - Prints the path(s) of the loaded codes.
         """
-        if index is None:
-            index = 0
-        code_path = os.path.join(self.codes_dir, self.list_codes[index])
-        print(">> loading codes: ", code_path)
-        self.curr_codes = torch.load(code_path, weights_only=False)
+        if len(self.list_codes) == 1:
+            # 只有一个文件，直接加载
+            code_path = os.path.join(self.codes_dir, self.list_codes[0])
+            print(">> loading codes: ", code_path)
+            self.curr_codes = torch.load(code_path, weights_only=False)
+        else:
+            # 多个文件，合并加载
+            all_codes = []
+            for code_file in self.list_codes:
+                code_path = os.path.join(self.codes_dir, code_file)
+                print(">> loading codes: ", code_path)
+                codes = torch.load(code_path, weights_only=False)
+                all_codes.append(codes)
+            # 合并所有codes
+            self.curr_codes = torch.cat(all_codes, dim=0)
+            print(f">> merged {len(self.list_codes)} codes files, total shape: {self.curr_codes.shape}")
 
 
 def create_code_loaders(

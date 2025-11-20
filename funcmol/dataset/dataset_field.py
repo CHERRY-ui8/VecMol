@@ -10,7 +10,7 @@ from typing import Optional
 from lightning import Fabric
 import numpy as np
 import torch
-from torch_geometric.data import Data, Dataset
+from torch_geometric.data import Data, Dataset, Batch
 from torch_geometric.loader import DataLoader
 from torch_geometric.utils import to_dense_batch
 
@@ -676,6 +676,9 @@ def prepare_data_with_sample_idx(config, device, sample_idx):
 
     Returns:
         Tuple[batch, coords, atoms_channel]，数据批次、坐标和原子类型
+        batch: 只包含目标样本的单个 batch（不再是整个 batch）
+        coords: 目标样本的坐标 [1, n_atoms, 3]
+        atoms_channel: 目标样本的原子类型 [1, n_atoms]
     """
     
     gnf_converter = create_gnf_converter(config)
@@ -690,10 +693,56 @@ def prepare_data_with_sample_idx(config, device, sample_idx):
     for i, batch in enumerate(loader_val):
         if i == target_batch_idx:
             batch = batch.to(device)
-            coords, _ = to_dense_batch(batch.pos, batch.batch, fill_value=0)
-            atoms_channel, _ = to_dense_batch(batch.x, batch.batch, fill_value=PADDING_INDEX)
             
-            # 只返回目标样本
-            return batch, coords[sample_in_batch:sample_in_batch+1], atoms_channel[sample_in_batch:sample_in_batch+1]
+            # 提取目标样本在 batch 中的索引范围
+            batch_idx = batch.batch  # [N_total_atoms] 每个原子属于哪个样本
+            target_sample_mask = batch_idx == sample_in_batch
+            
+            # 提取目标样本的数据
+            target_pos = batch.pos[target_sample_mask]  # [n_atoms, 3]
+            target_x = batch.x[target_sample_mask]  # [n_atoms]
+            
+            # 提取其他属性（如果存在）
+            target_data = {}
+            if hasattr(batch, 'xs'):
+                # xs 是 [N_total_points, 3]，需要根据样本索引提取
+                # 注意：xs 可能不是按样本组织的，需要检查其结构
+                # 如果 xs 是按样本组织的，需要相应处理
+                # 这里先假设 xs 是共享的或者需要特殊处理
+                if batch.xs.shape[0] == batch.pos.shape[0]:
+                    # 如果 xs 和 pos 长度相同，说明是按原子组织的
+                    target_data['xs'] = batch.xs[target_sample_mask]
+                else:
+                    # 如果长度不同，可能是按查询点组织的，需要保留全部或按样本分割
+                    # 这里先保留全部，后续可能需要根据实际使用情况调整
+                    target_data['xs'] = batch.xs
+            
+            if hasattr(batch, 'target_field'):
+                # target_field 的处理类似 xs
+                if batch.target_field.shape[0] == batch.pos.shape[0]:
+                    target_data['target_field'] = batch.target_field[target_sample_mask]
+                else:
+                    target_data['target_field'] = batch.target_field
+            
+            if hasattr(batch, 'idx'):
+                # idx 是 [batch_size]，提取目标样本的索引
+                target_data['idx'] = batch.idx[sample_in_batch:sample_in_batch+1] if batch.idx is not None else None
+            
+            # 创建只包含目标样本的 Data 对象
+            single_data = Data(
+                pos=target_pos,
+                x=target_x,
+                batch=torch.zeros(target_pos.shape[0], dtype=torch.long, device=device),  # 所有原子都属于样本0
+                **target_data
+            )
+            
+            # 创建只包含单个样本的 Batch
+            single_batch = Batch.from_data_list([single_data])
+            
+            # 提取坐标和原子类型（用于兼容性）
+            coords, _ = to_dense_batch(single_batch.pos, single_batch.batch, fill_value=0)
+            atoms_channel, _ = to_dense_batch(single_batch.x, single_batch.batch, fill_value=PADDING_INDEX)
+            
+            return single_batch, coords, atoms_channel
     
     raise IndexError(f"Sample index {sample_idx} is out of bounds for validation set") 

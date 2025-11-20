@@ -11,26 +11,24 @@ import numpy as np
 # PyTorch and related libraries
 import torch
 import torch.nn as nn
-# import torchmetrics
 torch.set_float32_matmul_precision('medium')
 # PyTorch Lightning
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.strategies import DDPStrategy
-# from pytorch_lightning.utilities.rank_zero import rank_zero_only
 
 # Configuration management
 from omegaconf import OmegaConf
 import hydra
 
-# TODO: set gpus based on server id
-os.environ['CUDA_VISIBLE_DEVICES'] = "2,3,4,5,6,7"
-# os.environ['CUDA_VISIBLE_DEVICES'] = "0,2,3,4,5"
-# os.environ['CUDA_VISIBLE_DEVICES'] = "0"
-
 from funcmol.utils.utils_nf import create_neural_field, load_checkpoint_state_nf
 from funcmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
+
+# TODO: set gpus based on server id
+os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3,4,5,6,7"
+# os.environ['CUDA_VISIBLE_DEVICES'] = "0,2,3,4,5"
+# os.environ['CUDA_VISIBLE_DEVICES'] = "0"
 
 
 def plot_loss_curve(train_losses, val_losses, save_path, title_suffix=""):
@@ -68,8 +66,54 @@ class NeuralFieldLightningModule(pl.LightningModule):
         # Create neural field models
         self.enc, self.dec = self._create_models()
         
-        # Set up loss function
-        self.criterion = nn.MSELoss()
+        # Loss weighting settings
+        loss_weight_config = config.get("loss_weighting", {})
+        self.loss_weighting_enabled = loss_weight_config.get("enabled", False)
+        
+        # Set up loss function based on weighting mode
+        if self.loss_weighting_enabled:
+            # Use reduction='none' to apply weights element-wise
+            self.criterion = nn.MSELoss(reduction='none')
+            self.atom_distance_weight = loss_weight_config.get("atom_distance_weight", 1.0)
+            self.field_magnitude_weight = loss_weight_config.get("field_magnitude_weight", 1.0)
+            self.atom_density_weight = loss_weight_config.get("atom_density_weight", 0.0)
+            self.atom_distance_scale = loss_weight_config.get("atom_distance_scale", 1.0)  # 距离衰减尺度
+            self.field_magnitude_power = loss_weight_config.get("field_magnitude_power", 0.5)  # field范数的幂次
+            self.atom_density_radius = loss_weight_config.get("atom_density_radius", 2.0)  # 原子密度计算半径
+            print(f"Loss weighting enabled: atom_distance={self.atom_distance_weight}, "
+                  f"field_magnitude={self.field_magnitude_weight}, "
+                  f"atom_density={self.atom_density_weight}")
+        else:
+            # Standard MSE loss for non-weighted mode
+            self.criterion = nn.MSELoss()
+            print("Loss weighting disabled, using standard MSE loss")
+        
+        # Fine-tuning settings: freeze encoder and only train decoder
+        finetune_config = config.get("finetune_decoder", {})
+        self.finetune_enabled = finetune_config.get("enabled", False)
+        
+        if self.finetune_enabled:
+            # Freeze encoder parameters
+            freeze_encoder = finetune_config.get("freeze_encoder", True)
+            if freeze_encoder:
+                for param in self.enc.parameters():
+                    param.requires_grad = False
+                self.enc.eval()  # Set encoder to eval mode
+                print("Encoder frozen for fine-tuning (requires_grad=False)")
+            
+            # Code augmentation settings for fine-tuning
+            finetune_code_aug = finetune_config.get("code_augmentation", {})
+            self.code_aug_enabled = finetune_code_aug.get("enabled", True)
+            self.code_aug_noise_std = finetune_code_aug.get("noise_std", 0.01)
+            print(f"Fine-tuning mode enabled: training decoder only with code augmentation (noise_std={self.code_aug_noise_std})")
+        else:
+            # Code augmentation settings (for training robustness)
+            code_aug_config = config.get("code_augmentation", {})
+            self.code_aug_enabled = code_aug_config.get("enabled", False)
+            self.code_aug_noise_std = code_aug_config.get("noise_std", 0.01)
+            
+            if self.code_aug_enabled:
+                print(f"Code augmentation enabled with noise_std={self.code_aug_noise_std}")
         
         # Track losses for plotting
         # self.train_losses = []
@@ -81,11 +125,8 @@ class NeuralFieldLightningModule(pl.LightningModule):
         """Create encoder and decoder neural field models"""
         try:
             # Create encoder and decoder using utility function
-            enc, dec = create_neural_field(self.config, self)
-            
-            # Print model sizes only for rank 0
-            # print_model_sizes(enc, dec)
-            
+            enc, dec = create_neural_field(self.config)
+                        
             return enc, dec
         
         except Exception as e:
@@ -108,7 +149,17 @@ class NeuralFieldLightningModule(pl.LightningModule):
         query_points = batch.xs
         
         # Get codes from encoder
-        codes = self.enc(batch)
+        # In fine-tuning mode, encoder is in eval mode, so use torch.no_grad() for efficiency
+        if self.finetune_enabled:
+            with torch.no_grad():
+                codes = self.enc(batch)
+        else:
+            codes = self.enc(batch)
+        
+        # Apply code augmentation (Gaussian noise) during training only
+        if self.training and self.code_aug_enabled:
+            noise = torch.randn_like(codes) * self.code_aug_noise_std
+            codes = codes + noise
         
         # Check and reshape query points if needed
         if query_points.dim() == 2:
@@ -121,6 +172,97 @@ class NeuralFieldLightningModule(pl.LightningModule):
         
         return pred_field
     
+    def _compute_loss_weights(self, batch, query_points, target_field):
+        """
+        Compute loss weights for each query point based on:
+        1. Distance to nearest atom (closer = higher weight)
+        2. Field magnitude (larger = higher weight)
+        3. Atom density around query point (denser = higher weight)
+        
+        Args:
+            batch: PyTorch Geometric batch object
+            query_points: [B, n_points, 3] query point coordinates
+            target_field: [B, n_points, n_atom_types, 3] target field values
+            
+        Returns:
+            weights: [B, n_points] weight tensor for each query point
+        """
+        B, n_points, _ = query_points.shape
+        device = query_points.device
+        weights = torch.ones(B, n_points, device=device)
+        
+        # Get atom positions from batch
+        atom_positions = batch.pos  # [N_total_atoms, 3]
+        batch_idx = batch.batch  # [N_total_atoms] - which sample each atom belongs to
+        
+        # Compute field magnitude for each query point
+        # target_field: [B, n_points, n_atom_types, 3]
+        field_magnitude = torch.norm(target_field, dim=-1)  # [B, n_points, n_atom_types]
+        field_magnitude = torch.max(field_magnitude, dim=-1)[0]  # [B, n_points] - max over atom types
+        
+        # Normalize field magnitude to [0, 1] range for each sample
+        field_magnitude_normalized = torch.zeros_like(field_magnitude)
+        for b in range(B):
+            field_max = field_magnitude[b].max()
+            if field_max > 0:
+                field_magnitude_normalized[b] = field_magnitude[b] / field_max
+        
+        # Compute weights for each sample in batch
+        for b in range(B):
+            # Get query points for this sample
+            sample_query_points = query_points[b]  # [n_points, 3]
+            
+            # Get atom positions for this sample
+            sample_atom_mask = batch_idx == b
+            sample_atoms = atom_positions[sample_atom_mask]  # [n_atoms, 3]
+            
+            if len(sample_atoms) == 0:
+                continue
+            
+            # 1. Compute distance to nearest atom for each query point
+            # sample_query_points: [n_points, 3], sample_atoms: [n_atoms, 3]
+            # Compute pairwise distances: [n_points, n_atoms]
+            distances = torch.cdist(sample_query_points, sample_atoms)  # [n_points, n_atoms]
+            min_distances = distances.min(dim=-1)[0]  # [n_points] - distance to nearest atom
+            
+            # Convert distance to weight: closer atoms = higher weight
+            # Use exponential decay: weight = exp(-distance / scale)
+            atom_distance_weights = torch.exp(-min_distances / self.atom_distance_scale)
+            
+            # 2. Field magnitude weights (already computed above)
+            field_weights = torch.pow(field_magnitude_normalized[b] + 1e-8, self.field_magnitude_power)
+            
+            # 3. Compute atom density around each query point
+            atom_density_weights = torch.ones(n_points, device=device)
+            if self.atom_density_weight > 0:
+                # Count atoms within radius for each query point
+                density_radius = self.atom_density_radius
+                # distances already computed above: [n_points, n_atoms]
+                within_radius = (distances < density_radius).float()  # [n_points, n_atoms]
+                atom_counts = within_radius.sum(dim=-1)  # [n_points] - number of atoms within radius
+                # Normalize by max count (avoid division by zero)
+                max_count = atom_counts.max()
+                if max_count > 0:
+                    atom_density_weights = atom_counts / max_count
+                else:
+                    atom_density_weights = torch.zeros_like(atom_counts)
+            
+            # Combine weights
+            combined_weights = (
+                self.atom_distance_weight * atom_distance_weights +
+                self.field_magnitude_weight * field_weights +
+                self.atom_density_weight * atom_density_weights
+            )
+            
+            # Normalize weights to have mean=1 (preserve overall loss scale)
+            weight_mean = combined_weights.mean()
+            if weight_mean > 0:
+                combined_weights = combined_weights / weight_mean
+            
+            weights[b] = combined_weights
+        
+        return weights
+    
     def _process_batch(self, batch):
         """
         Process a batch and return the predicted and target fields
@@ -129,16 +271,42 @@ class NeuralFieldLightningModule(pl.LightningModule):
             batch: PyTorch Geometric batch object
             
         Returns:
-            tuple: (pred_field, target_field) with matching dimensions
+            tuple: (pred_field, target_field) with matching dimensions [B, n_points, n_atom_types, 3]
         """
         # Get predictions from forward pass
-        pred_field = self(batch)
+        pred_field = self(batch)  # [B, n_points, n_atom_types, 3]
         
         # Get target field from batch
         target_field = batch.target_field
         
-        # Ensure correct shapes for both fields
-        pred_field = pred_field.view_as(target_field)
+        # Get batch size and number of points
+        B = len(batch)
+        n_points = self.config["dset"]["n_points"]
+        n_atom_types = self.config["dset"]["n_channels"]
+        
+        # Reshape target_field to [B, n_points, n_atom_types, 3]
+        if target_field.dim() == 2:
+            # [B*n_points*n_atom_types*3] -> [B, n_points, n_atom_types, 3]
+            target_field = target_field.view(B, n_points, n_atom_types, 3)
+        elif target_field.dim() == 3:
+            if target_field.shape[0] == B * n_points:
+                # [B*n_points, n_atom_types, 3] -> [B, n_points, n_atom_types, 3]
+                target_field = target_field.view(B, n_points, n_atom_types, 3)
+            elif target_field.shape[0] == n_points:
+                # [n_points, n_atom_types, 3] -> [B, n_points, n_atom_types, 3]
+                target_field = target_field.unsqueeze(0).expand(B, -1, -1, -1)
+            else:
+                # Assume it's already [B, n_points, n_atom_types, 3] or try to reshape
+                target_field = target_field.view(B, n_points, n_atom_types, 3)
+        elif target_field.dim() == 4:
+            # Already in correct shape [B, n_points, n_atom_types, 3]
+            pass
+        else:
+            raise ValueError(f"Unexpected target_field dimension: {target_field.dim()}, shape: {target_field.shape}")
+        
+        # Ensure pred_field has the same shape
+        if pred_field.shape != target_field.shape:
+            pred_field = pred_field.view(B, n_points, n_atom_types, 3)
         
         return pred_field, target_field
     
@@ -147,8 +315,34 @@ class NeuralFieldLightningModule(pl.LightningModule):
         # Get predictions and targets
         pred_field, target_field = self._process_batch(batch)
         
-        # Calculate MSE loss
-        loss = self.criterion(pred_field, target_field)
+        # Calculate loss with optional weighting
+        if self.loss_weighting_enabled:
+            # Get query points
+            query_points = batch.xs
+            B = len(batch)
+            n_points = self.config["dset"]["n_points"]
+            if query_points.dim() == 2:
+                query_points = query_points.view(B, n_points, 3)
+            
+            # Compute weights for each query point
+            weights = self._compute_loss_weights(batch, query_points, target_field)  # [B, n_points]
+            
+            # Compute element-wise MSE loss
+            # pred_field: [B, n_points, n_atom_types, 3]
+            # target_field: [B, n_points, n_atom_types, 3]
+            elementwise_loss = self.criterion(pred_field, target_field)  # [B, n_points, n_atom_types, 3]
+            
+            # Average over atom_types and spatial dimensions, keep batch and point dimensions
+            pointwise_loss = elementwise_loss.mean(dim=(-2, -1))  # [B, n_points]
+            
+            # Apply weights
+            weighted_loss = pointwise_loss * weights  # [B, n_points]
+            
+            # Average over batch and points
+            loss = weighted_loss.mean()
+        else:
+            # Standard MSE loss
+            loss = self.criterion(pred_field, target_field)
         
         # Update metrics
         # self.train_metrics["loss"](loss.detach())
@@ -173,8 +367,32 @@ class NeuralFieldLightningModule(pl.LightningModule):
         # Get predictions and targets
         pred_field, target_field = self._process_batch(batch)
         
-        # Calculate loss
-        loss = self.criterion(pred_field, target_field)
+        # Calculate loss with optional weighting
+        if self.loss_weighting_enabled:
+            # Get query points
+            query_points = batch.xs
+            B = len(batch)
+            n_points = self.config["dset"]["n_points"]
+            if query_points.dim() == 2:
+                query_points = query_points.view(B, n_points, 3)
+            
+            # Compute weights for each query point
+            weights = self._compute_loss_weights(batch, query_points, target_field)  # [B, n_points]
+            
+            # Compute element-wise MSE loss
+            elementwise_loss = self.criterion(pred_field, target_field)  # [B, n_points, n_atom_types, 3]
+            
+            # Average over atom_types and spatial dimensions, keep batch and point dimensions
+            pointwise_loss = elementwise_loss.mean(dim=(-2, -1))  # [B, n_points]
+            
+            # Apply weights
+            weighted_loss = pointwise_loss * weights  # [B, n_points]
+            
+            # Average over batch and points
+            loss = weighted_loss.mean()
+        else:
+            # Standard MSE loss
+            loss = self.criterion(pred_field, target_field)
         
         # Log metrics
         self.log('val_loss', loss, batch_size=len(batch),
@@ -185,7 +403,11 @@ class NeuralFieldLightningModule(pl.LightningModule):
     def on_train_epoch_start(self):
         """Called at the beginning of training epoch"""
         # Set models to training mode
-        self.enc.train()
+        # In fine-tuning mode, keep encoder in eval mode
+        if self.finetune_enabled:
+            self.enc.eval()  # Keep encoder in eval mode when frozen
+        else:
+            self.enc.train()
         self.dec.train()
         
         # Clean up GPU memory
@@ -203,11 +425,19 @@ class NeuralFieldLightningModule(pl.LightningModule):
     
     def configure_optimizers(self):
         """Configure optimizers and learning rate schedulers"""
-        # Create a single optimizer with different parameter groups for encoder and decoder
-        optimizer = torch.optim.Adam([
-            {"params": self.enc.parameters(), "lr": self.config["dset"]["lr_enc"]},
-            {"params": self.dec.parameters(), "lr": self.config["dset"]["lr_dec"]}
-        ])
+        # In fine-tuning mode, only optimize decoder parameters
+        if self.finetune_enabled:
+            # Only optimize decoder parameters
+            optimizer = torch.optim.Adam(
+                [{"params": self.dec.parameters(), "lr": self.config["dset"]["lr_dec"]}]
+            )
+            print("Optimizer configured for fine-tuning: only decoder parameters will be updated")
+        else:
+            # Create a single optimizer with different parameter groups for encoder and decoder
+            optimizer = torch.optim.Adam([
+                {"params": self.enc.parameters(), "lr": self.config["dset"]["lr_enc"]},
+                {"params": self.dec.parameters(), "lr": self.config["dset"]["lr_dec"]}
+            ])
         
         # Create learning rate scheduler if needed
         if "lr_decay" in self.config and self.config["lr_decay"]:
@@ -286,7 +516,16 @@ def main(config):
     # Load checkpoint if specified
     if config["reload_model_path"] is not None:
         try:
-            checkpoint_path = os.path.join(config["reload_model_path"], "model.pt")
+            checkpoint_path = config["reload_model_path"]
+            
+            # Verify checkpoint file exists
+            if not os.path.exists(checkpoint_path):
+                raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
+            
+            if not checkpoint_path.endswith('.ckpt'):
+                raise ValueError(f"Checkpoint path must be a .ckpt file, got: {checkpoint_path}")
+            
+            print(f"Loading Lightning checkpoint file: {checkpoint_path}")
             training_state = load_checkpoint_state_nf(model, checkpoint_path)
             
             # Apply training state
@@ -296,10 +535,21 @@ def main(config):
             model.train_losses = training_state["train_losses"]
             model.val_losses = training_state["val_losses"]
             model.best_loss = training_state["best_loss"]
+            
+            # Ensure encoder remains frozen if fine-tuning is enabled
+            finetune_config = config.get("finetune_decoder", {})
+            if finetune_config.get("enabled", False):
+                freeze_encoder = finetune_config.get("freeze_encoder", True)
+                if freeze_encoder:
+                    for param in model.enc.parameters():
+                        param.requires_grad = False
+                    model.enc.eval()
+                    print("Encoder re-frozen after checkpoint loading (fine-tuning mode)")
                 
             print(f"Successfully loaded checkpoint from: {config['reload_model_path']}")
         except Exception as e:
             print(f"Error loading checkpoint: {e}")
+            raise
     
     # Create directories for output
     os.makedirs(config["dirname"], exist_ok=True)

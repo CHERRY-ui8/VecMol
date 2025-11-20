@@ -9,7 +9,7 @@ defaults:
 
 # fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251029/lightning_logs/version_0/checkpoints/model-epoch=199.ckpt
 # fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251103/lightning_logs/version_0/checkpoints/model-epoch=99.ckpt
-fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251111/lightning_logs/version_1/checkpoints/model-epoch=134.ckpt
+fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251108/lightning_logs/version_1/checkpoints/model-epoch=364.ckpt
 dirname: ../exps/funcmol/fm_qm9/20251108
 
 # 生成参数

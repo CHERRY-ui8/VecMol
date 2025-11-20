@@ -1,6 +1,6 @@
 sigma: 1
 # 也许不能太多，要控制，不是所有元素都需要收敛，收敛太慢也是收敛能力差的一种表现
-n_iter: 2000  # 每次迭代都会调用decoder，很费时间，1000-2000
+n_iter: 600  # 每次迭代都会调用decoder，很费时间，1000-2000
 # 早停机制配置（可选）
 enable_early_stopping: False  # 是否启用早停机制，默认False（关闭早停，运行完整迭代）
 convergence_threshold: 1e-6  # 收敛阈值（梯度模长变化），仅在启用早停时有效
@@ -31,13 +31,13 @@ method_configs:
     min_samples: 5
 
   tanh:
-    n_query_points: 1000 
-    step_size: 0.1  #  0.02
+    n_query_points: 2000 # 1000
+    step_size: 0.04  #  0.02
     sig_sf: 0.1
     sig_mag: 2
     # DBSCAN聚类参数
-    eps: 0.15
-    min_samples: 30  # 保持原有最小样本数  
+    eps: 0.04
+    min_samples: 20
   
 
 default_config: # softmax, logsumexp, inverse_square

@@ -25,7 +25,6 @@ def load_checkpoint_fm(
     model: torch.nn.Module,
     pretrained_path: str,
     optimizer: torch.optim.Optimizer = None,
-    fabric = None,
 ):
     """
     Loads a checkpoint file and restores the model and optimizer states.
@@ -52,7 +51,7 @@ def load_checkpoint_fm(
         }
     else:
         # Load from directory with checkpoint.pth.tar
-        checkpoint = fabric.load(os.path.join(pretrained_path, "checkpoint.pth.tar"))
+        checkpoint = torch.load(os.path.join(pretrained_path, "checkpoint.pth.tar"))
     
     # Move model to CPU temporarily for loading, then back to original device
     original_device = next(model.parameters()).device
@@ -119,7 +118,6 @@ def compute_code_stats_offline(
     Args:
         loader (torch.utils.data.DataLoader): DataLoader containing the dataset.
         split (str): The data split (e.g., 'train', 'val', 'test').
-        fabric (object): An object representing the fabric used for processing.
         normalize_codes (bool): Whether to normalize the codes.
 
     Returns:
@@ -179,7 +177,6 @@ def get_stats(
 
     Args:
         codes_init (torch.Tensor): The input codes.
-        fabric (object, optional): The logger object for logging messages. Defaults to None.
         message (str, optional): Additional message to log. Defaults to None.
 
     Returns:

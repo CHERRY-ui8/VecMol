@@ -3,11 +3,25 @@ import numpy as np
 import matplotlib.pyplot as plt
 import sys
 import os
+from pathlib import Path
+from omegaconf import OmegaConf
 
 # 添加项目根目录到Python路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from funcmol.utils.gnf_converter import GNFConverter
+
+# 加载配置文件
+def load_config():
+    """从配置文件加载参数"""
+    config_path = Path(__file__).parent.parent / "configs" / "converter" / "gnf_converter_qm9.yaml"
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    config = OmegaConf.load(config_path)
+    return config
+
+# 全局配置
+CONFIG = load_config()
 
 def analyze_real_space_sig_sf():
     """
@@ -75,7 +89,7 @@ def test_real_space_field_behavior():
     print("\n=== 测试真实空间中的field行为 ===")
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    best_sig_sf, real_atom_distance = analyze_real_space_sig_sf()
+    _, real_atom_distance = analyze_real_space_sig_sf()
     
     # 创建测试场景：两个相邻原子（真实坐标）
     coords = torch.tensor([[[-real_atom_distance/2, 0.0, 0.0], [real_atom_distance/2, 0.0, 0.0]]], device=device)
@@ -88,35 +102,56 @@ def test_real_space_field_behavior():
     
     sigma_ratios = {'C': 1.0, 'H': 1.0, 'O': 1.0, 'N': 1.0, 'F': 1.0}
     
-    # 测试三种方法
-    methods = ['sigmoid', 'gaussian_mag', 'distance']
-    sig_mag_values = [0.5, 0.8, 1.0]  # 针对真实空间调整
+    # 测试三种方法（包括tanh）
+    methods = ['tanh', 'gaussian_mag', 'distance']
     
     plt.subplot(2, 3, 2)
     
-    for i, method in enumerate(methods):
-        for j, sig_mag in enumerate(sig_mag_values):
-            converter = GNFConverter(
-                sigma=0.5,
-                n_query_points=100,
-                n_iter=10,
-                step_size=0.01,
-                eps=0.1,
-                min_samples=2,
-                sigma_ratios=sigma_ratios,
-                gradient_field_method=method,
-                sig_sf=best_sig_sf,
-                sig_mag=sig_mag,
-                device=device
-            )
-            
-            vector_field = converter.mol2gnf(coords, atom_types, query_points)
-            field_values = vector_field[0, :, 0, 0].cpu().numpy()
-            positions = query_points[0, :, 0].cpu().numpy()
-            
-            # 只绘制第一个sig_mag值的结果
-            if j == 0:
-                plt.plot(positions, field_values, label=f'{method}', linewidth=2)
+    for method in methods:
+        # 从配置文件读取参数
+        if hasattr(CONFIG.method_configs, method):
+            method_config = getattr(CONFIG.method_configs, method)
+            sig_sf = method_config.sig_sf
+            sig_mag = method_config.sig_mag
+            step_size = method_config.step_size
+            n_query_points = method_config.n_query_points
+            eps = getattr(method_config, 'eps', CONFIG.default_config.eps)
+            min_samples = getattr(method_config, 'min_samples', CONFIG.default_config.min_samples)
+        else:
+            # distance方法使用默认配置
+            method_config = CONFIG.default_config
+            sig_sf = method_config.sig_sf
+            sig_mag = method_config.sig_mag
+            step_size = method_config.step_size
+            n_query_points = method_config.n_query_points
+            eps = method_config.eps
+            min_samples = method_config.min_samples
+        
+        converter = GNFConverter(
+            sigma=CONFIG.sigma,
+            n_query_points=n_query_points,
+            n_iter=CONFIG.n_iter,
+            step_size=step_size,
+            eps=eps,
+            min_samples=min_samples,
+            sigma_ratios=sigma_ratios,
+            gradient_field_method=method,
+            sig_sf=sig_sf,
+            sig_mag=sig_mag,
+            temperature=CONFIG.temperature,
+            logsumexp_eps=CONFIG.logsumexp_eps,
+            inverse_square_strength=CONFIG.inverse_square_strength,
+            gradient_clip_threshold=CONFIG.gradient_clip_threshold,
+            gradient_sampling_candidate_multiplier=CONFIG.gradient_sampling_candidate_multiplier,
+            gradient_sampling_temperature=CONFIG.gradient_sampling_temperature,
+            n_atom_types=5
+        )
+        
+        vector_field = converter.mol2gnf(coords, atom_types, query_points)
+        field_values = vector_field[0, :, 0, 0].cpu().numpy()
+        positions = query_points[0, :, 0].cpu().numpy()
+        
+        plt.plot(positions, field_values, label=f'{method}', linewidth=2)
     
     plt.axvline(x=-real_atom_distance/2, color='r', linestyle='--', alpha=0.7, label='Atom 1')
     plt.axvline(x=real_atom_distance/2, color='g', linestyle='--', alpha=0.7, label='Atom 2')
@@ -135,12 +170,11 @@ def analyze_sig_mag_for_real_space():
     
     # 测试不同的sig_mag值（针对真实空间）
     sig_mag_values = np.linspace(0.3, 2.0, 50)
-    distances = np.linspace(0, 2.0, 100)  # 真实距离范围
     
     plt.subplot(2, 3, 3)
     
-    # 测试三种magnitude方法
-    methods = ['sigmoid', 'gaussian_mag', 'distance']
+    # 测试三种magnitude方法（包括tanh）
+    methods = ['tanh', 'gaussian_mag', 'distance']
     colors = ['b', 'g', 'r']
     
     for i, method in enumerate(methods):
@@ -148,12 +182,14 @@ def analyze_sig_mag_for_real_space():
         for sig_mag in sig_mag_values:
             # 计算在距离0.75处的magnitude值（真实空间中的典型距离）
             dist = 0.75
-            if method == 'sigmoid':
+            if method == 'tanh':
                 mag = np.tanh(dist / sig_mag)
             elif method == 'gaussian_mag':
                 mag = np.exp(-dist**2 / (2 * sig_mag**2)) * dist
             elif method == 'distance':
                 mag = np.clip(dist, 0, 1)
+            else:
+                mag = 0.0  # 默认值
             
             magnitude_values.append(mag)
         
@@ -165,15 +201,14 @@ def analyze_sig_mag_for_real_space():
     plt.legend()
     plt.grid(True, alpha=0.3)
     
-    # 推荐sig_mag值（使得在距离0.75处magnitude约为0.5）
-    target_magnitude = 0.5
-    best_sig_mag_sigmoid = 0.75 / np.arctanh(target_magnitude)  # 对于sigmoid
-    best_sig_mag_gaussian = np.sqrt(-0.5 * np.log(target_magnitude / 0.75))  # 对于gaussian
+    # 从配置文件读取实际使用的sig_mag值
+    tanh_sig_mag = CONFIG.method_configs.tanh.sig_mag
+    gaussian_sig_mag = CONFIG.method_configs.gaussian_mag.sig_mag
     
-    print(f"推荐的sig_mag值（真实空间）:")
-    print(f"  sigmoid方法: {best_sig_mag_sigmoid:.3f}")
-    print(f"  gaussian_mag方法: {best_sig_mag_gaussian:.3f}")
-    print(f"  distance方法: 无需调整（固定为距离值）")
+    print("配置文件中的sig_mag值:")
+    print(f"  tanh方法: {tanh_sig_mag}")
+    print(f"  gaussian_mag方法: {gaussian_sig_mag}")
+    print("  distance方法: 无需调整（固定为距离值）")
 
 def compare_real_vs_normalized():
     """
@@ -190,11 +225,11 @@ def compare_real_vs_normalized():
     real_atom_distance = normalized_atom_distance * scale_factor
     real_best_sig_sf, _ = analyze_real_space_sig_sf()
     
-    print(f"归一化空间:")
+    print("归一化空间:")
     print(f"  原子间距: {normalized_atom_distance} 埃")
     print(f"  推荐sig_sf: {normalized_best_sig_sf}")
     
-    print(f"真实空间:")
+    print("真实空间:")
     print(f"  原子间距: {real_atom_distance:.4f}")
     print(f"  推荐sig_sf: {real_best_sig_sf:.4f}")
     
@@ -207,33 +242,20 @@ def generate_real_space_recommendations():
     """
     print("\n=== 真实空间参数推荐 ===")
     
-    best_sig_sf, real_atom_distance = analyze_real_space_sig_sf()
+    print("\n🎯 配置文件中的参数:")
+    print(f"1. sig_sf值:")
+    print(f"   - tanh方法: {CONFIG.method_configs.tanh.sig_sf}")
+    print(f"   - gaussian_mag方法: {CONFIG.method_configs.gaussian_mag.sig_sf}")
     
-    print(f"\n🎯 真实空间推荐配置:")
-    print(f"1. sig_sf = {best_sig_sf:.4f}")
-    print(f"   - 针对真实坐标优化")
-    print(f"   - 确保field在相邻原子之间衰减到接近0")
+    print(f"\n2. sig_mag值:")
+    print(f"   - tanh方法: {CONFIG.method_configs.tanh.sig_mag}")
+    print(f"   - gaussian_mag方法: {CONFIG.method_configs.gaussian_mag.sig_mag}")
     
-    print(f"\n2. sig_mag 推荐值（真实空间）:")
-    print(f"   - sigmoid方法: 0.5-0.8")
-    print(f"   - gaussian_mag方法: 0.3-0.6")
-    print(f"   - distance方法: 无需调整")
-    
-    print(f"\n3. 完整配置示例:")
-    print(f"   # 真实空间推荐配置")
-    print(f"   converter = GNFConverter(")
-    print(f"       gradient_field_method='gaussian_mag',")
-    print(f"       sig_sf={best_sig_sf:.4f},")
-    print(f"       sig_mag=0.5,")
-    print(f"       temperature=1.0,")
-    print(f"       device='cuda'")
-    print(f"   )")
-    
-    print(f"\n4. 使用建议:")
-    print(f"   - 如果神经网络学习困难，尝试增大sig_sf到{best_sig_sf*1.5:.4f}")
-    print(f"   - 如果field过于平滑，尝试减小sig_sf到{best_sig_sf*0.7:.4f}")
-    print(f"   - 如果相邻原子干扰严重，使用gaussian_mag方法")
-    print(f"   - 如果需要线性特性，使用distance方法")
+    print(f"\n3. 其他参数:")
+    print(f"   - step_size (tanh): {CONFIG.method_configs.tanh.step_size}")
+    print(f"   - step_size (gaussian_mag): {CONFIG.method_configs.gaussian_mag.step_size}")
+    print(f"   - n_query_points (tanh): {CONFIG.method_configs.tanh.n_query_points}")
+    print(f"   - n_query_points (gaussian_mag): {CONFIG.method_configs.gaussian_mag.n_query_points}")
 
 def create_real_space_usage_example():
     """
@@ -242,7 +264,7 @@ def create_real_space_usage_example():
     print("\n=== 真实空间使用示例 ===")
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    best_sig_sf, real_atom_distance = analyze_real_space_sig_sf()
+    _, real_atom_distance = analyze_real_space_sig_sf()
     
     # 创建示例分子（真实坐标）
     coords = torch.tensor([
@@ -261,19 +283,26 @@ def create_real_space_usage_example():
     
     sigma_ratios = {'C': 1.0, 'H': 1.0, 'O': 1.0, 'N': 1.0, 'F': 1.0}
     
-    # 测试推荐配置
+    # 使用配置文件中的gaussian_mag参数
+    method_config = CONFIG.method_configs.gaussian_mag
     converter = GNFConverter(
-        sigma=0.5,
-        n_query_points=100,
-        n_iter=10,
-        step_size=0.01,
-        eps=0.1,
-        min_samples=2,
+        sigma=CONFIG.sigma,
+        n_query_points=method_config.n_query_points,
+        n_iter=CONFIG.n_iter,
+        step_size=method_config.step_size,
+        eps=method_config.eps,
+        min_samples=method_config.min_samples,
         sigma_ratios=sigma_ratios,
         gradient_field_method='gaussian_mag',
-        sig_sf=best_sig_sf,
-        sig_mag=0.5,
-        device=device
+        sig_sf=method_config.sig_sf,
+        sig_mag=method_config.sig_mag,
+        temperature=CONFIG.temperature,
+        logsumexp_eps=CONFIG.logsumexp_eps,
+        inverse_square_strength=CONFIG.inverse_square_strength,
+        gradient_clip_threshold=CONFIG.gradient_clip_threshold,
+        gradient_sampling_candidate_multiplier=CONFIG.gradient_sampling_candidate_multiplier,
+        gradient_sampling_temperature=CONFIG.gradient_sampling_temperature,
+        n_atom_types=5
     )
     
     vector_field = converter.mol2gnf(coords, atom_types, query_points)
@@ -303,59 +332,60 @@ def create_real_space_usage_example():
         print(f"中间位置field均值: {mid_field.mean().item():.4f}")
         print(f"中间位置field标准差: {mid_field.std().item():.4f}")
 
-def analyze_sigmoid_method_specifically():
+def analyze_tanh_method_specifically():
     """
-    专门分析sigmoid方法的最优参数
+    专门分析tanh方法的最优参数
     """
-    print("\n=== 专门分析sigmoid方法参数 ===")
+    print("\n=== 专门分析tanh方法参数 ===")
     
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    best_sig_sf, real_atom_distance = analyze_real_space_sig_sf()
-    
-    # 测试不同的sig_mag值对sigmoid方法的影响
-    sig_mag_values = np.linspace(0.3, 2.0, 50)
+    # 测试不同的sig_mag值对tanh方法的影响
     distances = np.linspace(0, 2.0, 100)
     
     plt.subplot(2, 3, 4)
     
-    # 分析sigmoid方法在不同sig_mag下的行为
-    for sig_mag in [0.5, 0.8, 1.0, 1.5]:
-        sigmoid_values = np.tanh(distances / sig_mag)
-        plt.plot(distances, sigmoid_values, label=f'sig_mag={sig_mag}', linewidth=2)
+    # 使用配置文件中的tanh参数
+    tanh_config = CONFIG.method_configs.tanh
+    config_sig_mag = tanh_config.sig_mag
+    
+    # 分析tanh方法在不同sig_mag下的行为（包括配置文件中的值）
+    test_sig_mags = [0.5, 1.0, 1.5, config_sig_mag]
+    # 确保配置文件中的值在列表中且唯一
+    if config_sig_mag not in test_sig_mags:
+        test_sig_mags.append(config_sig_mag)
+    test_sig_mags = sorted(set(test_sig_mags))
+    
+    for sig_mag in test_sig_mags:
+        tanh_values = np.tanh(distances / sig_mag)
+        label = f'sig_mag={sig_mag}'
+        if sig_mag == config_sig_mag:
+            label += ' (config)'
+        plt.plot(distances, tanh_values, label=label, linewidth=2 if sig_mag == config_sig_mag else 1.5)
     
     plt.xlabel('Distance (Angstroms)')
-    plt.ylabel('Sigmoid magnitude')
-    plt.title('Sigmoid Method: Distance vs Magnitude')
+    plt.ylabel('Tanh magnitude')
+    plt.title('Tanh Method: Distance vs Magnitude')
     plt.legend()
     plt.grid(True, alpha=0.3)
     
-    # 分析在典型原子间距处的magnitude值
+    # 显示配置文件中的参数
     target_distance = 0.75  # 原子间距的一半
-    magnitude_at_target = []
+    config_magnitude = np.tanh(target_distance / config_sig_mag)
     
-    for sig_mag in sig_mag_values:
-        mag = np.tanh(target_distance / sig_mag)
-        magnitude_at_target.append(mag)
+    print("\n🎯 Tanh方法配置参数（来自配置文件）:")
+    print(f"  sig_sf = {tanh_config.sig_sf}")
+    print(f"  sig_mag = {config_sig_mag}")
+    print(f"  在距离{target_distance}埃处的magnitude: {config_magnitude:.4f}")
     
-    # 找到使得在目标距离处magnitude约为0.5的sig_mag值
-    target_magnitude = 0.5
-    best_sig_mag_sigmoid = target_distance / np.arctanh(target_magnitude)
-    
-    print(f"\n🎯 Sigmoid方法推荐参数:")
-    print(f"  sig_sf = {best_sig_sf:.4f}")
-    print(f"  sig_mag = {best_sig_mag_sigmoid:.4f}")
-    print(f"  在距离{target_distance}埃处的magnitude: {np.tanh(target_distance/best_sig_mag_sigmoid):.4f}")
-    
-    return best_sig_sf, best_sig_mag_sigmoid
+    return tanh_config.sig_sf, config_sig_mag
 
 def compare_all_three_methods():
     """
-    比较三种方法的特性
+    比较三种方法的特性（包括tanh）
     """
     print("\n=== 三种方法特性比较 ===")
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    best_sig_sf, real_atom_distance = analyze_real_space_sig_sf()
+    _, real_atom_distance = analyze_real_space_sig_sf()
     
     # 创建测试场景
     coords = torch.tensor([[[-real_atom_distance/2, 0.0, 0.0], [real_atom_distance/2, 0.0, 0.0]]], device=device)
@@ -368,33 +398,50 @@ def compare_all_three_methods():
     
     sigma_ratios = {'C': 1.0, 'H': 1.0, 'O': 1.0, 'N': 1.0, 'F': 1.0}
     
-    # 测试三种方法
-    methods = ['sigmoid', 'gaussian_mag', 'distance']
+    # 测试三种方法（包括tanh）
+    methods = ['tanh', 'gaussian_mag', 'distance']
     colors = ['blue', 'red', 'green']
     
     plt.subplot(2, 3, 5)
     
     for i, method in enumerate(methods):
-        # 为每种方法选择最优的sig_mag
-        if method == 'sigmoid':
-            sig_mag = 0.75  # 基于sigmoid分析的结果
-        elif method == 'gaussian_mag':
-            sig_mag = 0.45  # 基于gaussian分析的结果
-        else:  # distance
-            sig_mag = 0.5   # 对distance方法不重要
+        # 从配置文件读取参数
+        if hasattr(CONFIG.method_configs, method):
+            method_config = getattr(CONFIG.method_configs, method)
+            sig_sf = method_config.sig_sf
+            sig_mag = method_config.sig_mag
+            step_size = method_config.step_size
+            n_query_points = method_config.n_query_points
+            eps = getattr(method_config, 'eps', CONFIG.default_config.eps)
+            min_samples = getattr(method_config, 'min_samples', CONFIG.default_config.min_samples)
+        else:
+            # distance方法使用默认配置
+            method_config = CONFIG.default_config
+            sig_sf = method_config.sig_sf
+            sig_mag = method_config.sig_mag
+            step_size = method_config.step_size
+            n_query_points = method_config.n_query_points
+            eps = method_config.eps
+            min_samples = method_config.min_samples
         
         converter = GNFConverter(
-            sigma=0.5,
-            n_query_points=100,
-            n_iter=10,
-            step_size=0.01,
-            eps=0.1,
-            min_samples=2,
+            sigma=CONFIG.sigma,
+            n_query_points=n_query_points,
+            n_iter=CONFIG.n_iter,
+            step_size=step_size,
+            eps=eps,
+            min_samples=min_samples,
             sigma_ratios=sigma_ratios,
             gradient_field_method=method,
-            sig_sf=best_sig_sf,
+            sig_sf=sig_sf,
             sig_mag=sig_mag,
-            device=device
+            temperature=CONFIG.temperature,
+            logsumexp_eps=CONFIG.logsumexp_eps,
+            inverse_square_strength=CONFIG.inverse_square_strength,
+            gradient_clip_threshold=CONFIG.gradient_clip_threshold,
+            gradient_sampling_candidate_multiplier=CONFIG.gradient_sampling_candidate_multiplier,
+            gradient_sampling_temperature=CONFIG.gradient_sampling_temperature,
+            n_atom_types=5
         )
         
         vector_field = converter.mol2gnf(coords, atom_types, query_points)
@@ -413,21 +460,21 @@ def compare_all_three_methods():
     plt.grid(True, alpha=0.3)
     
     # 分析每种方法的特性
-    print(f"\n📊 三种方法特性分析:")
-    print(f"1. Sigmoid方法:")
-    print(f"   - 优点: 平滑连续，在远距离处有渐近线")
-    print(f"   - 缺点: 在近距离处可能不够尖锐")
-    print(f"   - 适用: 需要平滑field的场景")
+    print("\n📊 三种方法特性分析:")
+    print("1. Tanh方法（推荐）:")
+    print("   - 优点: 平滑连续，有界输出[0,1]，数值稳定，实验表现最优")
+    print("   - 缺点: 远距离处饱和为1，可能不如gaussian_mag衰减快")
+    print("   - 适用: 需要稳定、有界field的场景（最终选择）")
     
-    print(f"\n2. Gaussian_mag方法:")
-    print(f"   - 优点: 在原子位置处为0，衰减快")
-    print(f"   - 缺点: 在远距离处衰减可能过快")
-    print(f"   - 适用: 需要避免相邻原子干扰的场景")
+    print("\n2. Gaussian_mag方法:")
+    print("   - 优点: 在原子位置处为0，衰减快，峰值在sig_mag处")
+    print("   - 缺点: 无上界，远距离处可能数值不稳定")
+    print("   - 适用: 需要避免相邻原子干扰的场景")
     
-    print(f"\n3. Distance方法:")
-    print(f"   - 优点: 线性特性，简单直观")
-    print(f"   - 缺点: 在原子位置处不连续")
-    print(f"   - 适用: 需要线性field的场景")
+    print("\n3. Distance方法:")
+    print("   - 优点: 线性特性，简单直观，有界[0,1]")
+    print("   - 缺点: 在距离=1处不连续（虽然实际中距离非负）")
+    print("   - 适用: 需要线性field的场景")
 
 if __name__ == "__main__":
     # 设置中文字体
@@ -446,7 +493,7 @@ if __name__ == "__main__":
     compare_real_vs_normalized()
     generate_real_space_recommendations()
     create_real_space_usage_example()
-    analyze_sigmoid_method_specifically()
+    analyze_tanh_method_specifically()
     compare_all_three_methods()
     
     # 保存结果

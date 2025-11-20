@@ -1,7 +1,6 @@
 import torch
 from torch import nn
 import numpy as np
-from typing import Optional, Dict, Any, Tuple
 from funcmol.models.egnn import EGNNVectorField
 
 class Decoder(nn.Module):

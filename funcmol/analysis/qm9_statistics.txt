@@ -1,0 +1,56 @@
+QM9 Dataset Statistics
+============================================================
+
+Total Molecules: 130831
+
+Atom Type Statistics:
+------------------------------------------------------------
+
+C Atoms:
+  Mean per molecule: 6.36 ± 1.23
+  Median: 6.0
+  Range: 0 - 9
+  Total: 831,925
+  Proportion of total atoms: 35.26%
+
+H Atoms:
+  Mean per molecule: 9.24 ± 2.82
+  Median: 9.0
+  Range: 0 - 20
+  Total: 1,208,486
+  Proportion of total atoms: 51.22%
+
+O Atoms:
+  Mean per molecule: 1.40 ± 0.88
+  Median: 1.0
+  Range: 0 - 5
+  Total: 183,265
+  Proportion of total atoms: 7.77%
+
+N Atoms:
+  Mean per molecule: 1.01 ± 1.07
+  Median: 1.0
+  Range: 0 - 7
+  Total: 132,498
+  Proportion of total atoms: 5.62%
+
+F Atoms:
+  Mean per molecule: 0.02 ± 0.22
+  Median: 0.0
+  Range: 0 - 6
+  Total: 3,036
+  Proportion of total atoms: 0.13%
+
+Total Atoms per Molecule:
+------------------------------------------------------------
+  Mean: 18.03 ± 2.94
+  Median: 18.0
+  Range: 3 - 29
+
+Atom Type Proportions (by count):
+------------------------------------------------------------
+  C: 35.26%
+  H: 51.22%
+  O: 7.77%
+  N: 5.62%
+  F: 0.13%

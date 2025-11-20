@@ -865,49 +865,75 @@ def infer_codes_occs_batch(batch, enc, config, to_cpu=False, code_stats=None):
 
 def load_checkpoint_state_nf(model, checkpoint_path):
     """
-    Helper function to load checkpoint state for Neural Field model.
+    Helper function to load checkpoint state for Neural Field model from Lightning checkpoint.
     
     Args:
         model: The Neural Field Lightning module
-        checkpoint_path (str): Path to the checkpoint file
+        checkpoint_path (str): Path to the Lightning checkpoint file (.ckpt)
         
     Returns:
         dict: Training state dictionary containing epoch, losses, and best_loss
     """
-    print(f"Loading checkpoint from: {checkpoint_path}")
-    state_dict = torch.load(checkpoint_path)
+    print(f"Loading Lightning checkpoint from: {checkpoint_path}")
     
-    # Load encoder state dict
-    if "enc" in state_dict:
-        # 统一去掉 _orig_mod. 前缀
-        new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict["enc"].items()}
-        model.enc.load_state_dict(new_state_dict)
-        print("Loaded encoder state from 'enc' key")
-    elif "enc_state_dict" in state_dict:
-        # 统一去掉 _orig_mod. 前缀
-        new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict["enc_state_dict"].items()}
-        model.enc.load_state_dict(new_state_dict)
-        print("Loaded encoder state from 'enc_state_dict' key")
-    else:
-        print("No encoder state found in checkpoint")
+    # Load checkpoint file
+    state_dict = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     
-    # Load decoder state dict
-    if "dec" in state_dict:
-        # 统一去掉 _orig_mod. 前缀
-        new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict["dec"].items()}
-        model.dec.load_state_dict(new_state_dict)
-        print("Loaded decoder state from 'dec' key")
-    elif "dec_state_dict" in state_dict:
-        # 统一去掉 _orig_mod. 前缀
-        new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict["dec_state_dict"].items()}
-        model.dec.load_state_dict(new_state_dict)
-        print("Loaded decoder state from 'dec_state_dict' key")
+    # Lightning checkpoint format (contains state_dict with enc.xxx and dec.xxx keys)
+    if "state_dict" not in state_dict:
+        raise ValueError("Invalid Lightning checkpoint format: missing 'state_dict' key")
+    
+    lightning_state_dict = state_dict["state_dict"]
+    
+    # First, try to use enc_state_dict and dec_state_dict if available (saved by on_save_checkpoint)
+    if "enc_state_dict" in state_dict and "dec_state_dict" in state_dict:
+        print("Found enc_state_dict and dec_state_dict in checkpoint (saved by on_save_checkpoint)")
+        enc_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict["enc_state_dict"].items()}
+        dec_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict["dec_state_dict"].items()}
     else:
-        print("No decoder state found in checkpoint")
+        # Extract encoder and decoder state dicts from Lightning state_dict format
+        enc_state_dict = {}
+        dec_state_dict = {}
+        
+        for key, value in lightning_state_dict.items():
+            if key.startswith("enc."):
+                # Remove 'enc.' prefix
+                new_key = key[4:]  # Remove 'enc.'
+                # Also remove _orig_mod. prefix if present
+                new_key = new_key.replace("_orig_mod.", "")
+                enc_state_dict[new_key] = value
+            elif key.startswith("dec."):
+                # Remove 'dec.' prefix
+                new_key = key[4:]  # Remove 'dec.'
+                # Also remove _orig_mod. prefix if present
+                new_key = new_key.replace("_orig_mod.", "")
+                dec_state_dict[new_key] = value
+    
+    # Load encoder
+    if enc_state_dict:
+        model.enc.load_state_dict(enc_state_dict, strict=False)
+        print(f"Loaded encoder state from Lightning checkpoint ({len(enc_state_dict)} parameters)")
+    else:
+        raise ValueError("No encoder state found in Lightning checkpoint")
+    
+    # Load decoder
+    if dec_state_dict:
+        model.dec.load_state_dict(dec_state_dict, strict=False)
+        print(f"Loaded decoder state from Lightning checkpoint ({len(dec_state_dict)} parameters)")
+    else:
+        raise ValueError("No decoder state found in Lightning checkpoint")
     
     # Load training state
+    # For Lightning checkpoints, epoch might be in different locations
+    epoch = None
+    if "epoch" in state_dict:
+        epoch = state_dict["epoch"]
+    elif "global_step" in state_dict:
+        # Some Lightning checkpoints use global_step instead of epoch
+        epoch = state_dict.get("global_step", None)
+    
     training_state = {
-        "epoch": state_dict.get("epoch", None),
+        "epoch": epoch,
         "train_losses": state_dict.get("train_losses", []),
         "val_losses": state_dict.get("val_losses", []),
         "best_loss": state_dict.get("best_loss", float("inf"))

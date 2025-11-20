@@ -14,7 +14,6 @@ import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 from omegaconf import DictConfig, OmegaConf
-from lightning import Fabric
 
 # NOTE：最后要移除的，只是测试阶段保留
 def get_next_generated_idx(csv_path):
@@ -88,17 +87,6 @@ def main(config: DictConfig) -> None:
     
     print(f"Generating {max_samples} molecules with field_methods: {field_methods}")
     print(f"Output directory: {output_dir}")
-    
-    # 配置Fabric，只支持单GPU模式
-    fabric = Fabric(
-        accelerator="gpu",
-        devices=1,
-        # precision="bf16-mixed"
-    )
-    print("Using single-GPU mode")
-    
-    fabric.launch()
-
     print("fm_pretrained_path: ", config["fm_pretrained_path"])
     print("nf_pretrained_path: ", config["nf_pretrained_path"])
 
@@ -173,8 +161,7 @@ def main(config: DictConfig) -> None:
                 # 重建分子
                 recon_coords, recon_types = converter.gnf2mol(
                     decoder,
-                    denoised_codes,
-                    fabric=fabric
+                    denoised_codes
                 )
                 
                 # 处理结果
