@@ -30,6 +30,7 @@ This script can be used for both field type evaluation (stage1) and neural field
 """
 
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 import torch
 import random
 import pandas as pd
@@ -38,7 +39,7 @@ from pathlib import Path
 from tqdm import tqdm
 from scipy.optimize import linear_sum_assignment
 import hydra
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, ListConfig
 from funcmol.dataset.dataset_field import create_gnf_converter
 from funcmol.utils.utils_nf import load_neural_field
 from funcmol.dataset.dataset_field import FieldDataset
@@ -124,18 +125,43 @@ def main(config: DictConfig) -> None:
     field_methods = config.get('field_methods', ['gaussian_mag', 'tanh'])
     
     # For gt_field and nf_field modes, load dataset for reconstruction
-    max_samples = config.get('max_samples')
-    if max_samples is None or max_samples <= 0:
-        max_samples = len(dataset)
-        sample_indices = list(range(len(dataset)))
-    else:
-        # 从验证集中随机采样max_samples个分子，保留原始索引
-        total_samples = len(dataset)
-        if max_samples >= total_samples:
-            sample_indices = list(range(total_samples))
-        else:
-            sample_indices = random.sample(range(total_samples), max_samples)
+    # 优先检查是否手动指定了样本索引
+    manual_sample_indices = config.get('sample_indices')
+    
+    if manual_sample_indices is not None:
+        # 如果手动指定了样本索引，使用指定的索引
+        # 处理 OmegaConf 的 ListConfig 类型，转换为 Python list
+        if isinstance(manual_sample_indices, (list, tuple, ListConfig)):
+            # 将 ListConfig 转换为普通 Python list
+            if isinstance(manual_sample_indices, ListConfig):
+                manual_sample_indices = OmegaConf.to_container(manual_sample_indices, resolve=True)
+            sample_indices = [int(idx) for idx in manual_sample_indices]
+            # 验证索引是否在有效范围内
+            total_samples = len(dataset)
+            valid_indices = [idx for idx in sample_indices if 0 <= idx < total_samples]
+            if len(valid_indices) != len(sample_indices):
+                invalid_indices = [idx for idx in sample_indices if idx < 0 or idx >= total_samples]
+                print(f"Warning: Some sample indices are out of range [0, {total_samples-1}]: {invalid_indices}")
+                print(f"Using {len(valid_indices)} valid indices out of {len(sample_indices)} specified")
+            sample_indices = valid_indices
             sample_indices.sort()  # 保持索引顺序，便于调试
+            print(f"Using manually specified sample indices: {sample_indices}")
+        else:
+            raise ValueError(f"sample_indices must be a list, tuple, or ListConfig, got {type(manual_sample_indices)}")
+    else:
+        # 如果没有手动指定，使用max_samples进行随机采样
+        max_samples = config.get('max_samples')
+        if max_samples is None or max_samples <= 0:
+            max_samples = len(dataset)
+            sample_indices = list(range(len(dataset)))
+        else:
+            # 从验证集中随机采样max_samples个分子，保留原始索引
+            total_samples = len(dataset)
+            if max_samples >= total_samples:
+                sample_indices = list(range(total_samples))
+            else:
+                sample_indices = random.sample(range(total_samples), max_samples)
+                sample_indices.sort()  # 保持索引顺序，便于调试
     
     print(f"Evaluating {len(sample_indices)} molecules (sampled from {len(dataset)} total) with field_mode: {field_mode}, methods: {field_methods}")
     print(f"Sample indices: {sample_indices[:10]}{'...' if len(sample_indices) > 10 else ''}")
@@ -160,7 +186,7 @@ def main(config: DictConfig) -> None:
     if field_mode == 'gt_field':
         csv_path = output_dir / "field_evaluation_results.csv"
     elif field_mode == 'nf_field':
-        csv_path = output_dir / "nf_evaluation_results.csv"
+        csv_path = output_dir / "nf_evaluation_results_2.csv"
     else:
         raise ValueError(f"Unsupported field_mode: {field_mode}. Only 'gt_field' and 'nf_field' are supported.")
     

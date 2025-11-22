@@ -7,8 +7,7 @@ import lmdb
 import threading
 from typing import Optional
 
-from lightning import Fabric
-import numpy as np
+from omegaconf import DictConfig, OmegaConf
 import torch
 from torch_geometric.data import Data, Dataset, Batch
 from torch_geometric.loader import DataLoader
@@ -642,6 +641,23 @@ def create_gnf_converter(config: dict) -> GNFConverter:
     convergence_threshold = gnf_config.get("convergence_threshold", 1e-6)
     min_iterations = gnf_config.get("min_iterations", 50)
     
+    # 获取每个原子类型的 query_points 数（可选）
+    # 如果配置中提供了 n_query_points_per_type，则使用它；否则为 None，将使用统一的 n_query_points
+    n_query_points_per_type = None
+    if "n_query_points_per_type" in gnf_config:
+        n_query_points_per_type = gnf_config["n_query_points_per_type"]
+        # 如果为 None（配置文件中的 null），则跳过处理
+        if n_query_points_per_type is not None:
+            # 处理 OmegaConf 的 DictConfig 类型，转换为 Python dict
+            if isinstance(n_query_points_per_type, DictConfig):
+                n_query_points_per_type = OmegaConf.to_container(n_query_points_per_type, resolve=True)
+            # 确保是字典类型
+            if not isinstance(n_query_points_per_type, dict):
+                raise ValueError(f"n_query_points_per_type must be a dictionary mapping atom symbols to query point counts, got {type(n_query_points_per_type)}")
+        else:
+            # 如果明确设置为 None/null，保持为 None
+            n_query_points_per_type = None
+    
     return GNFConverter(
         sigma=sigma,
         n_query_points=n_query_points,
@@ -662,7 +678,8 @@ def create_gnf_converter(config: dict) -> GNFConverter:
         n_atom_types=n_atom_types,  # 添加原子类型数量参数
         enable_early_stopping=enable_early_stopping,
         convergence_threshold=convergence_threshold,
-        min_iterations=min_iterations
+        min_iterations=min_iterations,
+        n_query_points_per_type=n_query_points_per_type  # 添加每个原子类型的 query_points 数
     )
 
 

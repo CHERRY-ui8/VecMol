@@ -37,7 +37,8 @@ class GNFConverter(nn.Module):
                 n_atom_types: int = 5,  # 原子类型数量，默认为5以保持向后兼容
                 enable_early_stopping: bool = True,  # 是否启用早停机制
                 convergence_threshold: float = 1e-6,  # 收敛阈值（梯度模长变化）
-                min_iterations: int = 50):  # 最少迭代次数（早停前必须达到的最小迭代数）
+                min_iterations: int = 50,  # 最少迭代次数（早停前必须达到的最小迭代数）
+                n_query_points_per_type: Optional[Dict[str, int]] = None):  # 每个原子类型的query_points数，如果为None则使用统一的n_query_points
         super().__init__()
         self.sigma = sigma
         self.n_query_points = n_query_points
@@ -70,6 +71,19 @@ class GNFConverter(nn.Module):
             atom_symbol = atom_type_mapping.get(atom_idx, f'Type{atom_idx}')
             ratio = self.sigma_ratios.get(atom_symbol, 1.0)  # 默认比例为1.0
             self.sigma_params[atom_idx] = sigma * ratio
+        
+        # 为不同类型的原子设置不同的 query_points 数
+        # 如果提供了 n_query_points_per_type，则使用它；否则所有原子类型使用统一的 n_query_points
+        self.n_query_points_per_type = {}
+        if n_query_points_per_type is not None:
+            for atom_idx in range(n_atom_types):
+                atom_symbol = atom_type_mapping.get(atom_idx, f'Type{atom_idx}')
+                # 如果配置中指定了该原子类型的query_points数，则使用它；否则使用统一的n_query_points
+                self.n_query_points_per_type[atom_idx] = n_query_points_per_type.get(atom_symbol, n_query_points)
+        else:
+            # 如果未提供 n_query_points_per_type，所有原子类型使用统一的 n_query_points
+            for atom_idx in range(n_atom_types):
+                self.n_query_points_per_type[atom_idx] = n_query_points
     
     def forward(self, coords: torch.Tensor, atom_types: torch.Tensor, 
                 query_points: torch.Tensor) -> torch.Tensor:
@@ -286,7 +300,7 @@ class GNFConverter(nn.Module):
         return vector_field
 
     def _process_atom_types_matrix(self, current_codes: torch.Tensor, n_atom_types: int, 
-                                 n_query_points: int, device: torch.device, 
+                                 device: torch.device, 
                                  decoder: nn.Module,
                                  iteration_callback: Optional[callable] = None) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
         """
@@ -296,15 +310,20 @@ class GNFConverter(nn.Module):
         Args:
             current_codes: 当前batch的编码 [1, code_dim]
             n_atom_types: 原子类型数量
-            n_query_points: 查询点数量
             device: 设备
+            decoder: 解码器模型
+            iteration_callback: 可选的回调函数
             
         Returns:
             (coords_list, types_list): 坐标和类型列表
         """
+        # 获取每个原子类型的 query_points 数
+        query_points_per_type = [self.n_query_points_per_type.get(t, self.n_query_points) for t in range(n_atom_types)]
+        max_query_points = max(query_points_per_type) if query_points_per_type else self.n_query_points
+        
         # 1. 初始化采样点 - 为所有原子类型一次性采样
         init_min, init_max = -7.0, 7.0
-        n_candidates = n_query_points * self.gradient_sampling_candidate_multiplier
+        n_candidates = max_query_points * self.gradient_sampling_candidate_multiplier
         candidate_points = torch.rand(n_candidates, 3, device=device) * (init_max - init_min) + init_min
         
         # 计算候选点的梯度场强度
@@ -331,7 +350,12 @@ class GNFConverter(nn.Module):
         types_list = []
         
         # TODO：使用矩阵化采样，避免循环
+        # 记录每个原子类型的起始索引，用于后续分离结果
+        type_start_indices = []
+        current_start_idx = 0
+        
         for t in range(n_atom_types):
+            n_query_points_t = query_points_per_type[t]  # 当前原子类型的 query_points 数
             candidate_grad = candidate_field[0, :, t, :]  # [n_candidates, 3]
             
             # 计算梯度场强度（模长）
@@ -340,18 +364,24 @@ class GNFConverter(nn.Module):
             # 根据梯度场强度进行加权采样
             probabilities = torch.softmax(grad_magnitudes / self.gradient_sampling_temperature, dim=0)
             
-            # 从候选点中采样n_query_points个点
-            sampled_indices = torch.multinomial(probabilities, n_query_points, replacement=False)
-            z = candidate_points[sampled_indices]  # [n_query_points, 3]
+            # 从候选点中采样 n_query_points_t 个点
+            # 如果候选点数量少于需要的点数，使用 replacement=True
+            replacement = n_query_points_t > n_candidates
+            sampled_indices = torch.multinomial(probabilities, n_query_points_t, replacement=replacement)
+            z = candidate_points[sampled_indices]  # [n_query_points_t, 3]
             
             all_sampled_points.append(z)
-            all_atom_types.append(torch.full((n_query_points,), t, dtype=torch.long, device=device))
+            all_atom_types.append(torch.full((n_query_points_t,), t, dtype=torch.long, device=device))
+            
+            # 记录起始索引
+            type_start_indices.append(current_start_idx)
+            current_start_idx += n_query_points_t
         
         # 合并所有原子类型的采样点进行批量梯度上升
         if all_sampled_points:
-            # 将所有采样点合并 [n_atom_types * n_query_points, 3]
+            # 将所有采样点合并 [total_points, 3]
             combined_points = torch.cat(all_sampled_points, dim=0)
-            combined_types = torch.cat(all_atom_types, dim=0)  # [n_atom_types * n_query_points]
+            combined_types = torch.cat(all_atom_types, dim=0)  # [total_points]
             
             # 批量梯度上升
             final_points = self._batch_gradient_ascent(
@@ -361,9 +391,9 @@ class GNFConverter(nn.Module):
             
             # 按原子类型分离结果并进行聚类
             for t in range(n_atom_types):
-                start_idx = t * n_query_points
-                end_idx = (t + 1) * n_query_points
-                type_points = final_points[start_idx:end_idx]  # [n_query_points, 3]
+                start_idx = type_start_indices[t]
+                end_idx = start_idx + query_points_per_type[t]
+                type_points = final_points[start_idx:end_idx]  # [n_query_points_t, 3]
                 
                 # 聚类/合并
                 z_np = type_points.detach().cpu().numpy()
@@ -470,7 +500,6 @@ class GNFConverter(nn.Module):
         device = codes.device
         batch_size = codes.size(0)
         n_atom_types = self.n_atom_types
-        n_query_points = self.n_query_points
 
         all_coords = []
         all_types = []
@@ -509,10 +538,10 @@ class GNFConverter(nn.Module):
                 
                 iteration_callback = create_iteration_callback(b, n_atom_types, save_interval, self.n_iter)
             
-            # 矩阵化处理所有原子类型
+            # 矩阵化处理所有原子类型（不再需要传递 n_query_points，方法内部会使用 self.n_query_points_per_type）
             coords_list, types_list = self._process_atom_types_matrix(
-                current_codes, n_atom_types, n_query_points, device, decoder,
-                iteration_callback
+                current_codes, n_atom_types, device=device, decoder=decoder,
+                iteration_callback=iteration_callback
             )
             
             # 合并所有类型

@@ -39,6 +39,12 @@ converter:
   gradient_clip_threshold: 0.3
   gradient_sampling_candidate_multiplier: 3
   gradient_sampling_temperature: 0.1
+  n_query_points_per_type:
+    C: 5000
+    H: 3000
+    O: 1200
+    'N': 1000
+    F: 800
   method_configs:
     gaussian_mag:
       n_query_points: 1000
@@ -52,7 +58,7 @@ converter:
       step_size: 0.04
       sig_sf: 0.1
       sig_mag: 2
-      eps: 0.04
+      eps: 0.05
       min_samples: 20
   default_config:
     n_query_points: 600
@@ -89,7 +95,7 @@ seed: 1234
 exp_dir: ../exps/neural_field
 exp_name: nf_${dset.dset_name}/${now:%Y%m%d}
 dirname: ${exp_dir}/${exp_name}
-reload_model_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251024/lightning_logs/version_0/checkpoints/model-epoch=409.ckpt
+reload_model_path: null
 auto_resume: false
 n_samples: None
 ckpt_every_n_epochs: 10
@@ -109,8 +115,4 @@ code_augmentation:
 loss_weighting:
   enabled: true
   atom_distance_weight: 1.0
-  field_magnitude_weight: 1.2
-  atom_density_weight: 0.8
-  atom_distance_scale: 1.5
-  field_magnitude_power: 0.5
-  atom_density_radius: 2.5
+  atom_distance_scale: 1.0

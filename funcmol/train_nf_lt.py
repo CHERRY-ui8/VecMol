@@ -75,14 +75,8 @@ class NeuralFieldLightningModule(pl.LightningModule):
             # Use reduction='none' to apply weights element-wise
             self.criterion = nn.MSELoss(reduction='none')
             self.atom_distance_weight = loss_weight_config.get("atom_distance_weight", 1.0)
-            self.field_magnitude_weight = loss_weight_config.get("field_magnitude_weight", 1.0)
-            self.atom_density_weight = loss_weight_config.get("atom_density_weight", 0.0)
             self.atom_distance_scale = loss_weight_config.get("atom_distance_scale", 1.0)  # 距离衰减尺度
-            self.field_magnitude_power = loss_weight_config.get("field_magnitude_power", 0.5)  # field范数的幂次
-            self.atom_density_radius = loss_weight_config.get("atom_density_radius", 2.0)  # 原子密度计算半径
-            print(f"Loss weighting enabled: atom_distance={self.atom_distance_weight}, "
-                  f"field_magnitude={self.field_magnitude_weight}, "
-                  f"atom_density={self.atom_density_weight}")
+            print(f"Loss weighting enabled: atom_distance={self.atom_distance_weight}")
         else:
             # Standard MSE loss for non-weighted mode
             self.criterion = nn.MSELoss()
@@ -175,14 +169,12 @@ class NeuralFieldLightningModule(pl.LightningModule):
     def _compute_loss_weights(self, batch, query_points, target_field):
         """
         Compute loss weights for each query point based on:
-        1. Distance to nearest atom (closer = higher weight)
-        2. Field magnitude (larger = higher weight)
-        3. Atom density around query point (denser = higher weight)
+        Distance to nearest atom (closer = higher weight)
         
         Args:
             batch: PyTorch Geometric batch object
             query_points: [B, n_points, 3] query point coordinates
-            target_field: [B, n_points, n_atom_types, 3] target field values
+            target_field: [B, n_points, n_atom_types, 3] target field values (unused, kept for API compatibility)
             
         Returns:
             weights: [B, n_points] weight tensor for each query point
@@ -194,18 +186,6 @@ class NeuralFieldLightningModule(pl.LightningModule):
         # Get atom positions from batch
         atom_positions = batch.pos  # [N_total_atoms, 3]
         batch_idx = batch.batch  # [N_total_atoms] - which sample each atom belongs to
-        
-        # Compute field magnitude for each query point
-        # target_field: [B, n_points, n_atom_types, 3]
-        field_magnitude = torch.norm(target_field, dim=-1)  # [B, n_points, n_atom_types]
-        field_magnitude = torch.max(field_magnitude, dim=-1)[0]  # [B, n_points] - max over atom types
-        
-        # Normalize field magnitude to [0, 1] range for each sample
-        field_magnitude_normalized = torch.zeros_like(field_magnitude)
-        for b in range(B):
-            field_max = field_magnitude[b].max()
-            if field_max > 0:
-                field_magnitude_normalized[b] = field_magnitude[b] / field_max
         
         # Compute weights for each sample in batch
         for b in range(B):
@@ -219,7 +199,7 @@ class NeuralFieldLightningModule(pl.LightningModule):
             if len(sample_atoms) == 0:
                 continue
             
-            # 1. Compute distance to nearest atom for each query point
+            # Compute distance to nearest atom for each query point
             # sample_query_points: [n_points, 3], sample_atoms: [n_atoms, 3]
             # Compute pairwise distances: [n_points, n_atoms]
             distances = torch.cdist(sample_query_points, sample_atoms)  # [n_points, n_atoms]
@@ -229,30 +209,8 @@ class NeuralFieldLightningModule(pl.LightningModule):
             # Use exponential decay: weight = exp(-distance / scale)
             atom_distance_weights = torch.exp(-min_distances / self.atom_distance_scale)
             
-            # 2. Field magnitude weights (already computed above)
-            field_weights = torch.pow(field_magnitude_normalized[b] + 1e-8, self.field_magnitude_power)
-            
-            # 3. Compute atom density around each query point
-            atom_density_weights = torch.ones(n_points, device=device)
-            if self.atom_density_weight > 0:
-                # Count atoms within radius for each query point
-                density_radius = self.atom_density_radius
-                # distances already computed above: [n_points, n_atoms]
-                within_radius = (distances < density_radius).float()  # [n_points, n_atoms]
-                atom_counts = within_radius.sum(dim=-1)  # [n_points] - number of atoms within radius
-                # Normalize by max count (avoid division by zero)
-                max_count = atom_counts.max()
-                if max_count > 0:
-                    atom_density_weights = atom_counts / max_count
-                else:
-                    atom_density_weights = torch.zeros_like(atom_counts)
-            
-            # Combine weights
-            combined_weights = (
-                self.atom_distance_weight * atom_distance_weights +
-                self.field_magnitude_weight * field_weights +
-                self.atom_density_weight * atom_density_weights
-            )
+            # Apply weight scaling
+            combined_weights = self.atom_distance_weight * atom_distance_weights
             
             # Normalize weights to have mean=1 (preserve overall loss scale)
             weight_mean = combined_weights.mean()
