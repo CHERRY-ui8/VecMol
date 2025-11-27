@@ -48,7 +48,7 @@ reload_model_path: null
 smooth_sigma: 0.5 # 2.0, 1.0, 0.5
 normalize_codes: 1
 on_the_fly: False  # use True to compute codes on the fly from neural field
-codes_dir: "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251024/lightning_logs/version_0/checkpoints/"
+codes_dir: "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/"
 
 # data augmentation for denoiser training
 use_data_augmentation: True  # 是否启用数据增强

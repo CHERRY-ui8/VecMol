@@ -45,37 +45,45 @@ class CodeDataset(Dataset):
             # 使用LMDB数据库
             self._use_lmdb_database(lmdb_path, keys_path)
         else:
-            # 使用传统方式加载
-            # get list of codes
-            self.list_codes = [
+            # 检查是否有多个 codes 文件
+            list_codes = [
                 f for f in os.listdir(self.codes_dir)
                 if os.path.isfile(os.path.join(self.codes_dir, f)) and \
                 f.startswith("codes") and f.endswith(".pt")
             ]
             
-            # 优先使用 codes.pt（向后兼容）
-            if "codes.pt" in self.list_codes:
+            # 如果有多个文件，要求使用 LMDB 格式
+            if "codes.pt" in list_codes:
+                # 单个 codes.pt 文件，向后兼容
                 self.list_codes = ["codes.pt"]
                 self.num_augmentations = 0
+                self.use_lmdb = False
+                self.load_codes()
             else:
-                # 查找所有 codes_XXX.pt 文件（新格式）
-                numbered_codes = [f for f in self.list_codes if f.startswith("codes_") and f.endswith(".pt")]
-                if numbered_codes:
-                    # 按编号排序
-                    numbered_codes.sort()
+                # 查找所有 codes_XXX.pt 文件
+                numbered_codes = [f for f in list_codes if f.startswith("codes_") and f.endswith(".pt")]
+                if numbered_codes and len(numbered_codes) > 1:
+                    # 多个文件，要求转换为 LMDB
+                    raise RuntimeError(
+                        f"Found {len(numbered_codes)} codes files. Multiple codes files require LMDB format.\n"
+                        f"Please convert to LMDB format first:\n"
+                        f"  python funcmol/dataset/convert_codes_to_lmdb.py --codes_dir {os.path.dirname(self.codes_dir)} --splits {self.split}\n"
+                        f"Or ensure codes.lmdb and codes_keys.pt exist in: {self.codes_dir}"
+                    )
+                elif numbered_codes and len(numbered_codes) == 1:
+                    # 单个 codes_XXX.pt 文件，向后兼容
                     self.list_codes = numbered_codes
-                    self.num_augmentations = len(numbered_codes)
-                else:
-                    # 兼容旧格式：如果有其他codes文件，使用第一个
-                    self.list_codes.sort()
-                    if self.list_codes:
-                        self.list_codes = [self.list_codes[0]]
-                    else:
-                        raise FileNotFoundError(f"No codes files found in {self.codes_dir}")
                     self.num_augmentations = 0
-            
-            self.use_lmdb = False
-            self.load_codes()
+                    self.use_lmdb = False
+                    self.load_codes()
+                else:
+                    # 没有找到 codes 文件
+                    raise FileNotFoundError(
+                        f"No codes files found in {self.codes_dir}.\n"
+                        f"Expected either:\n"
+                        f"  - codes.lmdb and codes_keys.pt (LMDB format), or\n"
+                        f"  - codes.pt or codes_XXX.pt (single file format)"
+                    )
 
     def _use_lmdb_database(self, lmdb_path, keys_path):
         """使用LMDB数据库加载数据"""
@@ -153,34 +161,24 @@ class CodeDataset(Dataset):
 
     def load_codes(self, index=None) -> None:
         """
-        Load codes from the available codes files.
+        Load codes from a single code file.
 
         Args:
-            index (int, optional): The index of the code to load. If None, loads all files and concatenates them.
+            index (int, optional): Not used, kept for compatibility.
 
         Returns:
             None
 
         Side Effects:
-            - Sets `self.curr_codes` to the loaded codes from the codes file(s).
-            - Prints the path(s) of the loaded codes.
+            - Sets `self.curr_codes` to the loaded codes from the code file.
+            - Prints the path of the loaded codes.
         """
-        if len(self.list_codes) == 1:
-            # 只有一个文件，直接加载
-            code_path = os.path.join(self.codes_dir, self.list_codes[0])
-            print(">> loading codes: ", code_path)
-            self.curr_codes = torch.load(code_path, weights_only=False)
-        else:
-            # 多个文件，合并加载
-            all_codes = []
-            for code_file in self.list_codes:
-                code_path = os.path.join(self.codes_dir, code_file)
-                print(">> loading codes: ", code_path)
-                codes = torch.load(code_path, weights_only=False)
-                all_codes.append(codes)
-            # 合并所有codes
-            self.curr_codes = torch.cat(all_codes, dim=0)
-            print(f">> merged {len(self.list_codes)} codes files, total shape: {self.curr_codes.shape}")
+        if len(self.list_codes) != 1:
+            raise RuntimeError(f"load_codes expects exactly 1 file, got {len(self.list_codes)}")
+        
+        code_path = os.path.join(self.codes_dir, self.list_codes[0])
+        print(">> loading codes: ", code_path)
+        self.curr_codes = torch.load(code_path, weights_only=False)
 
 
 def create_code_loaders(
@@ -211,7 +209,7 @@ def create_code_loaders(
         dset_name=config["dset"]["dset_name"],
         codes_dir=config["codes_dir"],
         split=split,
-        num_augmentations=config["num_augmentations"],
+        num_augmentations=config.get("num_augmentations", None),
     )
 
     # reduce the dataset size for debugging

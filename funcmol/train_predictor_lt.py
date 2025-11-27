@@ -65,12 +65,13 @@ class PredictorLightningModule(pl.LightningModule):
     """
     PyTorch Lightning module for training Element Predictor only
     """
-    def __init__(self, config, enc, code_stats):
+    def __init__(self, config, enc, code_stats, field_loaders=None):
         super().__init__()
         self.config = config
         self.enc = enc
         self.code_stats = code_stats
-        self.save_hyperparameters(ignore=['enc', 'code_stats'])
+        self.field_loaders = field_loaders  # 用于on_the_fly=False时获取分子信息
+        self.save_hyperparameters(ignore=['enc', 'code_stats', 'field_loaders'])
         
         # Create element predictor
         n_atom_types = config["dset"]["n_channels"]
@@ -93,6 +94,10 @@ class PredictorLightningModule(pl.LightningModule):
         if self.enc is not None:
             for param in self.enc.parameters():
                 param.requires_grad = False
+        
+        # 用于on_the_fly=False时迭代field_loaders获取分子信息
+        self._field_train_iter = None
+        self._field_val_iter = None
 
     def _process_batch(self, batch):
         """
@@ -100,47 +105,100 @@ class PredictorLightningModule(pl.LightningModule):
         
         Args:
             batch: Data batch
+                - 如果on_the_fly=True: PyTorch Geometric Batch对象
+                - 如果on_the_fly=False: codes tensor [B, grid_size³, code_dim]
             
         Returns:
             codes: [B, grid_size³, code_dim]
         """
-        with torch.no_grad():
-            codes = infer_codes_occs_batch(
-                batch, self.enc, self.config, to_cpu=False,
-                code_stats=self.code_stats if self.config["normalize_codes"] else None
-            )
+        if self.config["on_the_fly"]:
+            # 从encoder计算codes
+            with torch.no_grad():
+                codes = infer_codes_occs_batch(
+                    batch, self.enc, self.config, to_cpu=False,
+                    code_stats=self.code_stats if self.config["normalize_codes"] else None
+                )
+        else:
+            # 直接使用预先保存的codes，但需要normalize
+            codes = batch
+            if self.config["normalize_codes"] and self.code_stats is not None:
+                from funcmol.utils.utils_nf import normalize_code
+                codes = normalize_code(codes, self.code_stats)
         return codes
     
-    def _get_element_existence(self, batch):
+    def _get_element_existence(self, batch, codes_batch_size=None):
         """
         从batch中计算ground truth的元素存在性
         
         Args:
-            batch: PyTorch Geometric Batch对象，包含:
-                - batch.x: [N_total_atoms] - 原子类型索引
-                - batch.batch: [N_total_atoms] - 每个原子属于哪个分子的索引
+            batch: 
+                - 如果on_the_fly=True: PyTorch Geometric Batch对象
+                - 如果on_the_fly=False: codes tensor，此时需要从field_loaders获取分子信息
+            codes_batch_size: 当on_the_fly=False时，codes batch的大小
         
         Returns:
             element_existence: [B, n_atom_types] - 每个分子中每种元素是否存在（0或1）
         """
         n_atom_types = self.config["dset"]["n_channels"]
-        B = batch.num_graphs  # batch中的分子数量
-        device = batch.x.device
         
-        # 初始化元素存在性矩阵 [B, n_atom_types]
-        element_existence = torch.zeros(B, n_atom_types, device=device)
-        
-        # 对每个分子，检查哪些原子类型存在
-        for b in range(B):
-            # 获取当前分子的原子类型
-            molecule_mask = (batch.batch == b)
-            atom_types = batch.x[molecule_mask]  # [n_atoms_in_molecule]
+        if self.config["on_the_fly"]:
+            # 从PyTorch Geometric Batch中获取分子信息
+            B = batch.num_graphs  # batch中的分子数量
+            device = batch.x.device
             
-            # 统计存在的原子类型
-            unique_types = torch.unique(atom_types)
-            # 确保类型索引在有效范围内
-            valid_types = unique_types[(unique_types >= 0) & (unique_types < n_atom_types)]
-            element_existence[b, valid_types] = 1.0
+            # 初始化元素存在性矩阵 [B, n_atom_types]
+            element_existence = torch.zeros(B, n_atom_types, device=device)
+            
+            # 对每个分子，检查哪些原子类型存在
+            for b in range(B):
+                # 获取当前分子的原子类型
+                molecule_mask = (batch.batch == b)
+                atom_types = batch.x[molecule_mask]  # [n_atoms_in_molecule]
+                
+                # 统计存在的原子类型
+                unique_types = torch.unique(atom_types)
+                # 确保类型索引在有效范围内
+                valid_types = unique_types[(unique_types >= 0) & (unique_types < n_atom_types)]
+                element_existence[b, valid_types] = 1.0
+        else:
+            # 从field_loaders获取对应的分子信息
+            # 注意：这里假设codes和field_loaders的顺序是对应的
+            if codes_batch_size is None:
+                codes_batch_size = batch.shape[0] if isinstance(batch, torch.Tensor) else len(batch)
+            
+            # 获取对应的分子batch
+            if self.training:
+                if self._field_train_iter is None:
+                    self._field_train_iter = iter(self.field_loaders[0])
+                try:
+                    mol_batch = next(self._field_train_iter)
+                except StopIteration:
+                    # 重新开始迭代
+                    self._field_train_iter = iter(self.field_loaders[0])
+                    mol_batch = next(self._field_train_iter)
+            else:
+                if self._field_val_iter is None:
+                    self._field_val_iter = iter(self.field_loaders[1])
+                try:
+                    mol_batch = next(self._field_val_iter)
+                except StopIteration:
+                    # 重新开始迭代
+                    self._field_val_iter = iter(self.field_loaders[1])
+                    mol_batch = next(self._field_val_iter)
+            
+            # 从分子batch中计算元素存在性
+            B = mol_batch.num_graphs
+            device = mol_batch.x.device
+            
+            element_existence = torch.zeros(B, n_atom_types, device=device)
+            
+            for b in range(B):
+                molecule_mask = (mol_batch.batch == b)
+                atom_types = mol_batch.x[molecule_mask]
+                
+                unique_types = torch.unique(atom_types)
+                valid_types = unique_types[(unique_types >= 0) & (unique_types < n_atom_types)]
+                element_existence[b, valid_types] = 1.0
         
         return element_existence
     
@@ -150,7 +208,8 @@ class PredictorLightningModule(pl.LightningModule):
         codes = self._process_batch(batch)
         
         # 获取ground truth的元素存在性
-        gt_element_existence = self._get_element_existence(batch)
+        codes_batch_size = codes.shape[0] if isinstance(codes, torch.Tensor) else len(codes)
+        gt_element_existence = self._get_element_existence(batch, codes_batch_size=codes_batch_size)
         
         # 预测元素存在性
         pred_element_existence = self.predictor(codes)
@@ -176,7 +235,8 @@ class PredictorLightningModule(pl.LightningModule):
         codes = self._process_batch(batch)
         
         # 获取ground truth的元素存在性
-        gt_element_existence = self._get_element_existence(batch)
+        codes_batch_size = codes.shape[0] if isinstance(codes, torch.Tensor) else len(codes)
+        gt_element_existence = self._get_element_existence(batch, codes_batch_size=codes_batch_size)
         
         # 使用EMA模型预测元素存在性
         pred_element_existence = self.predictor_ema(codes)
@@ -355,11 +415,22 @@ def main(config):
                 loader_train, enc, config_nf, "train", config["normalize_codes"],
                 code_stats=None
             )
+            
+            # field_loaders用于获取分子信息（on_the_fly=True时，batch本身就包含分子信息）
+            field_loaders = None
         else:
+            # 使用预先保存的codes
             loader_train = create_code_loaders(config, split="train")
             loader_val = create_code_loaders(config, split="val")
             
             code_stats = compute_code_stats_offline(loader_train, "train", config["normalize_codes"])
+            
+            # 为了获取分子信息以计算元素存在性，仍然需要加载field数据
+            # 但不需要重新计算codes
+            gnf_converter = create_gnf_converter(config)
+            field_loader_train = create_field_loaders(config, gnf_converter, split="train")
+            field_loader_val = create_field_loaders(config, gnf_converter, split="val")
+            field_loaders = (field_loader_train, field_loader_val)
         
         # Check if loaders are empty
         if not loader_train or len(loader_train) == 0:
@@ -374,7 +445,7 @@ def main(config):
     config["num_iterations"] = config["num_epochs"] * len(loader_train)
     
     # Initialize Lightning model
-    model = PredictorLightningModule(config, enc, code_stats)
+    model = PredictorLightningModule(config, enc, code_stats, field_loaders=field_loaders)
     
     # Load checkpoint if specified
     if config["reload_model_path"] is not None:

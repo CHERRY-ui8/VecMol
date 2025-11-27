@@ -16,14 +16,13 @@ exp_name: "predictor_${dset.dset_name}/${now:%Y%m%d}"
 dirname: "${exp_dir}/${exp_name}"
 reload_model_path: null
 
-# Neural field pretrained path (required for predictor training)
-# 需要提供训练好的neural field checkpoint路径
+# Neural field pretrained path
 nf_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/model-epoch=999.ckpt
 
 # data params
 normalize_codes: 1
-on_the_fly: True  # use True to compute codes on the fly from neural field
-codes_dir: null  # not used when on_the_fly=True
+on_the_fly: False  # use True to compute codes on the fly from neural field
+codes_dir: "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/codes"  # not used when on_the_fly=True
 
 # training params
 num_epochs: 100
