@@ -57,7 +57,6 @@ def create_converter_from_config(config_path: str) -> GNFConverter:
         sig_sf=sig_sf,
         sig_mag=sig_mag,
         gradient_sampling_candidate_multiplier=config.get('gradient_sampling_candidate_multiplier', 3),
-        gradient_sampling_temperature=config.get('gradient_sampling_temperature', 0.1),
         n_atom_types=5,  # QM9有5种原子类型：C, H, O, N, F
         enable_early_stopping=config.get('enable_early_stopping', False),
         convergence_threshold=config.get('convergence_threshold', 1e-6),

@@ -46,8 +46,6 @@ code_augmentation:
 # Loss weighting: 对更重要的区域（原子附近）加权
 loss_weighting:
   enabled: True  # 是否启用loss加权
-  # weight = atom_distance_weight × atom_distance
-  atom_distance_weight: 1.0  # 原子距离权重（距离原子越近权重越大）
   atom_distance_scale: 1.0  # 原子距离衰减尺度（越小，距离衰减越快）
 
 # set the running dir

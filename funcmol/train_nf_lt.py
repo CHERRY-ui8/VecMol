@@ -74,9 +74,7 @@ class NeuralFieldLightningModule(pl.LightningModule):
         if self.loss_weighting_enabled:
             # Use reduction='none' to apply weights element-wise
             self.criterion = nn.MSELoss(reduction='none')
-            self.atom_distance_weight = loss_weight_config.get("atom_distance_weight", 1.0)
             self.atom_distance_scale = loss_weight_config.get("atom_distance_scale", 1.0)  # 距离衰减尺度
-            print(f"Loss weighting enabled: atom_distance={self.atom_distance_weight}")
         else:
             # Standard MSE loss for non-weighted mode
             self.criterion = nn.MSELoss()
@@ -207,17 +205,14 @@ class NeuralFieldLightningModule(pl.LightningModule):
             
             # Convert distance to weight: closer atoms = higher weight
             # Use exponential decay: weight = exp(-distance / scale)
-            atom_distance_weights = torch.exp(-min_distances / self.atom_distance_scale)
-            
-            # Apply weight scaling
-            combined_weights = self.atom_distance_weight * atom_distance_weights
+            weights = torch.exp(-min_distances / self.atom_distance_scale)
             
             # Normalize weights to have mean=1 (preserve overall loss scale)
-            weight_mean = combined_weights.mean()
+            weight_mean = weights.mean()
             if weight_mean > 0:
-                combined_weights = combined_weights / weight_mean
+                weights = weights / weight_mean
             
-            weights[b] = combined_weights
+            weights[b] = weights
         
         return weights
     

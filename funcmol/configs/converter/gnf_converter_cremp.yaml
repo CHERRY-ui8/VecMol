@@ -21,7 +21,6 @@ inverse_square_strength: 1.0 # 距离平方反比方法的强度参数
 gradient_clip_threshold: 0.3 # 梯度模长截断阈值
 # 梯度采样相关参数
 gradient_sampling_candidate_multiplier: 10  # 梯度采样候选点倍数
-gradient_sampling_temperature: 0.1  # 梯度采样温度参数
 
 # 不同方法的参数配置
 method_configs:

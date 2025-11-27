@@ -32,8 +32,9 @@ class GNFConverter(nn.Module):
                 gradient_clip_threshold: float = 0.3,  # 梯度模长截断阈值
                 sig_sf: float = 0.1,  # softmax field的sigma参数
                 sig_mag: float = 0.45,  # magnitude的sigma参数
-                gradient_sampling_candidate_multiplier: int = 10,  # 梯度采样候选点倍数
-                gradient_sampling_temperature: float = 0.1,  # 梯度采样温度参数
+                gradient_sampling_candidate_multiplier: int = 3,  # 梯度采样候选点倍数
+                field_variance_k_neighbors: int = 10,  # 计算field方差时使用的最近邻数量
+                field_variance_weight: float = 1.0,  # field方差在采样概率中的权重（作为softmax温度参数）
                 n_atom_types: int = 5,  # 原子类型数量，默认为5以保持向后兼容
                 enable_early_stopping: bool = True,  # 是否启用早停机制
                 convergence_threshold: float = 1e-6,  # 收敛阈值（梯度模长变化）
@@ -55,7 +56,8 @@ class GNFConverter(nn.Module):
         self.sig_sf = sig_sf  # 保存softmax field的sigma参数
         self.sig_mag = sig_mag  # 保存magnitude的sigma参数
         self.gradient_sampling_candidate_multiplier = gradient_sampling_candidate_multiplier  # 保存梯度采样候选点倍数
-        self.gradient_sampling_temperature = gradient_sampling_temperature  # 保存梯度采样温度参数
+        self.field_variance_k_neighbors = field_variance_k_neighbors  # 计算field方差时使用的最近邻数量
+        self.field_variance_weight = field_variance_weight  # field方差在采样概率中的权重（作为softmax温度参数）
         self.n_atom_types = n_atom_types  # 保存原子类型数量
         self.enable_early_stopping = enable_early_stopping  # 是否启用早停机制
         self.convergence_threshold = convergence_threshold  # 收敛阈值
@@ -299,10 +301,95 @@ class GNFConverter(nn.Module):
         
         return vector_field
 
+    def _compute_field_variance(self, points: torch.Tensor, field_values: torch.Tensor, 
+                               k_neighbors: int, per_type_independent: bool = True) -> torch.Tensor:
+        """
+        计算每个点周围field的变化率（使用方差作为变化率）。
+        
+        Args:
+            points: 点坐标 [n_points, 3]
+            field_values: field值 [n_points, n_atom_types, 3] 或 [n_points, 3]
+            k_neighbors: 用于计算方差的最近邻数量
+            per_type_independent: 如果为True，每个原子类型独立计算方差（基于该类型的field值找最近邻）
+                                 如果为False，使用空间距离找最近邻（旧的行为）
+            
+        Returns:
+            variances: 每个点的field方差 
+                - 如果field_values是3D: [n_points, n_atom_types] (为每个原子类型分别计算)
+                - 如果field_values是2D: [n_points] (单一field的方差)
+        """
+        n_points = points.size(0)
+        device = points.device
+        
+        # 如果field_values是3D的（包含原子类型维度），需要为每个原子类型分别计算
+        if field_values.dim() == 3:
+            # field_values: [n_points, n_atom_types, 3]
+            n_atom_types = field_values.size(1)
+            variances = torch.zeros(n_points, n_atom_types, device=device)
+            
+            if per_type_independent:
+                # 每个原子类型独立处理：基于该类型的field向量找最近邻
+                for t in range(n_atom_types):
+                    field_t = field_values[:, t, :]  # [n_points, 3]
+                    
+                    # 基于该类型的field向量计算距离矩阵（用于找最近邻）
+                    # 使用field向量的欧氏距离作为距离度量
+                    field_dist_matrix = torch.cdist(field_t, field_t)  # [n_points, n_points]
+                    
+                    # 找到每个点的k个最近邻（基于field向量距离，排除自身）
+                    _, k_nearest_indices = torch.topk(field_dist_matrix, k=k_neighbors + 1, dim=1, largest=False)  # [n_points, k+1]
+                    k_nearest_indices = k_nearest_indices[:, 1:]  # 排除自身 [n_points, k]
+                    
+                    # 计算field的模长
+                    field_magnitudes = torch.norm(field_t, dim=1)  # [n_points]
+                    
+                    # 对每个点，计算其k个最近邻的field模长
+                    neighbor_magnitudes = field_magnitudes[k_nearest_indices]  # [n_points, k]
+                    
+                    # 计算方差
+                    mean_magnitudes = torch.mean(neighbor_magnitudes, dim=1)  # [n_points]
+                    variances[:, t] = torch.mean((neighbor_magnitudes - mean_magnitudes.unsqueeze(1)) ** 2, dim=1)  # [n_points]
+            else:
+                # 旧的行为：使用空间距离找最近邻
+                # 计算点之间的距离矩阵
+                dist_matrix = torch.cdist(points, points)  # [n_points, n_points]
+                
+                # 找到每个点的k个最近邻（排除自身）
+                _, k_nearest_indices = torch.topk(dist_matrix, k=k_neighbors + 1, dim=1, largest=False)  # [n_points, k+1]
+                k_nearest_indices = k_nearest_indices[:, 1:]  # 排除自身 [n_points, k]
+                
+                for t in range(n_atom_types):
+                    field_t = field_values[:, t, :]  # [n_points, 3]
+                    # 计算field的模长
+                    field_magnitudes = torch.norm(field_t, dim=1)  # [n_points]
+                    
+                    # 对每个点，计算其k个最近邻的field模长
+                    neighbor_magnitudes = field_magnitudes[k_nearest_indices]  # [n_points, k]
+                    
+                    # 计算方差
+                    mean_magnitudes = torch.mean(neighbor_magnitudes, dim=1)  # [n_points]
+                    variances[:, t] = torch.mean((neighbor_magnitudes - mean_magnitudes.unsqueeze(1)) ** 2, dim=1)  # [n_points]
+            
+            # 返回每个原子类型的方差 [n_points, n_atom_types]，不再求平均
+            return variances
+        else:
+            # field_values: [n_points, 3]
+            # 对于2D情况，使用空间距离
+            dist_matrix = torch.cdist(points, points)  # [n_points, n_points]
+            _, k_nearest_indices = torch.topk(dist_matrix, k=k_neighbors + 1, dim=1, largest=False)  # [n_points, k+1]
+            k_nearest_indices = k_nearest_indices[:, 1:]  # 排除自身 [n_points, k]
+            
+            field_magnitudes = torch.norm(field_values, dim=1)  # [n_points]
+            neighbor_magnitudes = field_magnitudes[k_nearest_indices]  # [n_points, k]
+            mean_magnitudes = torch.mean(neighbor_magnitudes, dim=1)  # [n_points]
+            variances = torch.mean((neighbor_magnitudes - mean_magnitudes.unsqueeze(1)) ** 2, dim=1)  # [n_points]
+            return variances
+
     def _process_atom_types_matrix(self, current_codes: torch.Tensor, n_atom_types: int, 
                                  device: torch.device, 
                                  decoder: nn.Module,
-                                 iteration_callback: Optional[callable] = None) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+                                 iteration_callback: Optional[callable] = None,
+                                 element_existence: Optional[torch.Tensor] = None) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
         """
         完全矩阵化处理所有原子类型，避免所有循环。
         使用图结构思想：构建同种原子内部连边的图，一次性处理所有原子类型。
@@ -313,12 +400,31 @@ class GNFConverter(nn.Module):
             device: 设备
             decoder: 解码器模型
             iteration_callback: 可选的回调函数
+            element_existence: 可选的元素存在性向量 [n_atom_types]，如果提供，只处理存在的元素类型
             
         Returns:
             (coords_list, types_list): 坐标和类型列表
         """
-        # 获取每个原子类型的 query_points 数
-        query_points_per_type = [self.n_query_points_per_type.get(t, self.n_query_points) for t in range(n_atom_types)]
+        # 如果提供了element_existence，只处理存在的元素类型
+        if element_existence is not None:
+            # element_existence: [n_atom_types] 或 [1, n_atom_types]
+            if element_existence.dim() == 2:
+                element_existence = element_existence.squeeze(0)  # [n_atom_types]
+            
+            # 将概率转换为二进制（阈值0.5）
+            element_mask = (element_existence > 0.5).float()
+            # 获取存在的元素类型索引
+            existing_types = torch.nonzero(element_mask, as_tuple=False).squeeze(-1).tolist()
+            
+            if len(existing_types) == 0:
+                # 如果没有元素存在，返回空列表
+                return [], []
+        else:
+            # 如果没有提供element_existence，处理所有类型
+            existing_types = list(range(n_atom_types))
+        
+        # 获取每个原子类型的 query_points 数（只考虑存在的类型）
+        query_points_per_type = [self.n_query_points_per_type.get(t, self.n_query_points) for t in existing_types]
         max_query_points = max(query_points_per_type) if query_points_per_type else self.n_query_points
         
         # 1. 初始化采样点 - 为所有原子类型一次性采样
@@ -338,8 +444,13 @@ class GNFConverter(nn.Module):
             raise e
         
         # 2. 完全矩阵化采样 - 一次性处理所有原子类型
-        # 计算所有原子类型的梯度场强度 [n_candidates, n_atom_types]
-        grad_magnitudes = torch.norm(candidate_field[0], dim=-1)  # [n_candidates, n_atom_types]
+        # 计算每个候选点的field方差（为每个原子类型分别计算），基于方差采样
+        # per_type_independent=True: 每个原子类型独立计算方差（基于该类型的field值找最近邻）
+        field_variances_per_type = self._compute_field_variance(
+            candidate_points, candidate_field[0], 
+            self.field_variance_k_neighbors, 
+            per_type_independent=True
+        )  # [n_candidates, n_atom_types] 或 [n_candidates]
         
         # 为每个原子类型采样点 - 矩阵化操作
         all_sampled_points = []
@@ -354,15 +465,36 @@ class GNFConverter(nn.Module):
         type_start_indices = []
         current_start_idx = 0
         
-        for t in range(n_atom_types):
+        # 只处理存在的元素类型
+        for type_idx, t in enumerate(existing_types):
             n_query_points_t = query_points_per_type[t]  # 当前原子类型的 query_points 数
-            candidate_grad = candidate_field[0, :, t, :]  # [n_candidates, 3]
             
-            # 计算梯度场强度（模长）
-            grad_magnitudes = torch.norm(candidate_grad, dim=1)  # [n_candidates]
+            # 获取当前原子类型的field方差
+            if field_variances_per_type.dim() == 2:
+                # [n_candidates, n_atom_types] - 为每个原子类型分别计算了方差
+                field_variances = field_variances_per_type[:, t]  # [n_candidates]
+            else:
+                # [n_candidates] - 单一field的方差（向后兼容）
+                field_variances = field_variances_per_type  # [n_candidates]
             
-            # 根据梯度场强度进行加权采样
-            probabilities = torch.softmax(grad_magnitudes / self.gradient_sampling_temperature, dim=0)
+            # ===== 仅根据field变化率（方差）进行采样，完全忽略梯度场强度（模长） =====
+            # 归一化方差（避免数值不稳定）
+            variance_min = field_variances.min()
+            variance_max = field_variances.max()
+            
+            if variance_max > variance_min:
+                # 方差越大，采样概率越高（field变化率大的地方采样密度高）
+                # 归一化到[0, 1]区间
+                normalized_variances = (field_variances - variance_min) / (variance_max - variance_min + 1e-8)
+            else:
+                # 如果所有方差相同或为0，归一化后所有值都是0
+                # 经过softmax后，所有值相等，得到均匀分布
+                normalized_variances = torch.zeros_like(field_variances)
+                        
+            # field_variance_weight作为温度参数，控制采样分布的尖锐程度
+            # 值越小，分布越尖锐（更倾向于选择方差大的点）
+            # 值越大，分布越平缓（更接近均匀分布）
+            probabilities = torch.softmax(normalized_variances / (self.field_variance_weight + 1e-8), dim=0)
             
             # 从候选点中采样 n_query_points_t 个点
             # 如果候选点数量少于需要的点数，使用 replacement=True
@@ -389,10 +521,10 @@ class GNFConverter(nn.Module):
                 iteration_callback=iteration_callback
             )
             
-            # 按原子类型分离结果并进行聚类
-            for t in range(n_atom_types):
-                start_idx = type_start_indices[t]
-                end_idx = start_idx + query_points_per_type[t]
+            # 按原子类型分离结果并进行聚类（只处理存在的类型）
+            for type_idx, t in enumerate(existing_types):
+                start_idx = type_start_indices[type_idx]
+                end_idx = start_idx + query_points_per_type[type_idx]
                 type_points = final_points[start_idx:end_idx]  # [n_query_points_t, 3]
                 
                 # 聚类/合并
@@ -425,7 +557,7 @@ class GNFConverter(nn.Module):
         z = points.clone()
         prev_grad_norm = None
         
-        for iter_idx in range(self.n_iter):
+        for iter_idx in range(self.n_iter):  # tqdm
             z_batch = z.unsqueeze(0)  # [1, n_total_points, 3]
             
             try:                
@@ -484,7 +616,8 @@ class GNFConverter(nn.Module):
     def gnf2mol(self, decoder: nn.Module, codes: torch.Tensor,
                 _atom_types: Optional[torch.Tensor] = None,
                 save_interval: Optional[int] = None,
-                visualization_callback: Optional[callable] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+                visualization_callback: Optional[callable] = None,
+                predictor: Optional[nn.Module] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         直接用梯度场重建分子坐标。
         Args:
@@ -494,6 +627,7 @@ class GNFConverter(nn.Module):
             save_interval: 可选的保存间隔，用于可视化。如果提供，会在每 save_interval 步调用 visualization_callback
             visualization_callback: 可选的可视化回调函数，参数为 (iteration_idx, all_points_dict, batch_idx)
                                    其中 all_points_dict 是一个字典，键为原子类型索引，值为该类型的所有点 [n_points, 3]
+            predictor: 可选的元素存在性预测器，如果提供，将用于过滤不存在的元素类型
         Returns:
             (final_coords, final_types)
         """
@@ -518,6 +652,12 @@ class GNFConverter(nn.Module):
             if torch.isnan(current_codes).any() or torch.isinf(current_codes).any():
                 continue
             
+            # 如果提供了predictor，预测元素存在性
+            element_existence = None
+            if predictor is not None:
+                with torch.no_grad():
+                    element_existence = predictor(current_codes)  # [1, n_atom_types]
+            
             # 如果提供了可视化回调，创建一个迭代回调函数
             iteration_callback = None
             if save_interval is not None and visualization_callback is not None:
@@ -538,10 +678,11 @@ class GNFConverter(nn.Module):
                 
                 iteration_callback = create_iteration_callback(b, n_atom_types, save_interval, self.n_iter)
             
-            # 矩阵化处理所有原子类型（不再需要传递 n_query_points，方法内部会使用 self.n_query_points_per_type）
+            # 矩阵化处理所有原子类型（传入element_existence以过滤不存在的元素）
             coords_list, types_list = self._process_atom_types_matrix(
                 current_codes, n_atom_types, device=device, decoder=decoder,
-                iteration_callback=iteration_callback
+                iteration_callback=iteration_callback,
+                element_existence=element_existence
             )
             
             # 合并所有类型

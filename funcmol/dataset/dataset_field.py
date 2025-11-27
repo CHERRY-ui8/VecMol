@@ -632,9 +632,11 @@ def create_gnf_converter(config: dict) -> GNFConverter:
     inverse_square_strength = gnf_config["inverse_square_strength"]
     gradient_clip_threshold = gnf_config["gradient_clip_threshold"]
     sigma_ratios = gnf_config["sigma_ratios"]
-    # 训练版专有的两个梯度采样参数，这里一并纳入，便于统一
+    # 训练版专有的梯度采样参数
     gradient_sampling_candidate_multiplier = gnf_config["gradient_sampling_candidate_multiplier"]
-    gradient_sampling_temperature = gnf_config["gradient_sampling_temperature"]
+    # field变化率采样参数
+    field_variance_k_neighbors = gnf_config["field_variance_k_neighbors"]
+    field_variance_weight = gnf_config["field_variance_weight"]
     
     # 早停相关参数（可选，默认关闭早停）
     enable_early_stopping = gnf_config.get("enable_early_stopping", False)
@@ -674,7 +676,8 @@ def create_gnf_converter(config: dict) -> GNFConverter:
         sig_sf=sig_sf,
         sig_mag=sig_mag,
         gradient_sampling_candidate_multiplier=gradient_sampling_candidate_multiplier,
-        gradient_sampling_temperature=gradient_sampling_temperature,
+        field_variance_k_neighbors=field_variance_k_neighbors,  # 添加field方差k最近邻参数
+        field_variance_weight=field_variance_weight,  # 添加field方差权重参数
         n_atom_types=n_atom_types,  # 添加原子类型数量参数
         enable_early_stopping=enable_early_stopping,
         convergence_threshold=convergence_threshold,

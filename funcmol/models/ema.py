@@ -26,7 +26,9 @@ class ModelEma(nn.Module):
         self.module = deepcopy(model)
         self.module.eval()
         self.decay = decay
-        self.to(model.device)
+        # Get device from model parameters (PyTorch models don't have a .device attribute)
+        device = next(model.parameters()).device if list(model.parameters()) else torch.device('cpu')
+        self.to(device)
 
     def _update(self, model, update_fn):
         with torch.no_grad():

@@ -1,0 +1,59 @@
+defaults:
+  - dset: qm9
+  - converter: gnf_converter_qm9
+  - encoder: gnn
+  - decoder: decoder_global
+  - override hydra/job_logging: custom
+  - _self_
+
+debug: False
+debug_one_mol: False
+debug_subset: False
+wandb: False
+seed: 1234
+exp_dir: ../exps/predictor
+exp_name: "predictor_${dset.dset_name}/${now:%Y%m%d}"
+dirname: "${exp_dir}/${exp_name}"
+reload_model_path: null
+
+# Neural field pretrained path (required for predictor training)
+# 需要提供训练好的neural field checkpoint路径
+nf_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/model-epoch=999.ckpt
+
+# data params
+normalize_codes: 1
+on_the_fly: True  # use True to compute codes on the fly from neural field
+codes_dir: null  # not used when on_the_fly=True
+
+# training params
+num_epochs: 100
+dset:
+  batch_size: 8
+  num_workers: 1
+
+ckpt_every_n_epochs: 10  # 每隔多少epoch保存一次ckpt
+decoder:
+  code_dim: 128 # 和encoder的code_dim一致
+
+# optim params
+lr: 1e-3
+use_lr_schedule: 0  # 暂时禁用学习率调度，使用固定学习率
+num_warmup_iter: 1000
+wd: 1e-6
+ema_decay: 0.999  # 启用EMA
+max_grad_norm: 0.5
+
+# Element predictor configuration
+predictor:
+  hidden_dim: 64  # 隐藏层维度（小参数量）
+  num_layers: 2  # 网络层数
+  ema_decay: null  # predictor的EMA衰减率，如果为null则使用上面的ema_decay
+
+# set the running dir
+hydra:
+  run:
+    dir: "${dirname}"
+  job:
+    chdir: false
+  output_subdir: null
+

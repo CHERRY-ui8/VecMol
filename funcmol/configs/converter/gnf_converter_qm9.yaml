@@ -16,19 +16,22 @@ temperature: 0.01 # 温度越高，分布越尖锐，越容易收敛（很可能
 logsumexp_eps: 1e-8  # logsumexp方法的数值稳定性参数
 inverse_square_strength: 1.0 # 距离平方反比方法的强度参数
 gradient_clip_threshold: 0.3 # 梯度模长截断阈值
-# 梯度采样相关参数
-gradient_sampling_candidate_multiplier: 3  # 从10减少到3，减少候选点数量，提高采样效率
-gradient_sampling_temperature: 0.1  # 梯度采样温度参数
+
+# 采样基于field变化率（方差）
+gradient_sampling_candidate_multiplier: 3  # 候选点数量 = max_query_points * 此倍数
+# field变化率采样参数
+field_variance_k_neighbors: 10     # 计算方差时使用的最近邻数量（k值越大，方差计算越平滑）
+field_variance_weight: 0.01         # softmax温度参数：值越小，分布越尖锐（更倾向方差大的点）；值越大，分布越平缓    
 
 # 每个原子类型的 query_points 数（optional）
 # 如果是None，则所有原子类型将使用统一的 n_query_points
 # 键为原子类型符号（C, H, O, N, F），值为对应的 query_points 数
 n_query_points_per_type:
-  C: 10000  # 碳原子的 query_points 数
-  H: 2000  # 氢原子的 query_points 数
-  O: 600  # 氧原子的 query_points 数
-  N: 400  # 氮原子的 query_points 数
-  F: 200  # 氟原子的 query_points 数
+  C: 6000  # 碳原子的 query_points 数
+  H: 1000  # 氢原子的 query_points 数
+  O: 200  # 氧原子的 query_points 数
+  N: 200  # 氮原子的 query_points 数
+  F: 100  # 氟原子的 query_points 数
 
 # 不同方法的参数配置
 method_configs:

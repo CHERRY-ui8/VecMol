@@ -143,7 +143,6 @@ def test_real_space_field_behavior():
             inverse_square_strength=CONFIG.inverse_square_strength,
             gradient_clip_threshold=CONFIG.gradient_clip_threshold,
             gradient_sampling_candidate_multiplier=CONFIG.gradient_sampling_candidate_multiplier,
-            gradient_sampling_temperature=CONFIG.gradient_sampling_temperature,
             n_atom_types=5
         )
         
@@ -301,7 +300,6 @@ def create_real_space_usage_example():
         inverse_square_strength=CONFIG.inverse_square_strength,
         gradient_clip_threshold=CONFIG.gradient_clip_threshold,
         gradient_sampling_candidate_multiplier=CONFIG.gradient_sampling_candidate_multiplier,
-        gradient_sampling_temperature=CONFIG.gradient_sampling_temperature,
         n_atom_types=5
     )
     
@@ -440,7 +438,6 @@ def compare_all_three_methods():
             inverse_square_strength=CONFIG.inverse_square_strength,
             gradient_clip_threshold=CONFIG.gradient_clip_threshold,
             gradient_sampling_candidate_multiplier=CONFIG.gradient_sampling_candidate_multiplier,
-            gradient_sampling_temperature=CONFIG.gradient_sampling_temperature,
             n_atom_types=5
         )
         
