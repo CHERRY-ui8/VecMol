@@ -25,7 +25,7 @@ ELEMENTS_HASH_INV = {
     10: 'B'
 }
 
-def analyze_qm9_atoms(data_dir="/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/funcmol/dataset/data/qm9"):
+def analyze_qm9_atoms(data_dir="/home/huayuchen/Neurl-voxel/funcmol/dataset/data/qm9"):
     """
     分析QM9数据集中所有分子的原子类型分布
     

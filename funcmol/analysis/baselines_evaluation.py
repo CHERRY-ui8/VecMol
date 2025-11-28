@@ -649,5 +649,5 @@ if __name__ == "__main__":
         open_babel_eval(file=None)
     else:
         # 默认评估FuncMol生成的分子
-        molecule_dir = "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20250912/molecule"
+        molecule_dir = "/home/huayuchen/Neurl-voxel/exps/funcmol/fm_qm9/20250912/molecule"
         evaluate_generated_molecules(molecule_dir)

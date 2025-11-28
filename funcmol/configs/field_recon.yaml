@@ -17,7 +17,7 @@ split: val  # 数据集分割：train/val/test，默认使用val数据集
 # 如果设置了此参数，将使用指定的索引列表，忽略max_samples参数
 # sample_indices: [2,7,74,83,108,158,186,375,404,433,35,90,145,146,155,231,233,234,241,245,269,270,271,288,292,363,366,373,452]
 # sample_indices: [35,90,145,146,155,231,233,234,241,245,269,270,271,288,292,363,366,373,452]  # 具体的索引列表，null表示不手动指定
-sample_indices: null
+sample_indices: [0]
 
 # Field模式设置
 field_mode: nf_field  # 'gt_field' 或 'nf_field'
@@ -26,8 +26,8 @@ field_mode: nf_field  # 'gt_field' 或 'nf_field'
 field_methods: ['tanh']  # 要比较的field方法，现在已经确定了使用tanh方法
 
 # 模型路径（仅在nf_field模式下需要）
-nf_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/model-epoch=999.ckpt
-# nf_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251120/lightning_logs/version_0/checkpoints/model-epoch=259.ckpt
+nf_pretrained_path: /home/huayuchen/Neurl-voxel/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/model-epoch=999.ckpt
+# nf_pretrained_path: /home/huayuchen/Neurl-voxel/exps/neural_field/nf_qm9/20251120/lightning_logs/version_0/checkpoints/model-epoch=259.ckpt
 # 注意：输出目录将基于此路径自动创建，如: exps/neural_field/nf_qm9_20250804_153549_358664
 
 # Hydra 设置

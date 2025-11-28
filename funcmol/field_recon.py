@@ -30,7 +30,7 @@ This script can be used for both field type evaluation (stage1) and neural field
 """
 
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "7"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import torch
 import random
 import pandas as pd
@@ -283,10 +283,28 @@ def main(config: DictConfig) -> None:
                         codes = encoder(batch)
                 
                 # 2.2 Reconstruct mol
-                recon_coords, recon_types = converter.gnf2mol(
-                    decoder,
-                    codes
-                )
+                # 从配置中读取保存参数
+                autoregressive_config = config_dict.get("converter", {}).get("autoregressive_clustering", {})
+                save_clustering_history = autoregressive_config.get("enable_clustering_history", False)
+                save_gradient_ascent_sdf = autoregressive_config.get("save_gradient_ascent_sdf", False)
+                
+                # 构建gnf2mol调用参数
+                gnf2mol_kwargs = {
+                    "decoder": decoder,
+                    "codes": codes
+                }
+                
+                # 只在启用时才添加保存相关参数
+                if save_clustering_history:
+                    gnf2mol_kwargs["save_clustering_history"] = True
+                    gnf2mol_kwargs["clustering_history_dir"] = str(output_dir / "clustering_history")
+                
+                if save_gradient_ascent_sdf:
+                    gnf2mol_kwargs["save_gradient_ascent_sdf"] = True
+                    gnf2mol_kwargs["gradient_ascent_sdf_dir"] = str(output_dir / "gradient_ascent_sdf")
+                    gnf2mol_kwargs["gradient_ascent_sdf_interval"] = autoregressive_config.get("gradient_ascent_sdf_interval", 100)
+                
+                recon_coords, recon_types = converter.gnf2mol(**gnf2mol_kwargs)
                 
                 # 2.3 Save mol (if use gt_field, save in /exps/gt_field; if use predicted_field, save in the nf path under /exps/neural_field)
                 # Note: Currently we only save results to CSV, not individual mol files

@@ -61,3 +61,21 @@ default_config: # softmax, logsumexp, inverse_square
   eps: 0.15
   min_samples: 20
 
+# 自回归聚类配置（可选）
+autoregressive_clustering:
+  enable: True  # 是否启用自回归聚类，默认False
+  max_clustering_iterations: 10  # 最大迭代轮数
+
+  initial_eps: 0.1  # 初始eps阈值，null表示使用默认eps
+  min_eps: 0.05  # eps下限
+  eps_decay_factor: 0.8  # 每轮eps衰减因子
+
+  initial_min_samples: 50  # 初始min_samples，null表示使用默认min_samples
+  min_samples_decay_factor: 0.7  # 每轮min_samples衰减因子
+  min_min_samples: 10  # min_samples下限
+
+  bond_length_tolerance: 0.4  # 键长合理性检查的容差（单位：Å），在标准键长基础上增加的容差
+  enable_clustering_history: True  # 是否记录聚类历史，默认False
+  save_gradient_ascent_sdf: True  # 是否保存梯度上升过程SDF，默认False
+  gradient_ascent_sdf_interval: 100  # 梯度上升SDF保存间隔（每多少轮保存一次），默认100
+

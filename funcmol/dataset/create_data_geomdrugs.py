@@ -34,9 +34,21 @@ def download_data(raw_data_dir: str):
     Returns:
         None
     """
-    urllib.request.urlretrieve(RAW_URL_TRAIN, os.path.join(raw_data_dir, "train_data.pickle"))
-    urllib.request.urlretrieve(RAW_URL_VAL, os.path.join(raw_data_dir, "val_data.pickle"))
-    urllib.request.urlretrieve(RAW_URL_TEST, os.path.join(raw_data_dir, "test_data.pickle"))
+    urls = {
+        "train_data.pickle": RAW_URL_TRAIN,
+        "val_data.pickle": RAW_URL_VAL,
+        "test_data.pickle": RAW_URL_TEST,
+    }
+    
+    for filename, url in urls.items():
+        filepath = os.path.join(raw_data_dir, filename)
+        try:
+            print(f"  >> Downloading {filename}...")
+            urllib.request.urlretrieve(url, filepath)
+            print(f"  >> Successfully downloaded {filename}")
+        except Exception as e:
+            print(f"  >> Warning: Failed to download {filename}: {e}")
+            raise RuntimeError(f"Failed to download required file {filename}. Please check your network connection or proxy settings.")
 
 
 def preprocess_geom_drugs_dataset(raw_data_dir: str, data_dir: str, split: str = "train"):
@@ -105,15 +117,33 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir", type=str, default="data/drugs/")
     args = parser.parse_args()
 
-    if not os.path.isdir(args.raw_data_dir):
-        os.makedirs(args.raw_data_dir, exist_ok=True)
-        download_data(args.raw_data_dir)
+    # Create raw data directory if it doesn't exist
+    os.makedirs(args.raw_data_dir, exist_ok=True)
+    
+    # Check if required pickle files exist, download if missing
+    required_files = ["train_data.pickle", "val_data.pickle", "test_data.pickle"]
+    missing_files = [f for f in required_files if not os.path.exists(os.path.join(args.raw_data_dir, f))]
+    
+    if missing_files:
+        print(f">> Missing files: {missing_files}")
+        print(">> Downloading missing files...")
+        try:
+            download_data(args.raw_data_dir)
+        except Exception as e:
+            print(f">> Error: {e}")
+            print(">> Please check your network connection, proxy settings, or download files manually.")
+            raise
 
     os.makedirs(args.data_dir, exist_ok=True)
 
     data, data_small = {}, {}
     for split in ["train", "val", "test"]:
         print(f">> preprocessing {split}...")
+        
+        # Check if pickle file exists before preprocessing
+        pickle_path = os.path.join(args.raw_data_dir, f"{split}_data.pickle")
+        if not os.path.exists(pickle_path):
+            raise FileNotFoundError(f"Required file {pickle_path} not found. Please download it first.")
 
         dset, dset_small = preprocess_geom_drugs_dataset(args.raw_data_dir, args.data_dir, split)
         torch.save(dset, os.path.join(args.data_dir, f"{split}_data.pth"),)

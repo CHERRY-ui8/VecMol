@@ -10,7 +10,7 @@ import sys
 import os
 
 # 添加项目路径
-sys.path.append('/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield')
+sys.path.append('/home/huayuchen/Neurl-voxel')
 
 from funcmol.utils.utils_fm import add_noise_to_code
 from funcmol.utils.utils_nf import normalize_code
@@ -26,7 +26,7 @@ def analyze_smooth_sigma_appropriateness():
     print(f"使用设备: {device}")
     
     # 1. 加载真实的codes
-    codes_path = "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20250911/lightning_logs/version_1/checkpoints/codes/train/codes.pt"
+    codes_path = "/home/huayuchen/Neurl-voxel/exps/neural_field/nf_qm9/20250911/lightning_logs/version_1/checkpoints/codes/train/codes.pt"
     
     print(f"\n=== 加载真实Codes ===")
     try:
@@ -221,7 +221,7 @@ def create_sigma_analysis_plot(results, current_sigma, current_noise_ratio, curr
     axes[1, 1].grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig('/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/smooth_sigma_analysis.png', dpi=300, bbox_inches='tight')
+    plt.savefig('/home/huayuchen/Neurl-voxel/smooth_sigma_analysis.png', dpi=300, bbox_inches='tight')
     print("\n可视化图表已保存到: smooth_sigma_analysis.png")
     plt.close()
 

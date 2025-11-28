@@ -4,7 +4,7 @@ import sys
 import os
 from pathlib import Path
 
-sys.path.append('/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield')
+sys.path.append('/home/huayuchen/Neurl-voxel')
 
 import hydra
 from funcmol.utils.utils_fm import add_noise_to_code
@@ -32,7 +32,7 @@ def load_codes(mode: str, codes_path: str = None):
         # 加载预计算的真实codes
         print(f"\n=== 加载预计算的Codes ===")
         if codes_path is None:
-            codes_path = "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20250911/lightning_logs/version_1/checkpoints/codes/train/codes.pt"
+            codes_path = "/home/huayuchen/Neurl-voxel/exps/neural_field/nf_qm9/20250911/lightning_logs/version_1/checkpoints/codes/train/codes.pt"
         
         if not os.path.exists(codes_path):
             print(f"错误: codes文件不存在: {codes_path}")
@@ -293,7 +293,7 @@ def diagnose_real_codes(raw_codes, normalized_codes=None, output_prefix=None, n_
             float(stats_raw['exceed_3sigma'][c]), float(stats_raw['bc'][c])
         ])
     csv_name = 'codes_channel_stats.csv' if output_prefix is None else f'{output_prefix}_codes_channel_stats.csv'
-    csv_path = f'/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/{csv_name}'
+    csv_path = f'/home/huayuchen/Neurl-voxel/{csv_name}'
     try:
         with open(csv_path, 'w') as f:
             f.write(','.join(header) + '\n')
@@ -364,7 +364,7 @@ def diagnose_real_codes(raw_codes, normalized_codes=None, output_prefix=None, n_
 
     # 保存
     diag_name = 'codes_diagnose.png' if output_prefix is None else f'{output_prefix}_codes_diagnose.png'
-    path_plot = f'/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/{diag_name}'
+    path_plot = f'/home/huayuchen/Neurl-voxel/{diag_name}'
     plt.savefig(path_plot, dpi=300, bbox_inches='tight')
     print(f"诊断图已保存到: {diag_name}")
 
@@ -429,7 +429,7 @@ def diagnose_voxel_codes(raw_codes, grid_size, output_prefix=None, reduce_method
     ii, jj, kk = np.meshgrid(np.arange(gs), np.arange(gs), np.arange(gs), indexing='ij')
     flat = {k: v.reshape(-1) for k, v in stats.items()}
     csv_name = 'voxel_stats.csv' if output_prefix is None else f'{output_prefix}_voxel_stats.csv'
-    csv_path = f'/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/{csv_name}'
+    csv_path = f'/home/huayuchen/Neurl-voxel/{csv_name}'
     try:
         with open(csv_path, 'w') as f:
             f.write('index,i,j,k,mean,std,skew,kurtosis,exceed_3sigma,bc\n')
@@ -454,7 +454,7 @@ def diagnose_voxel_codes(raw_codes, grid_size, output_prefix=None, reduce_method
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     plt.tight_layout()
     name_proj = 'voxel_stats_projection.png' if output_prefix is None else f'{output_prefix}_voxel_stats_projection.png'
-    path_proj = f'/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/{name_proj}'
+    path_proj = f'/home/huayuchen/Neurl-voxel/{name_proj}'
     plt.savefig(path_proj, dpi=300, bbox_inches='tight')
     print(f"体素统计投影图已保存到: {name_proj}")
 
@@ -481,7 +481,7 @@ def diagnose_voxel_codes(raw_codes, grid_size, output_prefix=None, reduce_method
         axes2[r, c].axis('off')
     plt.tight_layout()
     name_hist = 'voxel_topk_hist.png' if output_prefix is None else f'{output_prefix}_voxel_topk_hist.png'
-    path_hist = f'/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/{name_hist}'
+    path_hist = f'/home/huayuchen/Neurl-voxel/{name_hist}'
     plt.savefig(path_hist, dpi=300, bbox_inches='tight')
     print(f"体素Top-BC直方图已保存到: {name_hist}")
 
@@ -696,7 +696,7 @@ def create_visualization(raw_codes, normalized_codes, smooth_codes, smooth_sigma
             axes[1].set_title('No Comparison Available')
     
     plt.tight_layout()
-    output_path = f'/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/{output_file}'
+    output_path = f'/home/huayuchen/Neurl-voxel/{output_file}'
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"\n可视化图表已保存到: {output_file}")
     plt.close()

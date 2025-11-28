@@ -8,7 +8,7 @@ import sys
 import os
 
 # 添加项目路径
-sys.path.append('/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield')
+sys.path.append('/home/huayuchen/Neurl-voxel')
 
 def check_codes_info():
     """查看codes文件的详细信息"""
@@ -16,7 +16,7 @@ def check_codes_info():
     device = torch.device("cpu")  # 使用CPU避免内存问题
     print(f"使用设备: {device}")
     
-    codes_path = "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20250911/lightning_logs/version_1/checkpoints/codes/train/codes.pt"
+    codes_path = "/home/huayuchen/Neurl-voxel/exps/neural_field/nf_qm9/20250911/lightning_logs/version_1/checkpoints/codes/train/codes.pt"
     
     print(f"\n=== Codes文件信息 ===")
     print(f"文件路径: {codes_path}")

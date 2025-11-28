@@ -101,8 +101,18 @@ def preprocess_QM9_dataset(data_dir: str, split: str = "train"):
     """
     target_df = pd.read_csv(os.path.join(data_dir, f"{split}.csv"), index_col=0)
 
-    with open(os.path.join(data_dir, "uncharacterized.txt"), "r") as f:
-        skip = [int(x.split()[0]) - 1 for x in f.read().split("\n")[9:-2]]
+    # Handle uncharacterized.txt file (may be empty if download failed)
+    uncharacterized_path = os.path.join(data_dir, "uncharacterized.txt")
+    skip = []
+    if os.path.exists(uncharacterized_path) and os.path.getsize(uncharacterized_path) > 0:
+        try:
+            with open(uncharacterized_path, "r") as f:
+                content = f.read()
+                if content.strip():  # Check if file is not empty
+                    skip = [int(x.split()[0]) - 1 for x in content.split("\n")[9:-2]]
+        except Exception as e:
+            print(f"  >> Warning: Error reading uncharacterized.txt: {e}, continuing without skip list")
+            skip = []
 
     sdf_file_path = os.path.join(data_dir, "gdb9.sdf")
     suppl = Chem.SDMolSupplier(sdf_file_path, removeHs=False, sanitize=False)
@@ -141,10 +151,37 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir", type=str, default="data/qm9/")
     args = parser.parse_args()
 
+    # Check if data directory exists, if not download data
     if not os.path.isdir(args.data_dir):
         os.makedirs(args.data_dir, exist_ok=True)
         download_data(args.data_dir)
         split_data(args.data_dir)
+    else:
+        # Check if required files exist, download/split if missing
+        required_files = ["gdb9.sdf", "gdb9.sdf.csv", "uncharacterized.txt", "train.csv", "val.csv", "test.csv"]
+        missing_files = [f for f in required_files if not os.path.exists(os.path.join(args.data_dir, f))]
+        
+        if missing_files:
+            print(f">> Missing files: {missing_files}")
+            
+            # Split data if CSV files are missing (this doesn't require uncharacterized.txt)
+            if any(f in missing_files for f in ["train.csv", "val.csv", "test.csv"]):
+                print(">> Splitting dataset...")
+                split_data(args.data_dir)
+            
+            # Download uncharacterized.txt if missing (try with error handling)
+            if "uncharacterized.txt" in missing_files:
+                print(">> Downloading uncharacterized.txt...")
+                path_data_3195404 = os.path.join(args.data_dir, "uncharacterized.txt")
+                try:
+                    urllib.request.urlretrieve(RAW_URL2, path_data_3195404)
+                    print(">> Successfully downloaded uncharacterized.txt")
+                except Exception as e:
+                    print(f">> Warning: Failed to download uncharacterized.txt: {e}")
+                    print(">> Creating empty uncharacterized.txt file (may affect preprocessing)")
+                    # Create an empty file as fallback
+                    with open(path_data_3195404, "w") as f:
+                        f.write("")
 
     data, data_small = {}, {}
     for split in ["train", "val", "test"]:

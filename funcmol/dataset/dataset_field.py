@@ -639,9 +639,9 @@ def create_gnf_converter(config: dict) -> GNFConverter:
     field_variance_weight = gnf_config["field_variance_weight"]
     
     # 早停相关参数（可选，默认关闭早停）
-    enable_early_stopping = gnf_config.get("enable_early_stopping", False)
-    convergence_threshold = gnf_config.get("convergence_threshold", 1e-6)
-    min_iterations = gnf_config.get("min_iterations", 50)
+    enable_early_stopping = gnf_config["enable_early_stopping"]
+    convergence_threshold = gnf_config["convergence_threshold"]
+    min_iterations = gnf_config["min_iterations"]
     
     # 获取每个原子类型的 query_points 数（可选）
     # 如果配置中提供了 n_query_points_per_type，则使用它；否则为 None，将使用统一的 n_query_points
@@ -659,6 +659,19 @@ def create_gnf_converter(config: dict) -> GNFConverter:
         else:
             # 如果明确设置为 None/null，保持为 None
             n_query_points_per_type = None
+    
+    # 获取自回归聚类相关参数（可选）
+    autoregressive_config = gnf_config["autoregressive_clustering"]
+    enable_autoregressive_clustering = autoregressive_config["enable"]
+    initial_eps = autoregressive_config["initial_eps"]
+    initial_min_samples = autoregressive_config["initial_min_samples"]
+    eps_decay_factor = autoregressive_config["eps_decay_factor"]
+    min_samples_decay_factor = autoregressive_config["min_samples_decay_factor"]
+    min_eps = autoregressive_config["min_eps"]
+    min_min_samples = autoregressive_config["min_min_samples"]
+    max_clustering_iterations = autoregressive_config["max_clustering_iterations"]
+    bond_length_tolerance = autoregressive_config["bond_length_tolerance"]
+    enable_clustering_history = autoregressive_config["enable_clustering_history"]
     
     return GNFConverter(
         sigma=sigma,
@@ -682,7 +695,18 @@ def create_gnf_converter(config: dict) -> GNFConverter:
         enable_early_stopping=enable_early_stopping,
         convergence_threshold=convergence_threshold,
         min_iterations=min_iterations,
-        n_query_points_per_type=n_query_points_per_type  # 添加每个原子类型的 query_points 数
+        n_query_points_per_type=n_query_points_per_type,  # 添加每个原子类型的 query_points 数
+        # 自回归聚类参数
+        enable_autoregressive_clustering=enable_autoregressive_clustering,
+        initial_min_samples=initial_min_samples,
+        initial_eps=initial_eps,
+        eps_decay_factor=eps_decay_factor,
+        min_samples_decay_factor=min_samples_decay_factor,
+        min_eps=min_eps,
+        min_min_samples=min_min_samples,
+        max_clustering_iterations=max_clustering_iterations,
+        bond_length_tolerance=bond_length_tolerance,
+        enable_clustering_history=enable_clustering_history
     )
 
 
