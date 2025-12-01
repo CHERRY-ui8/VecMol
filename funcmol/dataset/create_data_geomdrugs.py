@@ -146,6 +146,14 @@ if __name__ == "__main__":
             raise FileNotFoundError(f"Required file {pickle_path} not found. Please download it first.")
 
         dset, dset_small = preprocess_geom_drugs_dataset(args.raw_data_dir, args.data_dir, split)
+        
+        # Delete SDF file before saving to free up disk space (no longer needed after processing)
+        sdf_path = os.path.join(args.data_dir, f"{split}.sdf")
+        if os.path.exists(sdf_path):
+            sdf_size = os.path.getsize(sdf_path) / (1024**3)  # Size in GB
+            os.remove(sdf_path)
+            print(f"  >> Deleted {split}.sdf ({sdf_size:.2f}GB) to free up disk space before saving")
+        
         torch.save(dset, os.path.join(args.data_dir, f"{split}_data.pth"),)
         torch.save(dset_small, os.path.join(args.data_dir, f"{split}_data_small.pth"),)
 

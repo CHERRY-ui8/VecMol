@@ -1,13 +1,14 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from typing import Optional, Tuple, List, Dict
+from typing import Optional, Tuple, List, Dict, Union
 from dataclasses import dataclass
 from pathlib import Path
 from sklearn.cluster import DBSCAN
 import torch.nn.functional as F
 from funcmol.utils.constants import PADDING_INDEX, BOND_LENGTHS_PM, DEFAULT_BOND_LENGTH_THRESHOLD, ELEMENTS_HASH_INV
 import gc
+import time
 
 
 @dataclass
@@ -67,14 +68,12 @@ class GNFConverter(nn.Module):
                 n_query_points_per_type: Optional[Dict[str, int]] = None,  # 每个原子类型的query_points数，如果为None则使用统一的n_query_points
                 enable_autoregressive_clustering: bool = False,  # 是否启用自回归聚类
                 initial_min_samples: Optional[int] = None,  # 初始min_samples（默认使用self.min_samples）
-                initial_eps: Optional[float] = None,  # 初始eps（默认使用self.eps）
-                eps_decay_factor: float = 0.8,  # 每轮eps衰减因子
                 min_samples_decay_factor: float = 0.7,  # 每轮min_samples衰减因子
-                min_eps: float = 0.1,  # eps下限
                 min_min_samples: int = 2,  # min_samples下限
                 max_clustering_iterations: int = 10,  # 最大迭代轮数
                 bond_length_tolerance: float = 0.4,  # 键长合理性检查的容差（单位：Å），在标准键长基础上增加的容差
-                enable_clustering_history: bool = False):  # 是否记录聚类历史
+                enable_clustering_history: bool = False,  # 是否记录聚类历史
+                debug_bond_validation: bool = False):  # 是否输出键长检查的调试信息
         super().__init__()
         self.sigma = sigma
         self.n_query_points = n_query_points
@@ -101,14 +100,12 @@ class GNFConverter(nn.Module):
         # 自回归聚类相关参数
         self.enable_autoregressive_clustering = enable_autoregressive_clustering
         self.initial_min_samples = initial_min_samples
-        self.initial_eps = initial_eps
-        self.eps_decay_factor = eps_decay_factor
         self.min_samples_decay_factor = min_samples_decay_factor
-        self.min_eps = min_eps
         self.min_min_samples = min_min_samples
         self.max_clustering_iterations = max_clustering_iterations
         self.bond_length_tolerance = bond_length_tolerance
         self.enable_clustering_history = enable_clustering_history
+        self.debug_bond_validation = debug_bond_validation
         
         # 为不同类型的原子设置不同的 sigma 参数
         # We model hydrogen explicitly and consider 5 chemical elements for QM9 (C, H, O, N, F), 
@@ -519,7 +516,7 @@ class GNFConverter(nn.Module):
         
         # 只处理存在的元素类型
         for type_idx, t in enumerate(existing_types):
-            n_query_points_t = query_points_per_type[t]  # 当前原子类型的 query_points 数
+            n_query_points_t = query_points_per_type[type_idx]  # 当前原子类型的 query_points 数
             
             # 获取当前原子类型的field方差
             if field_variances_per_type.dim() == 2:
@@ -699,7 +696,9 @@ class GNFConverter(nn.Module):
                 clustering_history_dir: Optional[str] = None,  # 保存目录
                 save_gradient_ascent_sdf: bool = False,  # 是否保存梯度上升SDF
                 gradient_ascent_sdf_dir: Optional[str] = None,  # 保存目录
-                gradient_ascent_sdf_interval: int = 100) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:  # 保存间隔
+                gradient_ascent_sdf_interval: int = 100,  # 保存间隔
+                sample_id: Optional[Union[int, str]] = None,  # 样本标识符，用于文件命名
+                enable_timing: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         直接用梯度场重建分子坐标。
         Args:
@@ -710,9 +709,12 @@ class GNFConverter(nn.Module):
             visualization_callback: 可选的可视化回调函数，参数为 (iteration_idx, all_points_dict, batch_idx)
                                    其中 all_points_dict 是一个字典，键为原子类型索引，值为该类型的所有点 [n_points, 3]
             predictor: 可选的元素存在性预测器，如果提供，将用于过滤不存在的元素类型
+            enable_timing: 如果为 True，将在控制台打印每个 batch 的主要阶段耗时以及总耗时（用于简单性能分析）
         Returns:
             (final_coords, final_types)
         """
+        t_global_start = time.perf_counter() if enable_timing else None
+
         device = codes.device
         batch_size = codes.size(0)
         n_atom_types = self.n_atom_types
@@ -721,6 +723,11 @@ class GNFConverter(nn.Module):
         all_types = []
         # 对每个batch分别处理
         for b in range(batch_size):
+            t_batch_start = time.perf_counter() if enable_timing else None
+
+            # 确定文件标识符：优先使用sample_id，否则使用batch索引
+            file_identifier = sample_id if sample_id is not None else b
+            
             # 检查索引边界
             if b >= codes.size(0):
                 break
@@ -767,59 +774,80 @@ class GNFConverter(nn.Module):
                 sdf_dir = Path(gradient_ascent_sdf_dir)
                 sdf_dir.mkdir(parents=True, exist_ok=True)
                 
-                def create_gradient_ascent_sdf_callback(batch_idx, n_atom_types, interval):
+                def create_gradient_ascent_sdf_callback(file_id, n_atom_types, interval):
                     def callback(iter_idx, current_points, atom_types):
                         # 只在指定间隔时保存
                         if iter_idx % interval == 0 or iter_idx == self.n_iter - 1:
-                            # 按原子类型分组
-                            for t in range(n_atom_types):
-                                type_mask = (atom_types == t)
-                                if not type_mask.any():
-                                    continue
+                            try:
+                                from funcmol.sample_fm import xyz_to_sdf
+                                elements = [ELEMENTS_HASH_INV.get(i, f"Type{i}") for i in range(n_atom_types)]
                                 
-                                type_points = current_points[type_mask].cpu().numpy()
+                                # 收集所有类型的query_points
+                                all_points = []
+                                all_types = []
+                                type_counts = {}
                                 
-                                # 直接保存所有query_points，不进行聚类
-                                if len(type_points) > 0:
-                                    try:
-                                        from funcmol.sample_fm import xyz_to_sdf
-                                        elements = [ELEMENTS_HASH_INV.get(i, f"Type{i}") for i in range(n_atom_types)]
-                                        atom_symbol = elements[t] if t < len(elements) else f"Type{t}"
-                                        
-                                        # 创建SDF字符串，保存所有query_points
-                                        query_types = np.full(len(type_points), t)
-                                        sdf_str = xyz_to_sdf(type_points, query_types, elements)
-                                        
-                                        # 构建标题，包含query_points数量信息
-                                        title = f"Gradient Ascent Iter {iter_idx}, Type {atom_symbol}, {len(type_points)} query_points"
-                                        
-                                        # 保存SDF文件
-                                        sdf_file = sdf_dir / f"batch_{batch_idx}_type_{atom_symbol}_iter_{iter_idx:04d}.sdf"
-                                        with open(sdf_file, 'w') as f:
-                                            f.write(title + "\n\n")
-                                            f.write(sdf_str)
-                                    except Exception as e:
-                                        print(f"Warning: Failed to save gradient ascent SDF: {e}")
+                                for t in range(n_atom_types):
+                                    type_mask = (atom_types == t)
+                                    if not type_mask.any():
+                                        continue
+                                    
+                                    type_points = current_points[type_mask].cpu().numpy()
+                                    all_points.append(type_points)
+                                    all_types.append(np.full(len(type_points), t))
+                                    
+                                    atom_symbol = elements[t] if t < len(elements) else f"Type{t}"
+                                    type_counts[atom_symbol] = len(type_points)
+                                
+                                # 合并所有类型的点
+                                if len(all_points) > 0:
+                                    combined_points = np.vstack(all_points)
+                                    combined_types = np.concatenate(all_types)
+                                    
+                                    # 创建SDF字符串，包含所有类型的query_points
+                                    sdf_str = xyz_to_sdf(combined_points, combined_types, elements)
+                                    
+                                    # SDF标题包含所有类型的信息
+                                    lines = sdf_str.split('\n')
+                                    type_info = ", ".join([f"{symbol}:{count}" for symbol, count in type_counts.items()])
+                                    title = f"Gradient Ascent Iter {iter_idx}, Total {len(combined_points)} query_points ({type_info})"
+                                    # SDF格式要求标题行必须是80字符，不足用空格填充
+                                    title = title[:80].ljust(80)
+                                    lines[0] = title
+                                    
+                                    # 保存SDF文件（所有类型合并到一个文件），使用有意义的标识符
+                                    if isinstance(file_id, int):
+                                        sdf_file = sdf_dir / f"sample_{file_id:04d}_iter_{iter_idx:04d}.sdf"
+                                    else:
+                                        sdf_file = sdf_dir / f"{file_id}_iter_{iter_idx:04d}.sdf"
+                                    with open(sdf_file, 'w') as f:
+                                        f.write('\n'.join(lines))
+                            except Exception as e:
+                                print(f"Warning: Failed to save gradient ascent SDF: {e}")
                     
                     return callback
                 
-                gradient_ascent_callback = create_gradient_ascent_sdf_callback(b, n_atom_types, gradient_ascent_sdf_interval)
+                gradient_ascent_callback = create_gradient_ascent_sdf_callback(file_identifier, n_atom_types, gradient_ascent_sdf_interval)
             
             # 矩阵化处理所有原子类型（传入element_existence以过滤不存在的元素）
+            t_process_start = time.perf_counter() if enable_timing else None
             coords_list, types_list, histories = self._process_atom_types_matrix(
                 current_codes, n_atom_types, device=device, decoder=decoder,
                 iteration_callback=iteration_callback,
                 element_existence=element_existence,
                 gradient_ascent_callback=gradient_ascent_callback
             )
+            t_process_end = time.perf_counter() if enable_timing else None
             
             # 保存聚类历史
+            t_history_start = time.perf_counter() if enable_timing else None
             if save_clustering_history and clustering_history_dir and histories:
                 self._save_clustering_history(
                     histories, 
                     clustering_history_dir,
-                    batch_idx=b
+                    batch_idx=file_identifier
                 )
+            t_history_end = time.perf_counter() if enable_timing else None
             
             # 合并所有类型
             if coords_list:
@@ -828,13 +856,27 @@ class GNFConverter(nn.Module):
             else:
                 all_coords.append(torch.empty(0, 3, device=device))
                 all_types.append(torch.empty(0, dtype=torch.long, device=device))
+
+            if enable_timing:
+                t_batch_end = time.perf_counter()
+                process_time = (t_process_end - t_process_start) if (t_process_start is not None and t_process_end is not None) else 0.0
+                history_time = (t_history_end - t_history_start) if (t_history_start is not None and t_history_end is not None) else 0.0
+                total_batch_time = t_batch_end - t_batch_start if t_batch_start is not None else process_time + history_time
+                print(
+                    f"[GNFConverter.gnf2mol] Batch {file_identifier} timing: "
+                    f"process={process_time:.3f}s, history_io={history_time:.3f}s, total={total_batch_time:.3f}s"
+                )
         
         # pad到batch最大长度
         max_atoms = max([c.size(0) for c in all_coords]) if all_coords else 0
         final_coords = torch.stack([F.pad(c, (0,0,0,max_atoms-c.size(0))) if c.size(0)<max_atoms else c for c in all_coords], dim=0)
         final_types = torch.stack([F.pad(t, (0,max_atoms-t.size(0)), value=-1) if t.size(0)<max_atoms else t for t in all_types], dim=0)
-        return final_coords, final_types # [batch, n_atoms, 3]
 
+        if enable_timing and t_global_start is not None:
+            t_global_end = time.perf_counter()
+            print(f"[GNFConverter.gnf2mol] Total time for all batches: {t_global_end - t_global_start:.3f}s")
+
+        return final_coords, final_types # [batch, n_atoms, 3]
 
 
     def _get_bond_length_threshold(self, atom1_type: int, atom2_type: int) -> float:
@@ -872,7 +914,8 @@ class GNFConverter(nn.Module):
         new_point: np.ndarray, 
         new_atom_type: int,
         reference_points: np.ndarray, 
-        reference_types: np.ndarray
+        reference_types: np.ndarray,
+        debug: bool = False
     ) -> bool:
         """
         检查新点与所有参考点的键长是否合理
@@ -882,6 +925,7 @@ class GNFConverter(nn.Module):
             new_atom_type: 新点原子类型
             reference_points: 参考点坐标 [M, 3]
             reference_types: 参考点原子类型 [M]
+            debug: 是否输出调试信息
             
         Returns:
             如果存在至少一个参考点使得键长在合理范围内，返回True；否则返回False
@@ -892,12 +936,37 @@ class GNFConverter(nn.Module):
         # 计算新点与所有参考点的距离
         distances = np.sqrt(((reference_points - new_point[None, :]) ** 2).sum(axis=1))
         
+        # 找到最近参考点的索引
+        min_distance_idx = np.argmin(distances)
+        min_distance = distances[min_distance_idx]
+        nearest_ref_type = reference_types[min_distance_idx]
+        nearest_ref_point = reference_points[min_distance_idx]
+        nearest_threshold = self._get_bond_length_threshold(new_atom_type, nearest_ref_type)
+        
         # 检查是否至少有一个参考点使得键长合理
         for i, (ref_point, ref_type) in enumerate(zip(reference_points, reference_types)):
             distance = distances[i]
             threshold = self._get_bond_length_threshold(new_atom_type, ref_type)
             if distance < threshold:
                 return True  # 找到至少一个合理的键长
+        
+        # 如果没有找到合理的键长，输出调试信息
+        if debug:
+            new_atom_symbol = ELEMENTS_HASH_INV.get(new_atom_type, f"Type{new_atom_type}")
+            nearest_ref_symbol = ELEMENTS_HASH_INV.get(nearest_ref_type, f"Type{nearest_ref_type}")
+            print(f"[键长检查失败] 新原子: {new_atom_symbol} {new_point}")
+            print(f"  最近参考原子: {nearest_ref_symbol} {nearest_ref_point}")
+            print(f"  距离: {min_distance:.4f} Å, 阈值: {nearest_threshold:.4f} Å")
+            print(f"  差值: {min_distance - nearest_threshold:.4f} Å (需要增加容差)")
+            
+            # 输出所有参考点的信息（最多5个最近的）
+            sorted_indices = np.argsort(distances)[:5]
+            print(f"  前5个最近参考点:")
+            for idx in sorted_indices:
+                ref_symbol = ELEMENTS_HASH_INV.get(reference_types[idx], f"Type{reference_types[idx]}")
+                dist = distances[idx]
+                thresh = self._get_bond_length_threshold(new_atom_type, reference_types[idx])
+                print(f"    {ref_symbol}: 距离={dist:.4f} Å, 阈值={thresh:.4f} Å, 差值={dist-thresh:.4f} Å")
         
         return False  # 没有找到合理的键长
     
@@ -952,7 +1021,7 @@ class GNFConverter(nn.Module):
             return np.array(merged), None
         
         # 自回归聚类逻辑
-        current_eps = self.initial_eps if self.initial_eps is not None else self.eps
+        # eps始终保持不变，使用默认的self.eps
         current_min_samples = self.initial_min_samples if self.initial_min_samples is not None else self.min_samples
         all_merged_points = []  # 累积已合并的点
         remaining_points = points.copy()  # 剩余未处理的点
@@ -966,8 +1035,8 @@ class GNFConverter(nn.Module):
             if len(remaining_points) == 0:
                 break
             
-            # 对remaining_points执行DBSCAN
-            clustering = DBSCAN(eps=current_eps, min_samples=current_min_samples).fit(remaining_points)
+            # 对remaining_points执行DBSCAN（eps始终保持不变）
+            clustering = DBSCAN(eps=self.eps, min_samples=current_min_samples).fit(remaining_points)
             labels = clustering.labels_  # -1表示噪声点
             
             # 收集所有簇
@@ -985,6 +1054,9 @@ class GNFConverter(nn.Module):
             n_clusters_found = len(clusters_info)
             n_noise_points = (labels == -1).sum()
             
+            # 收集所有需要从remaining_points中移除的簇标签（只移除通过键长检查的簇）
+            labels_to_remove = []
+            
             for label, cluster_points in clusters_info:
                 # 计算簇中心
                 center = np.mean(cluster_points, axis=0)
@@ -994,7 +1066,8 @@ class GNFConverter(nn.Module):
                 if reference_points is not None and len(reference_points) > 0:
                     bond_validation_passed = self._check_bond_length_validity(
                         center, atom_type if atom_type is not None else -1,
-                        reference_points, reference_types
+                        reference_points, reference_types,
+                        debug=self.debug_bond_validation  # 使用配置的调试模式
                     )
                 
                 if bond_validation_passed:
@@ -1004,17 +1077,24 @@ class GNFConverter(nn.Module):
                     if atom_type is not None:
                         new_atoms_types.append(atom_type)
                     all_merged_points.append(center)
-                    
                     # 从remaining_points中移除该簇的点
-                    mask = labels != label
-                    remaining_points = remaining_points[mask]
-                    labels = labels[mask]
+                    labels_to_remove.append(label)
+                else:
+                    # 键长检查失败，输出额外信息（如果启用调试）
+                    if self.debug_bond_validation:
+                        atom_symbol = ELEMENTS_HASH_INV.get(atom_type, f"Type{atom_type}") if atom_type is not None else "Unknown"
+                        print(f"[簇被拒绝] 原子类型: {atom_symbol}, 簇大小: {len(cluster_points)}, 簇中心: {center}")
+            
+            # 从remaining_points中移除所有通过键长检查的簇的点
+            if labels_to_remove:
+                mask = ~np.isin(labels, labels_to_remove)
+                remaining_points = remaining_points[mask]
             
             # 记录历史
             if record_history and history is not None:
                 record = ClusteringIterationRecord(
                     iteration=iteration,
-                    eps=current_eps,
+                    eps=self.eps,  # eps始终保持不变
                     min_samples=current_min_samples,
                     new_atoms_coords=np.array(new_atoms_coords) if len(new_atoms_coords) > 0 else np.empty((0, 3)),
                     new_atoms_types=np.array(new_atoms_types) if len(new_atoms_types) > 0 else np.empty((0,), dtype=np.int64),
@@ -1025,12 +1105,13 @@ class GNFConverter(nn.Module):
                 )
                 history.iterations.append(record)
             
-            # 更新参数
-            current_eps = max(current_eps * self.eps_decay_factor, self.min_eps)
+            # 更新参数（eps保持不变，只更新min_samples）
             current_min_samples = max(int(current_min_samples * self.min_samples_decay_factor), self.min_min_samples)
             
-            # 检查终止条件
+            # 检查终止条件：如果某一轮没有新的原子被聚类，就停止
             if len(new_merged_this_iteration) == 0:
+                if self.debug_bond_validation:
+                    print(f"[自回归聚类早停] 迭代轮数 {iteration}: 没有新原子被聚类，停止循环")
                 break
             
             iteration += 1
@@ -1104,7 +1185,7 @@ class GNFConverter(nn.Module):
         self,
         histories: List[ClusteringHistory],
         output_dir: str,
-        batch_idx: int = 0,
+        batch_idx: Union[int, str] = 0,
         elements: Optional[List[str]] = None
     ) -> None:
         """
@@ -1125,39 +1206,74 @@ class GNFConverter(nn.Module):
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
         
-        # 为每个原子类型保存
-        for history in histories:
-            atom_symbol = elements[history.atom_type] if history.atom_type < len(elements) else f"Type{history.atom_type}"
+        # 合并所有原子类型保存到一个文件
+        if len(histories) > 0:
+            # 1. 保存为SDF文件（所有类型合并），使用有意义的标识符
+            if isinstance(batch_idx, int):
+                sdf_path = output_path / f"sample_{batch_idx:04d}_clustering_history.sdf"
+                txt_path = output_path / f"sample_{batch_idx:04d}_clustering_history.txt"
+            else:
+                sdf_path = output_path / f"{batch_idx}_clustering_history.sdf"
+                txt_path = output_path / f"{batch_idx}_clustering_history.txt"
             
-            # 1. 保存为SDF文件（每轮一个分子）
-            sdf_path = output_path / f"batch_{batch_idx}_type_{atom_symbol}_clustering_history.sdf"
-            self._save_clustering_history_sdf(history, sdf_path, elements)
+            self._save_clustering_history_sdf(histories, sdf_path, elements)
             
-            # 2. 保存为文本文件（详细记录）
-            txt_path = output_path / f"batch_{batch_idx}_type_{atom_symbol}_clustering_history.txt"
-            self._save_clustering_history_txt(history, txt_path, elements)
+            # 2. 保存为文本文件（所有类型合并）
+            self._save_clustering_history_txt(histories, txt_path, elements)
     
     def _save_clustering_history_sdf(
         self,
-        history: ClusteringHistory,
+        histories: List[ClusteringHistory],
         output_path: Path,
         elements: List[str]
     ) -> None:
-        """保存聚类历史为SDF文件，每轮一个分子"""
+        """保存所有原子类型的聚类历史为SDF文件，每轮一个分子（所有类型合并）"""
         try:
             from funcmol.sample_fm import xyz_to_sdf
             
             sdf_strings = []
-            for record in history.iterations:
-                if len(record.new_atoms_coords) > 0:
-                    sdf_str = xyz_to_sdf(
-                        record.new_atoms_coords,
-                        record.new_atoms_types,
-                        elements
-                    )
-                    # 修改SDF标题，包含迭代信息
+            
+            # 找到所有迭代轮数的最大值
+            max_iterations = max(len(h.iterations) for h in histories) if histories else 0
+            
+            # 按迭代轮数组织数据
+            for iter_idx in range(max_iterations):
+                # 收集这一轮所有类型的新原子
+                all_coords_this_iter = []
+                all_types_this_iter = []
+                type_info = []
+                
+                for history in histories:
+                    if iter_idx < len(history.iterations):
+                        record = history.iterations[iter_idx]
+                        if len(record.new_atoms_coords) > 0:
+                            all_coords_this_iter.append(record.new_atoms_coords)
+                            all_types_this_iter.append(record.new_atoms_types)
+                            
+                            atom_symbol = elements[history.atom_type] if history.atom_type < len(elements) else f"Type{history.atom_type}"
+                            type_info.append(f"{atom_symbol}:{record.n_atoms_clustered}")
+                
+                # 如果有新原子，保存这一轮
+                if len(all_coords_this_iter) > 0:
+                    combined_coords = np.vstack(all_coords_this_iter)
+                    combined_types = np.concatenate(all_types_this_iter)
+                    
+                    sdf_str = xyz_to_sdf(combined_coords, combined_types, elements)
+                    
+                    # 修改SDF标题（第一行），包含迭代信息和所有类型信息
                     lines = sdf_str.split('\n')
-                    lines[0] = f"Clustering Iteration {record.iteration}, eps={record.eps:.4f}, min_samples={record.min_samples}, atoms={record.n_atoms_clustered}"
+                    type_info_str = ", ".join(type_info)
+                    # 获取第一个记录的eps和min_samples（通常同一轮所有类型使用相同参数）
+                    first_record = next((h.iterations[iter_idx] for h in histories if iter_idx < len(h.iterations)), None)
+                    if first_record:
+                        # SDF格式：第一行是标题行（最多80字符）
+                        title = f"Clustering Iter {iter_idx}, eps={first_record.eps:.4f}, min_samples={first_record.min_samples}, atoms={len(combined_coords)} ({type_info_str})"
+                        title = title[:80].ljust(80)  # 限制长度并填充到80字符
+                        lines[0] = title
+                    else:
+                        title = f"Clustering Iter {iter_idx}, atoms={len(combined_coords)} ({type_info_str})"
+                        title = title[:80].ljust(80)
+                        lines[0] = title
                     sdf_strings.append('\n'.join(lines))
             
             # 写入文件
@@ -1167,43 +1283,76 @@ class GNFConverter(nn.Module):
         except Exception as e:
             print(f"Warning: Failed to save clustering history SDF: {e}")
     
+    
     def _save_clustering_history_txt(
         self,
-        history: ClusteringHistory,
+        histories: List[ClusteringHistory],
         output_path: Path,
         elements: List[str]
     ) -> None:
-        """保存聚类历史为文本文件，包含详细信息"""
+        """保存所有原子类型的聚类历史为文本文件，包含详细信息（所有类型合并）"""
         try:
             with open(output_path, 'w', encoding='utf-8') as f:
                 f.write("=" * 80 + "\n")
-                f.write("自回归聚类过程详细记录\n")
+                f.write("自回归聚类过程详细记录（所有原子类型）\n")
                 f.write("=" * 80 + "\n\n")
                 
-                atom_symbol = elements[history.atom_type] if history.atom_type < len(elements) else f"Type{history.atom_type}"
-                f.write(f"原子类型: {atom_symbol} (索引: {history.atom_type})\n")
-                f.write(f"总迭代轮数: {len(history.iterations)}\n")
-                f.write(f"最终原子总数: {history.total_atoms}\n")
+                # 总体信息
+                total_atoms = sum(h.total_atoms for h in histories)
+                max_iterations = max(len(h.iterations) for h in histories) if histories else 0
+                f.write(f"总迭代轮数: {max_iterations}\n")
+                f.write(f"最终原子总数: {total_atoms}\n")
                 f.write("-" * 80 + "\n\n")
                 
-                for record in history.iterations:
-                    f.write(f"迭代轮数: {record.iteration}\n")
-                    f.write(f"  阈值: eps={record.eps:.4f}, min_samples={record.min_samples}\n")
-                    f.write(f"  找到簇数: {record.n_clusters_found}\n")
-                    f.write(f"  聚类原子数: {record.n_atoms_clustered}\n")
-                    f.write(f"  噪声点数: {record.n_noise_points}\n")
-                    f.write(f"  键长检查通过: {record.bond_validation_passed}\n")
+                # 按迭代轮数组织
+                for iter_idx in range(max_iterations):
+                    f.write(f"迭代轮数: {iter_idx}\n")
                     
-                    if len(record.new_atoms_coords) > 0:
-                        f.write(f"  新聚类原子坐标:\n")
-                        for i, (coord, atom_type) in enumerate(zip(record.new_atoms_coords, record.new_atoms_types)):
-                            atom_sym = elements[atom_type] if atom_type < len(elements) else f"Type{atom_type}"
-                            f.write(f"    {i+1}. {atom_sym}: ({coord[0]:.4f}, {coord[1]:.4f}, {coord[2]:.4f})\n")
+                    # 收集这一轮所有类型的信息
+                    type_records = []
+                    for history in histories:
+                        if iter_idx < len(history.iterations):
+                            record = history.iterations[iter_idx]
+                            atom_symbol = elements[history.atom_type] if history.atom_type < len(elements) else f"Type{history.atom_type}"
+                            type_records.append((atom_symbol, history.atom_type, record))
+                    
+                    if type_records:
+                        # 使用第一个记录的阈值（通常同一轮所有类型使用相同参数）
+                        first_record = type_records[0][2]
+                        f.write(f"  阈值: eps={first_record.eps:.4f}, min_samples={first_record.min_samples}\n")
+                        
+                        # 汇总所有类型的信息
+                        total_clusters = sum(r[2].n_clusters_found for r in type_records)
+                        total_atoms_clustered = sum(r[2].n_atoms_clustered for r in type_records)
+                        total_noise = sum(r[2].n_noise_points for r in type_records)
+                        
+                        f.write(f"  总簇数: {total_clusters}\n")
+                        f.write(f"  总聚类原子数: {total_atoms_clustered}\n")
+                        f.write(f"  总噪声点数: {total_noise}\n")
+                        f.write(f"  键长检查通过: {all(r[2].bond_validation_passed for r in type_records)}\n")
+                        f.write("\n")
+                        
+                        # 按类型详细列出
+                        for atom_symbol, atom_type_idx, record in type_records:
+                            f.write(f"  类型 {atom_symbol}:\n")
+                            f.write(f"    找到簇数: {record.n_clusters_found}\n")
+                            f.write(f"    聚类原子数: {record.n_atoms_clustered}\n")
+                            f.write(f"    噪声点数: {record.n_noise_points}\n")
+                            
+                            if len(record.new_atoms_coords) > 0:
+                                f.write(f"    新聚类原子坐标:\n")
+                                for i, (coord, atom_type) in enumerate(zip(record.new_atoms_coords, record.new_atoms_types)):
+                                    atom_sym = elements[atom_type] if atom_type < len(elements) else f"Type{atom_type}"
+                                    f.write(f"      {i+1}. {atom_sym}: ({coord[0]:.4f}, {coord[1]:.4f}, {coord[2]:.4f})\n")
+                            else:
+                                f.write(f"    本轮无新原子被聚类\n")
+                            f.write("\n")
                     else:
-                        f.write(f"  本轮无新原子被聚类\n")
+                        f.write("  本轮无任何类型产生新原子\n")
+                    
                     f.write("\n")
                 
-                f.write("\n" + "=" * 80 + "\n\n")
+                f.write("=" * 80 + "\n\n")
         except Exception as e:
             print(f"Warning: Failed to save clustering history text: {e}")
     

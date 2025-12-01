@@ -663,15 +663,14 @@ def create_gnf_converter(config: dict) -> GNFConverter:
     # 获取自回归聚类相关参数（可选）
     autoregressive_config = gnf_config["autoregressive_clustering"]
     enable_autoregressive_clustering = autoregressive_config["enable"]
-    initial_eps = autoregressive_config["initial_eps"]
     initial_min_samples = autoregressive_config["initial_min_samples"]
-    eps_decay_factor = autoregressive_config["eps_decay_factor"]
     min_samples_decay_factor = autoregressive_config["min_samples_decay_factor"]
-    min_eps = autoregressive_config["min_eps"]
     min_min_samples = autoregressive_config["min_min_samples"]
     max_clustering_iterations = autoregressive_config["max_clustering_iterations"]
     bond_length_tolerance = autoregressive_config["bond_length_tolerance"]
     enable_clustering_history = autoregressive_config["enable_clustering_history"]
+    # 调试选项（可选，默认为False）
+    debug_bond_validation = autoregressive_config.get("debug_bond_validation", False)
     
     return GNFConverter(
         sigma=sigma,
@@ -699,14 +698,12 @@ def create_gnf_converter(config: dict) -> GNFConverter:
         # 自回归聚类参数
         enable_autoregressive_clustering=enable_autoregressive_clustering,
         initial_min_samples=initial_min_samples,
-        initial_eps=initial_eps,
-        eps_decay_factor=eps_decay_factor,
         min_samples_decay_factor=min_samples_decay_factor,
-        min_eps=min_eps,
         min_min_samples=min_min_samples,
         max_clustering_iterations=max_clustering_iterations,
         bond_length_tolerance=bond_length_tolerance,
-        enable_clustering_history=enable_clustering_history
+        enable_clustering_history=enable_clustering_history,
+        debug_bond_validation=debug_bond_validation
     )
 
 

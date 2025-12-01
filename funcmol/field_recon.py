@@ -30,7 +30,7 @@ This script can be used for both field type evaluation (stage1) and neural field
 """
 
 import os
-# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 import torch
 import random
 import pandas as pd
@@ -186,7 +186,7 @@ def main(config: DictConfig) -> None:
     if field_mode == 'gt_field':
         csv_path = output_dir / "field_evaluation_results.csv"
     elif field_mode == 'nf_field':
-        csv_path = output_dir / "nf_evaluation_results_8.csv"
+        csv_path = output_dir / "nf_evaluation_results_9.csv"
     else:
         raise ValueError(f"Unsupported field_mode: {field_mode}. Only 'gt_field' and 'nf_field' are supported.")
     
@@ -287,11 +287,13 @@ def main(config: DictConfig) -> None:
                 autoregressive_config = config_dict.get("converter", {}).get("autoregressive_clustering", {})
                 save_clustering_history = autoregressive_config.get("enable_clustering_history", False)
                 save_gradient_ascent_sdf = autoregressive_config.get("save_gradient_ascent_sdf", False)
+                enable_timing = autoregressive_config.get("enable_timing", False)
                 
                 # 构建gnf2mol调用参数
                 gnf2mol_kwargs = {
                     "decoder": decoder,
-                    "codes": codes
+                    "codes": codes,
+                    "sample_id": sample_idx  # 传入样本索引作为文件标识符
                 }
                 
                 # 只在启用时才添加保存相关参数
@@ -303,6 +305,9 @@ def main(config: DictConfig) -> None:
                     gnf2mol_kwargs["save_gradient_ascent_sdf"] = True
                     gnf2mol_kwargs["gradient_ascent_sdf_dir"] = str(output_dir / "gradient_ascent_sdf")
                     gnf2mol_kwargs["gradient_ascent_sdf_interval"] = autoregressive_config.get("gradient_ascent_sdf_interval", 100)
+                
+                if enable_timing:
+                    gnf2mol_kwargs["enable_timing"] = True
                 
                 recon_coords, recon_types = converter.gnf2mol(**gnf2mol_kwargs)
                 

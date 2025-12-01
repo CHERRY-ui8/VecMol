@@ -493,9 +493,11 @@ class GNFVisualizer(MoleculeVisualizer):
         """
         device = gt_coords.device
         
-        gt_mask = (gt_types[sample_idx] != PADDING_INDEX)
-        gt_valid_coords = gt_coords[sample_idx][gt_mask]
-        gt_valid_types = gt_types[sample_idx][gt_mask]
+        # sample_idx 仅用于文件命名和显示，数据索引应使用 batch 索引 0
+        batch_idx = 0
+        gt_mask = (gt_types[batch_idx] != PADDING_INDEX)
+        gt_valid_coords = gt_coords[batch_idx][gt_mask]
+        gt_valid_types = gt_types[batch_idx][gt_mask]
         
         print(f"\nStarting reconstruction for molecule {sample_idx}")
         print(f"Ground truth atoms: {len(gt_valid_coords)}")
