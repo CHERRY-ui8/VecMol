@@ -17,7 +17,7 @@ split: val  # 数据集分割：train/val/test，默认使用val数据集
 # 如果设置了此参数，将使用指定的索引列表，忽略max_samples参数
 # sample_indices: [2,7,74,83,108,158,186,375,404,433,35,90,145,146,155,231,233,234,241,245,269,270,271,288,292,363,366,373,452]
 # sample_indices: [35,90,145,146,155,231,233,234,241,245,269,270,271,288,292,363,366,373,452]  # 具体的索引列表，null表示不手动指定
-sample_indices: [31]
+sample_indices: null
 
 # Field模式设置
 field_mode: nf_field  # 'gt_field' 或 'nf_field'
