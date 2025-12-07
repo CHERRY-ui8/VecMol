@@ -31,8 +31,42 @@ class ModelEma(nn.Module):
         self.to(device)
 
     def _update(self, model, update_fn):
+        """
+        Update EMA parameters.
+        
+        Args:
+            model: The model to update from. Can be wrapped in DDP.
+            update_fn: Function to compute new EMA value: (ema_v, model_v) -> new_value
+        """
+        # Unwrap model if it's wrapped in DDP
+        if hasattr(model, 'module'):
+            model = model.module
+        
         with torch.no_grad():
-            for ema_v, model_v in zip(self.module.state_dict().values(), model.state_dict().values()):
+            ema_state_dict = self.module.state_dict()
+            model_state_dict = model.state_dict()
+            
+            # Iterate through keys to ensure matching
+            for key in ema_state_dict.keys():
+                if key not in model_state_dict:
+                    continue
+                
+                ema_v = ema_state_dict[key]
+                model_v = model_state_dict[key]
+                
+                # Skip None values
+                if ema_v is None or model_v is None:
+                    continue
+                
+                # Skip non-tensor values
+                if not isinstance(ema_v, torch.Tensor) or not isinstance(model_v, torch.Tensor):
+                    continue
+                
+                # Ensure shapes match
+                if ema_v.shape != model_v.shape:
+                    continue
+                
+                # Update EMA value
                 ema_v.copy_(update_fn(ema_v, model_v))
 
     def update(self, model):

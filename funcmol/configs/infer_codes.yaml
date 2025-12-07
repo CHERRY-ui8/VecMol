@@ -17,14 +17,14 @@ debug_subset: False
 # dirname 将自动基于 nf_pretrained_path 的目录计算
 
 # overwrite
-split: test # train, val, test
+split: train # train, val, test
 dset:
   data_aug: True
   batch_size: 32
 
 # data augmentation
 use_data_augmentation: True  # 是否启用数据增强（对分子坐标进行增强后再infer codes）
-num_augmentations: 10  # 每个分子生成多少个增强版本（包括原始版本），例如：3表示1个原始版本+2个增强版本
+num_augmentations: 3  # 每个分子生成多少个增强版本（包括原始版本），例如：3表示1个原始版本+2个增强版本
 data_augmentation:
   apply_rotation: True  # 是否应用旋转增强
   apply_translation: False  # 是否应用平移增强（平移距离为1/2个anchor_spacing）

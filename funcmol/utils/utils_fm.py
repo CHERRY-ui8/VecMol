@@ -1,5 +1,6 @@
 import os
 import torch
+from tqdm import tqdm
 
 from funcmol.utils.utils_nf import load_network, infer_codes, normalize_code
 
@@ -123,9 +124,151 @@ def compute_code_stats_offline(
     Returns:
         dict: A dictionary containing the computed code statistics.
     """
-    codes = loader.dataset.curr_codes[:]
-    code_stats = process_codes(codes, split, normalize_codes)
-    return code_stats
+    dataset = loader.dataset
+    # 检查是否使用LMDB模式
+    if hasattr(dataset, 'use_lmdb') and dataset.use_lmdb:
+        # LMDB模式：使用流式处理计算统计信息，避免内存溢出
+        print(f"Computing code statistics from LMDB database for {split} split (streaming mode)...")
+        print(f"Total samples: {len(dataset)}")
+        
+        # 使用在线统计算法（Welford's algorithm）来计算均值和标准差
+        # 同时跟踪最大值和最小值
+        n_samples = 0
+        mean = None
+        M2 = None  # 用于计算方差的中间变量
+        max_val = None
+        min_val = None
+        
+        # 创建一个临时DataLoader用于分批处理
+        # 使用较小的batch_size和单线程以避免内存问题
+        temp_loader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=min(loader.batch_size, 32),  # 限制batch size
+            shuffle=False,
+            num_workers=0,  # 单线程避免多进程问题
+            pin_memory=False
+        )
+        
+        for batch in tqdm(temp_loader, desc=f"Computing stats for {split}"):
+            # batch可能是单个tensor或tensor列表
+            if isinstance(batch, (list, tuple)):
+                batch_codes = torch.stack(batch) if len(batch) > 0 else None
+            else:
+                batch_codes = batch
+            
+            if batch_codes is None or batch_codes.numel() == 0:
+                continue
+            
+            # 展平batch以便计算统计信息
+            batch_flat = batch_codes.flatten()
+            
+            # 更新最大值和最小值
+            batch_max = batch_flat.max()
+            batch_min = batch_flat.min()
+            
+            if max_val is None:
+                max_val = batch_max
+                min_val = batch_min
+            else:
+                max_val = torch.max(max_val, batch_max)
+                min_val = torch.min(min_val, batch_min)
+            
+            # 使用Welford's online algorithm更新均值和方差
+            batch_n = batch_flat.numel()
+            batch_mean = batch_flat.mean()
+            
+            if mean is None:
+                # 初始化
+                mean = batch_mean
+                M2 = ((batch_flat - mean) ** 2).sum()
+                n_samples = batch_n
+            else:
+                # 更新统计量
+                delta = batch_mean - mean
+                n_samples_new = n_samples + batch_n
+                mean = mean + delta * batch_n / n_samples_new
+                
+                # 更新M2（用于计算方差）
+                M2 = M2 + ((batch_flat - batch_mean) ** 2).sum() + delta ** 2 * n_samples * batch_n / n_samples_new
+                n_samples = n_samples_new
+            
+            # 释放内存
+            del batch_codes, batch_flat, batch_mean
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        
+        # 计算最终统计量
+        if n_samples == 0:
+            raise ValueError(f"No samples found in dataset for {split} split")
+        
+        # 确保所有tensor在同一设备上
+        device = mean.device if isinstance(mean, torch.Tensor) else torch.device('cpu')
+        if isinstance(max_val, torch.Tensor):
+            max_val = max_val.to(device)
+        if isinstance(min_val, torch.Tensor):
+            min_val = min_val.to(device)
+        if isinstance(M2, torch.Tensor):
+            M2 = M2.to(device)
+        
+        # 计算标准差，避免除零错误
+        if n_samples > 1:
+            std = torch.sqrt(M2 / n_samples)
+            # 如果std太小，设置为一个小的正值以避免除零
+            std = torch.clamp(std, min=1e-8)
+        else:
+            std = torch.tensor(1.0, device=device)
+        
+        # 打印统计信息
+        print(f"====codes {split}====")
+        print(f"min: {min_val.item()}")
+        print(f"max: {max_val.item()}")
+        print(f"mean: {mean.item()}")
+        print(f"std: {std.item()}")
+        print(f"Total samples processed: {n_samples}")
+        
+        # 构建code_stats字典
+        code_stats = {
+            "mean": mean.item() if isinstance(mean, torch.Tensor) else mean,
+            "std": std.item() if isinstance(std, torch.Tensor) else std,
+        }
+        
+        if normalize_codes:
+            # 对于归一化后的代码，我们需要重新计算统计信息
+            # 但由于我们已经有了mean和std，归一化后的代码应该接近N(0,1)
+            # 我们可以估算归一化后的范围
+            # 归一化公式: (x - mean) / std
+            # 归一化后的min: (min_val - mean) / std
+            # 归一化后的max: (max_val - mean) / std
+            normalized_min = (min_val - mean) / std
+            normalized_max = (max_val - mean) / std
+            max_normalized = normalized_max.item() if isinstance(normalized_max, torch.Tensor) else normalized_max
+            min_normalized = normalized_min.item() if isinstance(normalized_min, torch.Tensor) else normalized_min
+        else:
+            max_normalized = max_val.item() if isinstance(max_val, torch.Tensor) else max_val
+            min_normalized = min_val.item() if isinstance(min_val, torch.Tensor) else min_val
+        
+        code_stats.update({
+            "max_normalized": max_normalized,
+            "min_normalized": min_normalized,
+        })
+        
+        print(f"====normalized codes {split}====")
+        print(f"min_normalized: {min_normalized}")
+        print(f"max_normalized: {max_normalized}")
+        
+        return code_stats
+    else:
+        # 传统模式：直接使用curr_codes属性
+        if hasattr(dataset, 'curr_codes'):
+            codes = dataset.curr_codes[:]
+        else:
+            raise AttributeError(
+                f"Dataset does not have 'curr_codes' attribute and is not in LMDB mode. "
+                f"Dataset type: {type(dataset)}"
+            )
+        
+        code_stats = process_codes(codes, split, normalize_codes)
+        return code_stats
 
 
 def process_codes(

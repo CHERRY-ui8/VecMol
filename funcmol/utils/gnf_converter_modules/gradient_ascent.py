@@ -20,6 +20,7 @@ class GradientAscentOptimizer:
         enable_early_stopping: bool = True,
         convergence_threshold: float = 1e-6,
         min_iterations: int = 50,
+        gradient_batch_size: Optional[int] = None,
     ):
         """
         初始化梯度上升优化器
@@ -32,6 +33,8 @@ class GradientAscentOptimizer:
             enable_early_stopping: 是否启用早停机制
             convergence_threshold: 收敛阈值
             min_iterations: 最少迭代次数
+            gradient_batch_size: 梯度计算时的批次大小。如果为None，则一次性处理所有点（batch_size=1）。
+                                如果指定，则将点分成多个子批次处理，可能提高GPU利用率。
         """
         self.n_iter = n_iter
         self.step_size = step_size
@@ -40,6 +43,7 @@ class GradientAscentOptimizer:
         self.enable_early_stopping = enable_early_stopping
         self.convergence_threshold = convergence_threshold
         self.min_iterations = min_iterations
+        self.gradient_batch_size = gradient_batch_size
     
     def batch_gradient_ascent(
         self,
@@ -73,29 +77,67 @@ class GradientAscentOptimizer:
         t_iter_start = time.perf_counter() if enable_timing else None
         iteration_times = [] if enable_timing else None
         
+        n_total_points = z.size(0)
+        
+        # 确定是否使用分批处理
+        use_batching = (self.gradient_batch_size is not None and 
+                       self.gradient_batch_size > 0 and 
+                       n_total_points > self.gradient_batch_size)
+        
+        # 打印调试信息（仅在启用时间统计时）
+        if enable_timing and use_batching:
+            n_batches = (n_total_points + self.gradient_batch_size - 1) // self.gradient_batch_size
+            print(f"    [梯度上升] 使用分批处理: 总点数={n_total_points}, "
+                  f"批次大小={self.gradient_batch_size}, 批次数={n_batches}")
+        elif enable_timing:
+            print(f"    [梯度上升] 未使用分批处理: 总点数={n_total_points}, "
+                  f"配置的批次大小={self.gradient_batch_size}")
+        
+        # 预计算sigma_ratios和adjusted_step_sizes（避免每次迭代重复计算）
+        sigma_ratios = torch.tensor([self.sigma_params.get(t.item(), self.sigma) / self.sigma 
+                                   for t in atom_types], device=device)  # [n_total_points]
+        adjusted_step_sizes = self.step_size * sigma_ratios.unsqueeze(-1)  # [n_total_points, 1]
+        
         for iter_idx in range(self.n_iter):
             t_single_iter_start = time.perf_counter() if enable_timing else None
-            z_batch = z.unsqueeze(0)  # [1, n_total_points, 3]
             
-            try:                
+            try:
                 # 使用torch.no_grad()包装，这是最关键的优化
                 with torch.no_grad():
-                    current_field = decoder(z_batch, current_codes)  # [1, n_total_points, n_atom_types, 3]
-                
-                # 为每个点选择对应原子类型的梯度
-                # 使用高级索引选择梯度
-                point_indices = torch.arange(z.size(0), device=device)  # [n_total_points]
-                type_indices = atom_types  # [n_total_points]
-                grad = current_field[0, point_indices, type_indices, :]  # [n_total_points, 3]
+                    if use_batching:
+                        # 分批处理：将点分成多个子批次
+                        grad_list = []
+                        batch_size = self.gradient_batch_size
+                        
+                        for batch_start in range(0, n_total_points, batch_size):
+                            batch_end = min(batch_start + batch_size, n_total_points)
+                            z_batch_subset = z[batch_start:batch_end].unsqueeze(0)  # [1, batch_size, 3]
+                            
+                            # 计算当前子批次的梯度场
+                            current_field_subset = decoder(z_batch_subset, current_codes)  # [1, batch_size, n_atom_types, 3]
+                            
+                            # 为每个点选择对应原子类型的梯度
+                            batch_indices = torch.arange(batch_end - batch_start, device=device)
+                            batch_types = atom_types[batch_start:batch_end]
+                            grad_subset = current_field_subset[0, batch_indices, batch_types, :]  # [batch_size, 3]
+                            
+                            grad_list.append(grad_subset)
+                        
+                        # 合并所有批次的梯度
+                        grad = torch.cat(grad_list, dim=0)  # [n_total_points, 3]
+                    else:
+                        # 原始方式：一次性处理所有点
+                        z_batch = z.unsqueeze(0)  # [1, n_total_points, 3]
+                        current_field = decoder(z_batch, current_codes)  # [1, n_total_points, n_atom_types, 3]
+                        
+                        # 为每个点选择对应原子类型的梯度
+                        point_indices = torch.arange(n_total_points, device=device)  # [n_total_points]
+                        type_indices = atom_types  # [n_total_points]
+                        grad = current_field[0, point_indices, type_indices, :]  # [n_total_points, 3]
                 
                 # 检查梯度是否包含NaN/Inf
                 if torch.isnan(grad).any() or torch.isinf(grad).any():
                     break
-                
-                # 使用原子类型特定的sigma调整步长
-                sigma_ratios = torch.tensor([self.sigma_params.get(t.item(), self.sigma) / self.sigma 
-                                           for t in atom_types], device=device)  # [n_total_points]
-                adjusted_step_sizes = self.step_size * sigma_ratios.unsqueeze(-1)  # [n_total_points, 1]
                 
                 # 计算当前梯度的模长
                 current_grad_norm = torch.norm(grad, dim=-1).mean().item()
@@ -134,9 +176,17 @@ class GradientAscentOptimizer:
         if enable_timing and iteration_times:
             total_iter_time = sum(iteration_times)
             avg_iter_time = total_iter_time / len(iteration_times) if iteration_times else 0.0
-            print(f"    [梯度上升] 总迭代数={len(iteration_times)}, "
-                  f"总时间={total_iter_time:.3f}s, "
-                  f"平均每次迭代={avg_iter_time*1000:.2f}ms")
+            if use_batching:
+                n_batches = (n_total_points + self.gradient_batch_size - 1) // self.gradient_batch_size
+                print(f"    [梯度上升] 总迭代数={len(iteration_times)}, "
+                      f"总时间={total_iter_time:.3f}s, "
+                      f"平均每次迭代={avg_iter_time*1000:.2f}ms, "
+                      f"分批处理: 总点数={n_total_points}, 批次大小={self.gradient_batch_size}, 每迭代批次数={n_batches}")
+            else:
+                print(f"    [梯度上升] 总迭代数={len(iteration_times)}, "
+                      f"总时间={total_iter_time:.3f}s, "
+                      f"平均每次迭代={avg_iter_time*1000:.2f}ms, "
+                      f"未分批: 总点数={n_total_points}")
         
         return z
 

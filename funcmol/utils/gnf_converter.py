@@ -64,7 +64,8 @@ class GNFConverter(nn.Module):
                 max_clustering_iterations: int = 10,  # 最大迭代轮数
                 bond_length_tolerance: float = 0.4,  # 键长合理性检查的容差（单位：Å），在标准键长基础上增加的容差
                 enable_clustering_history: bool = False,  # 是否记录聚类历史
-                debug_bond_validation: bool = False):  # 是否输出键长检查的调试信息
+                debug_bond_validation: bool = False,  # 是否输出键长检查的调试信息
+                gradient_batch_size: Optional[int] = None):  # 梯度计算时的批次大小，None表示一次性处理所有点
         super().__init__()
         self.sigma = sigma
         self.n_query_points = n_query_points
@@ -97,6 +98,7 @@ class GNFConverter(nn.Module):
         self.bond_length_tolerance = bond_length_tolerance
         self.enable_clustering_history = enable_clustering_history
         self.debug_bond_validation = debug_bond_validation
+        self.gradient_batch_size = gradient_batch_size
         
         # 为不同类型的原子设置不同的 sigma 参数
         # We model hydrogen explicitly and consider 5 chemical elements for QM9 (C, H, O, N, F), 
@@ -153,6 +155,7 @@ class GNFConverter(nn.Module):
             enable_early_stopping=enable_early_stopping,
             convergence_threshold=convergence_threshold,
             min_iterations=min_iterations,
+            gradient_batch_size=gradient_batch_size,
         )
         
         # 初始化聚类模块
@@ -294,7 +297,9 @@ class GNFConverter(nn.Module):
             element_existence = None
             if predictor is not None:
                 with torch.no_grad():
-                    element_existence = predictor(current_codes)  # [1, n_atom_types]
+                    # predictor现在输出logits，需要应用sigmoid得到概率
+                    logits = predictor(current_codes)  # [1, n_atom_types]
+                    element_existence = torch.sigmoid(logits)  # [1, n_atom_types]
             t_predictor_end = time.perf_counter() if enable_timing else None
             
             # 如果提供了可视化回调，创建一个迭代回调函数

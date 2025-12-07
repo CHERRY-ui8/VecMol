@@ -672,6 +672,9 @@ def create_gnf_converter(config: dict) -> GNFConverter:
     # 调试选项（可选，默认为False）
     debug_bond_validation = autoregressive_config.get("debug_bond_validation", False)
     
+    # 获取梯度批次大小（可选，默认为None，表示一次性处理所有点）
+    gradient_batch_size = gnf_config.get("gradient_batch_size", None)
+    
     return GNFConverter(
         sigma=sigma,
         n_query_points=n_query_points,
@@ -703,7 +706,8 @@ def create_gnf_converter(config: dict) -> GNFConverter:
         max_clustering_iterations=max_clustering_iterations,
         bond_length_tolerance=bond_length_tolerance,
         enable_clustering_history=enable_clustering_history,
-        debug_bond_validation=debug_bond_validation
+        debug_bond_validation=debug_bond_validation,
+        gradient_batch_size=gradient_batch_size,
     )
 
 

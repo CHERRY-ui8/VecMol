@@ -25,28 +25,30 @@ on_the_fly: False  # use True to compute codes on the fly from neural field
 codes_dir: "/home/huayuchen/Neurl-voxel/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/codes"  # not used when on_the_fly=True
 
 # training params
-num_epochs: 100
+num_epochs: 300
 dset:
-  batch_size: 8
-  num_workers: 1
+  batch_size: 32
+  num_workers: 4
 
 ckpt_every_n_epochs: 10  # 每隔多少epoch保存一次ckpt
+check_val_every_n_epoch: 1  # 每个epoch都进行验证，以便更早发现过拟合
+early_stopping_patience: 10  # Early stopping patience（验证loss不下降的epoch数）
 decoder:
   code_dim: 128 # 和encoder的code_dim一致
 
 # optim params
-lr: 1e-3
-use_lr_schedule: 0  # 暂时禁用学习率调度，使用固定学习率
+lr: 5e-4  # 降低学习率以防止过拟合
+use_lr_schedule: 1  # 启用学习率调度，有助于防止过拟合
 num_warmup_iter: 1000
-wd: 1e-6
-ema_decay: 0.999  # 启用EMA
+wd: 1e-4  # 增加权重衰减以防止过拟合（从1e-6增加到1e-4）
 max_grad_norm: 0.5
 
 # Element predictor configuration
 predictor:
   hidden_dim: 64  # 隐藏层维度（小参数量）
   num_layers: 2  # 网络层数
-  ema_decay: null  # predictor的EMA衰减率，如果为null则使用上面的ema_decay
+  dropout: 0.3  # Dropout率，用于防止过拟合（从0.1增加到0.3）
+  ema_decay: 0.999  # predictor的EMA衰减率
 
 # set the running dir
 hydra:

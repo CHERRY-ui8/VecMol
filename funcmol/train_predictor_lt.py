@@ -3,9 +3,6 @@ sys.path.append("..")
 
 # Standard libraries
 import os
-
-# Data visualization and processing
-import matplotlib.pyplot as plt
 import numpy as np
     
 # PyTorch and related libraries
@@ -16,7 +13,7 @@ torch.set_float32_matmul_precision('medium')
 # PyTorch Lightning
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import TensorBoardLogger
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping
 from pytorch_lightning.strategies import DDPStrategy
 
 # Configuration management
@@ -24,7 +21,8 @@ from omegaconf import OmegaConf
 import hydra
 
 # Set GPU environment
-os.environ['CUDA_VISIBLE_DEVICES'] = "0,2,3,4,5"
+# os.environ['CUDA_VISIBLE_DEVICES'] = "0,2,3,4,5"
+os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2"
 
 from funcmol.models.element_predictor import create_element_predictor
 from funcmol.utils.utils_fm import (
@@ -36,29 +34,6 @@ from funcmol.dataset.dataset_code import create_code_loaders
 from funcmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
 from funcmol.models.adamw import AdamW
 from funcmol.models.ema import ModelEma
-
-
-def plot_loss_curve(train_losses, val_losses, save_path, title_suffix=""):
-    """
-    Plot training and validation loss curves.
-    
-    Args:
-        train_losses (list): List of training losses
-        val_losses (list): List of validation losses
-        save_path (str): Path to save the plot
-        title_suffix (str): Additional information to add to the plot title
-    """
-    plt.figure(figsize=(10, 6))
-    plt.plot(train_losses, label='Training Loss', color='blue')
-    if val_losses:
-        plt.plot(val_losses, label='Validation Loss', color='red')
-    plt.xlabel('Steps')
-    plt.ylabel('Loss')
-    plt.title(f'Training and Validation Loss {title_suffix}')
-    plt.legend()
-    plt.grid(True)
-    plt.savefig(save_path)
-    plt.close()
 
 
 class PredictorLightningModule(pl.LightningModule):
@@ -78,12 +53,23 @@ class PredictorLightningModule(pl.LightningModule):
         self.predictor = create_element_predictor(config, n_atom_types)
         
         # Initialize EMA for predictor
+        predictor_config = config.get("predictor", {})
+        predictor_ema_decay = predictor_config.get("ema_decay")
+        # 如果 decay 为 False，则禁用 EMA
+        self.use_ema = predictor_ema_decay is not False
+        
         with torch.no_grad():
-            predictor_ema_decay = config.get("predictor", {}).get("ema_decay", config.get("ema_decay", 0.999))
-            self.predictor_ema = ModelEma(self.predictor, decay=predictor_ema_decay)
+            if self.use_ema:
+                self.predictor_ema = ModelEma(self.predictor, decay=predictor_ema_decay)
+            else:
+                self.predictor_ema = None
         
         # Set up loss function
-        self.bce_criterion = nn.BCELoss(reduction="mean")
+        # 使用BCEWithLogitsLoss代替BCELoss，因为：
+        # 1. 数值更稳定（结合了sigmoid和BCE）
+        # 2. 与bf16-mixed精度兼容
+        # 3. predictor现在输出logits而不是概率
+        self.bce_criterion = nn.BCEWithLogitsLoss(reduction="mean")
         
         # Track losses for plotting
         self.train_losses = []
@@ -211,6 +197,10 @@ class PredictorLightningModule(pl.LightningModule):
         codes_batch_size = codes.shape[0] if isinstance(codes, torch.Tensor) else len(codes)
         gt_element_existence = self._get_element_existence(batch, codes_batch_size=codes_batch_size)
         
+        # 确保gt_element_existence与codes在同一设备上
+        if isinstance(codes, torch.Tensor):
+            gt_element_existence = gt_element_existence.to(codes.device)
+        
         # 预测元素存在性
         pred_element_existence = self.predictor(codes)
         
@@ -218,7 +208,10 @@ class PredictorLightningModule(pl.LightningModule):
         loss = self.bce_criterion(pred_element_existence, gt_element_existence)
         
         # 更新predictor的EMA
-        self.predictor_ema.update(self.predictor)
+        if self.use_ema:
+            # 在DDP模式下，需要获取unwrapped模型
+            predictor_model = self.predictor.module if hasattr(self.predictor, 'module') else self.predictor
+            self.predictor_ema.update(predictor_model)
         
         # Log metrics
         self.log('train_loss', loss, batch_size=len(batch),
@@ -238,10 +231,30 @@ class PredictorLightningModule(pl.LightningModule):
         codes_batch_size = codes.shape[0] if isinstance(codes, torch.Tensor) else len(codes)
         gt_element_existence = self._get_element_existence(batch, codes_batch_size=codes_batch_size)
         
-        # 使用EMA模型预测元素存在性
-        pred_element_existence = self.predictor_ema(codes)
+        # 确保gt_element_existence与codes在同一设备上
+        if isinstance(codes, torch.Tensor):
+            gt_element_existence = gt_element_existence.to(codes.device)
         
-        # 计算BCE loss
+        # 使用EMA模型预测元素存在性（如果启用），否则使用普通模型
+        if self.use_ema:
+            pred_element_existence = self.predictor_ema(codes)
+        else:
+            pred_element_existence = self.predictor(codes)
+        
+        # 调试：检查形状是否匹配
+        if pred_element_existence.shape != gt_element_existence.shape:
+            raise ValueError(
+                f"Shape mismatch in validation_step: "
+                f"pred_element_existence.shape={pred_element_existence.shape}, "
+                f"gt_element_existence.shape={gt_element_existence.shape}, "
+                f"codes.shape={codes.shape if isinstance(codes, torch.Tensor) else 'N/A'}"
+            )
+        
+        # 确保数据类型正确
+        # 注意：pred_element_existence现在是logits，不需要clamp
+        gt_element_existence = gt_element_existence.float()
+        
+        # 计算BCE loss（使用BCEWithLogitsLoss，内部会处理sigmoid）
         loss = self.bce_criterion(pred_element_existence, gt_element_existence)
         
         # Log metrics
@@ -330,11 +343,18 @@ class PredictorLightningModule(pl.LightningModule):
 
     def on_save_checkpoint(self, checkpoint):
         # 保存predictor状态
-        predictor_state_dict = self.predictor.module.state_dict() if hasattr(self.predictor, "module") else self.predictor.state_dict()
-        predictor_ema_state_dict = self.predictor_ema.module.state_dict() if hasattr(self.predictor_ema, "module") else self.predictor_ema.state_dict()
+        # 在DDP模式下，predictor可能被包装，需要获取unwrapped模型
+        predictor_model = self.predictor.module if hasattr(self.predictor, "module") else self.predictor
+        predictor_state_dict = predictor_model.state_dict()
         
         checkpoint["predictor_state_dict"] = predictor_state_dict
-        checkpoint["predictor_ema_state_dict"] = predictor_ema_state_dict
+        
+        # 保存EMA状态（如果启用）
+        if self.use_ema:
+            # predictor_ema是ModelEma对象，它的内部模型是self.module
+            # 获取EMA模型的内部模型状态（不包含ModelEma的包装）
+            predictor_ema_state_dict = self.predictor_ema.module.state_dict()
+            checkpoint["predictor_ema_state_dict"] = predictor_ema_state_dict
         checkpoint["code_stats"] = self.code_stats
         checkpoint["train_losses"] = self.train_losses
         checkpoint["val_losses"] = self.val_losses
@@ -473,7 +493,7 @@ def main(config):
                 except Exception as e:
                     print(f"Warning: Failed to load predictor state: {e}")
             
-            if "predictor_ema_state_dict" in training_state:
+            if "predictor_ema_state_dict" in training_state and model.use_ema:
                 try:
                     predictor_ema_state_dict = training_state["predictor_ema_state_dict"]
                     if hasattr(model.predictor_ema, "module"):
@@ -499,6 +519,13 @@ def main(config):
             save_top_k=-1  # 保存所有checkpoint，不限制数量
         ),
         LearningRateMonitor(logging_interval="epoch"),
+        EarlyStopping(
+            monitor="val_loss",
+            mode="min",
+            patience=config.get("early_stopping_patience", 10),
+            verbose=True,
+            min_delta=1e-5  # 最小改善阈值
+        ),
     ]
     
     # Configure logger
@@ -517,7 +544,7 @@ def main(config):
         strategy='auto' if num_gpus == 1 else DDPStrategy(find_unused_parameters=True),
         precision="bf16-mixed",
         enable_checkpointing=True,
-        check_val_every_n_epoch=5,  # Validate every 5 epochs
+        check_val_every_n_epoch=config.get("check_val_every_n_epoch", 1),  # 验证频率，默认每个epoch验证一次
         # Use built-in gradient clipping
         gradient_clip_val=config.get("max_grad_norm", 1.0),
         gradient_clip_algorithm="norm",
@@ -526,17 +553,7 @@ def main(config):
     # Train the model
     trainer.fit(model, loader_train, loader_val)
     
-    # Save final plots
     if trainer.is_global_zero:
-        # Plot loss curves
-        if len(model.train_losses) > 0:
-            plot_loss_curve(
-                model.train_losses,
-                model.val_losses,
-                os.path.join(config["dirname"], "loss_curve_epochs.png"),
-                "(Epoch Level)"
-            )
-        
         # Save loss data
         np.save(os.path.join(config["dirname"], "train_losses.npy"), np.array(model.train_losses))
         np.save(os.path.join(config["dirname"], "val_losses.npy"), np.array(model.val_losses))

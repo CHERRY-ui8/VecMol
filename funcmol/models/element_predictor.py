@@ -10,7 +10,7 @@ class ElementPredictor(nn.Module):
     输入: codes [B, grid_size³, code_dim]
     输出: element_existence [B, n_atom_types] (每个元素是否存在，0或1)
     """
-    def __init__(self, code_dim: int, grid_size: int, n_atom_types: int, hidden_dim: int = 64, num_layers: int = 2):
+    def __init__(self, code_dim: int, grid_size: int, n_atom_types: int, hidden_dim: int = 64, num_layers: int = 2, dropout: float = 0.3):
         """
         Args:
             code_dim: 潜在码的维度
@@ -18,6 +18,7 @@ class ElementPredictor(nn.Module):
             n_atom_types: 原子类型数量
             hidden_dim: 隐藏层维度（小参数量）
             num_layers: 网络层数
+            dropout: Dropout率，用于防止过拟合
         """
         super().__init__()
         self.code_dim = code_dim
@@ -39,7 +40,7 @@ class ElementPredictor(nn.Module):
             else:
                 layers.append(nn.Linear(hidden_dim, hidden_dim))
             layers.append(nn.ReLU())
-            layers.append(nn.Dropout(0.1))
+            layers.append(nn.Dropout(dropout))
         
         # 输出层：预测每种元素是否存在
         layers.append(nn.Linear(hidden_dim, n_atom_types))
@@ -52,7 +53,7 @@ class ElementPredictor(nn.Module):
             codes: [B, grid_size³, code_dim]
             
         Returns:
-            element_existence: [B, n_atom_types] (经过sigmoid，值在0-1之间)
+            logits: [B, n_atom_types] (logits，未经过sigmoid，用于BCEWithLogitsLoss)
         """
         B, N, D = codes.shape
         
@@ -68,13 +69,10 @@ class ElementPredictor(nn.Module):
         # 拼接平均池化和最大池化的结果
         pooled_features = torch.cat([avg_pooled, max_pooled], dim=1)  # [B, code_dim * 2]
         
-        # 通过MLP
+        # 通过MLP，直接返回logits（不应用sigmoid）
         logits = self.mlp(pooled_features)  # [B, n_atom_types]
         
-        # 使用sigmoid得到概率（每个元素是否存在的概率）
-        element_existence = torch.sigmoid(logits)  # [B, n_atom_types]
-        
-        return element_existence
+        return logits
 
 
 def create_element_predictor(config: dict, n_atom_types: int):
@@ -95,7 +93,8 @@ def create_element_predictor(config: dict, n_atom_types: int):
         grid_size=config["dset"]["grid_size"],
         n_atom_types=n_atom_types,
         hidden_dim=predictor_config.get("hidden_dim", 64),
-        num_layers=predictor_config.get("num_layers", 2)
+        num_layers=predictor_config.get("num_layers", 2),
+        dropout=predictor_config.get("dropout", 0.3)
     )
     
     # 打印参数量
