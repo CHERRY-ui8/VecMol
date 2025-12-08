@@ -272,41 +272,45 @@ class GNFConverter(nn.Module):
 
         all_coords = []
         all_types = []
-        # 对每个batch分别处理
+        
+        # 检查codes是否有效
+        if codes.numel() == 0:
+            max_atoms = 0
+            final_coords = torch.empty(batch_size, 0, 3, device=device)
+            final_types = torch.empty(batch_size, 0, dtype=torch.long, device=device)
+            return final_coords, final_types
+        
+        if torch.isnan(codes).any() or torch.isinf(codes).any():
+            max_atoms = 0
+            final_coords = torch.empty(batch_size, 0, 3, device=device)
+            final_types = torch.empty(batch_size, 0, dtype=torch.long, device=device)
+            return final_coords, final_types
+        
+        # 如果提供了predictor，批量预测元素存在性
+        t_predictor_start = time.perf_counter() if enable_timing else None
+        element_existence = None
+        if predictor is not None:
+            with torch.no_grad():
+                # predictor现在输出logits，需要应用sigmoid得到概率
+                logits = predictor(codes)  # [batch_size, n_atom_types]
+                element_existence = torch.sigmoid(logits)  # [batch_size, n_atom_types]
+        t_predictor_end = time.perf_counter() if enable_timing else None
+        
+        # 批量处理所有样本
+        t_process_start = time.perf_counter() if enable_timing else None
+        
+        # 创建批量回调函数
+        batch_callbacks = []
         for b in range(batch_size):
-            t_batch_start = time.perf_counter() if enable_timing else None
-
-            # 确定文件标识符：优先使用sample_id，否则使用batch索引
             file_identifier = sample_id if sample_id is not None else b
             
-            # 检查索引边界
-            if b >= codes.size(0):
-                break
-            
-            # 检查当前batch的codes
-            current_codes = codes[b:b+1]
-            
-            if current_codes.numel() == 0:
-                continue
-            
-            if torch.isnan(current_codes).any() or torch.isinf(current_codes).any():
-                continue
-            
-            # 如果提供了predictor，预测元素存在性
-            t_predictor_start = time.perf_counter() if enable_timing else None
-            element_existence = None
-            if predictor is not None:
-                with torch.no_grad():
-                    # predictor现在输出logits，需要应用sigmoid得到概率
-                    logits = predictor(current_codes)  # [1, n_atom_types]
-                    element_existence = torch.sigmoid(logits)  # [1, n_atom_types]
-            t_predictor_end = time.perf_counter() if enable_timing else None
-            
-            # 如果提供了可视化回调，创建一个迭代回调函数
+            # 创建迭代回调
             iteration_callback = None
             if save_interval is not None and visualization_callback is not None:
                 def create_iteration_callback(batch_idx, n_atom_types, save_interval_val, n_iter_val):
-                    def callback(iter_idx, current_points, atom_types):
+                    def callback(iter_idx, current_points, atom_types, batch_idx_inner=None):
+                        # 如果batch_idx_inner不为None，说明是批量模式，已经分离了
+                        actual_batch_idx = batch_idx_inner if batch_idx_inner is not None else batch_idx
                         # 只在指定间隔时调用可视化回调
                         if iter_idx % save_interval_val == 0 or iter_idx == n_iter_val - 1:
                             # 按原子类型分离点
@@ -317,7 +321,7 @@ class GNFConverter(nn.Module):
                                     all_points_dict[t] = current_points[type_mask].clone()
                                 else:
                                     all_points_dict[t] = torch.empty((0, 3), device=current_points.device)
-                            visualization_callback(iter_idx, all_points_dict, batch_idx)
+                            visualization_callback(iter_idx, all_points_dict, actual_batch_idx)
                     return callback
                 
                 iteration_callback = create_iteration_callback(b, n_atom_types, save_interval, self.n_iter)
@@ -330,7 +334,9 @@ class GNFConverter(nn.Module):
                 sdf_dir.mkdir(parents=True, exist_ok=True)
                 
                 def create_gradient_ascent_sdf_callback(file_id, n_atom_types, interval):
-                    def callback(iter_idx, current_points, atom_types):
+                    def callback(iter_idx, current_points, atom_types, batch_idx_inner=None):
+                        # 如果batch_idx_inner不为None，说明是批量模式，已经分离了
+                        actual_batch_idx = batch_idx_inner if batch_idx_inner is not None else file_id
                         # 只在指定间隔时保存
                         if iter_idx % interval == 0 or iter_idx == self.n_iter - 1:
                             try:
@@ -371,10 +377,10 @@ class GNFConverter(nn.Module):
                                     lines[0] = title
                                     
                                     # 保存SDF文件（所有类型合并到一个文件），使用有意义的标识符
-                                    if isinstance(file_id, int):
-                                        sdf_file = sdf_dir / f"sample_{file_id:04d}_iter_{iter_idx:04d}.sdf"
+                                    if isinstance(actual_batch_idx, int):
+                                        sdf_file = sdf_dir / f"sample_{actual_batch_idx:04d}_iter_{iter_idx:04d}.sdf"
                                     else:
-                                        sdf_file = sdf_dir / f"{file_id}_iter_{iter_idx:04d}.sdf"
+                                        sdf_file = sdf_dir / f"{actual_batch_idx}_iter_{iter_idx:04d}.sdf"
                                     with open(sdf_file, 'w') as f:
                                         f.write('\n'.join(lines))
                             except Exception as e:
@@ -384,13 +390,130 @@ class GNFConverter(nn.Module):
                 
                 gradient_ascent_callback = create_gradient_ascent_sdf_callback(file_identifier, n_atom_types, gradient_ascent_sdf_interval)
             
+            batch_callbacks.append((iteration_callback, gradient_ascent_callback))
+        
+        # 批量处理：一次性处理所有batch
+        if batch_size > 1:
+            # 批量模式：一次性传递所有codes和element_existence
+            # 创建批量回调函数
+            def create_batch_iteration_callback(batch_callbacks_list):
+                def safe_call_callback(callback, iter_idx, points, types, batch_idx_val):
+                    """安全调用回调函数，兼容支持和不支持batch_idx的情况"""
+                    if callback is None:
+                        return
+                    # 先尝试传递batch_idx_inner（回调函数期望的参数名）
+                    try:
+                        callback(iter_idx, points, types, batch_idx_inner=batch_idx_val)
+                    except TypeError:
+                        # 如果不支持batch_idx_inner，尝试batch_idx
+                        try:
+                            callback(iter_idx, points, types, batch_idx=batch_idx_val)
+                        except TypeError:
+                            # 如果不支持batch_idx，只传递基本参数
+                            callback(iter_idx, points, types)
+                
+                def callback(iter_idx, current_points_all, atom_types_all, batch_idx=None):
+                    if batch_idx is None:
+                        # 批量模式：current_points_all是[B, n_points, 3]
+                        B_cb = current_points_all.size(0)
+                        for b in range(B_cb):
+                            iter_cb, grad_cb = batch_callbacks_list[b]
+                            if iter_cb is not None:
+                                safe_call_callback(iter_cb, iter_idx, current_points_all[b], atom_types_all[b], batch_idx_val=b)
+                            if grad_cb is not None:
+                                safe_call_callback(grad_cb, iter_idx, current_points_all[b], atom_types_all[b], batch_idx_val=b)
+                    else:
+                        # 单样本模式（不应该在这里发生，但为了安全）
+                        iter_cb, grad_cb = batch_callbacks_list[batch_idx]
+                        if iter_cb is not None:
+                            safe_call_callback(iter_cb, iter_idx, current_points_all, atom_types_all, batch_idx_val=batch_idx)
+                        if grad_cb is not None:
+                            safe_call_callback(grad_cb, iter_idx, current_points_all, atom_types_all, batch_idx_val=batch_idx)
+                return callback
+            
+            batch_iteration_callback = create_batch_iteration_callback(batch_callbacks)
+            batch_gradient_ascent_callback = batch_iteration_callback  # 使用同一个回调
+            
+            # 批量处理所有样本 - 一次性传递所有codes
+            t_batch_start = time.perf_counter() if enable_timing else None
+            all_batch_coords, all_batch_types, all_batch_histories = self.sampling_processor.process_atom_types_matrix(
+                codes, n_atom_types, device=device, decoder=decoder,
+                iteration_callback=batch_iteration_callback,
+                element_existence=element_existence,  # [B, n_atom_types]
+                gradient_ascent_callback=batch_gradient_ascent_callback,
+                enable_timing=enable_timing
+            )
+            t_process_end = time.perf_counter() if enable_timing else None
+            
+                # 处理每个batch的结果
+            for b in range(batch_size):
+                coords_list = all_batch_coords[b]
+                types_list = all_batch_types[b]
+                histories = all_batch_histories[b]
+                file_identifier = sample_id if sample_id is not None else b
+                
+                # 保存聚类历史
+                t_history_start = time.perf_counter() if enable_timing else None
+                if save_clustering_history and clustering_history_dir and histories:
+                    self.history_saver.save_clustering_history(
+                        histories, 
+                        clustering_history_dir,
+                        batch_idx=file_identifier
+                    )
+                t_history_end = time.perf_counter() if enable_timing else None
+                
+                # 合并所有类型
+                t_merge_start = time.perf_counter() if enable_timing else None
+                if coords_list:
+                    merged_coords = torch.cat(coords_list, dim=0)
+                    merged_types = torch.cat(types_list, dim=0)
+                    
+                    # 选择最大连通分支
+                    t_connected_start = time.perf_counter() if enable_timing else None
+                    filtered_coords, filtered_types = self.connectivity_analyzer.select_largest_connected_component(
+                        merged_coords, merged_types
+                    )
+                    t_connected_end = time.perf_counter() if enable_timing else None
+                    
+                    all_coords.append(filtered_coords)
+                    all_types.append(filtered_types)
+                else:
+                    all_coords.append(torch.empty(0, 3, device=device))
+                    all_types.append(torch.empty(0, dtype=torch.long, device=device))
+                t_merge_end = time.perf_counter() if enable_timing else None
+                
+                if enable_timing:
+                    t_batch_end = time.perf_counter()
+                    predictor_time = (t_predictor_end - t_predictor_start) if (t_predictor_start is not None and t_predictor_end is not None) else 0.0
+                    process_time = (t_process_end - t_process_start) if (t_process_start is not None and t_process_end is not None) else 0.0
+                    history_time = (t_history_end - t_history_start) if (t_history_start is not None and t_history_end is not None) else 0.0
+                    merge_time = (t_merge_end - t_merge_start) if (t_merge_start is not None and t_merge_end is not None) else 0.0
+                    connected_time = (t_connected_end - t_connected_start) if (t_connected_start is not None and t_connected_end is not None) else 0.0
+                    total_batch_time = t_batch_end - t_batch_start if t_batch_start is not None else 0.0
+                    print(
+                        f"[GNFConverter.gnf2mol] Batch {file_identifier} timing: "
+                        f"predictor={predictor_time:.3f}s, "
+                        f"process={process_time:.3f}s, "
+                        f"merge={merge_time:.3f}s, "
+                        f"connected_component={connected_time:.3f}s, "
+                        f"history_io={history_time:.3f}s, "
+                        f"total={total_batch_time:.3f}s"
+                    )
+        else:
+            # 单样本模式（向后兼容）
+            t_batch_start = time.perf_counter() if enable_timing else None
+            b = 0
+            file_identifier = sample_id if sample_id is not None else b
+            current_codes = codes[b:b+1]
+            element_existence_b = element_existence[b:b+1] if element_existence is not None else None
+            iter_cb, grad_cb = batch_callbacks[b]
+            
             # 矩阵化处理所有原子类型（传入element_existence以过滤不存在的元素）
-            t_process_start = time.perf_counter() if enable_timing else None
             coords_list, types_list, histories = self.sampling_processor.process_atom_types_matrix(
                 current_codes, n_atom_types, device=device, decoder=decoder,
-                iteration_callback=iteration_callback,
-                element_existence=element_existence,
-                gradient_ascent_callback=gradient_ascent_callback,
+                iteration_callback=iter_cb,
+                element_existence=element_existence_b,
+                gradient_ascent_callback=grad_cb,
                 enable_timing=enable_timing
             )
             t_process_end = time.perf_counter() if enable_timing else None
@@ -442,6 +565,7 @@ class GNFConverter(nn.Module):
                     f"history_io={history_time:.3f}s, "
                     f"total={total_batch_time:.3f}s"
                 )
+            
         
         # pad到batch最大长度
         max_atoms = max([c.size(0) for c in all_coords]) if all_coords else 0

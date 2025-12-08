@@ -10,7 +10,9 @@
             "type": "debugpy",
             "request": "launch",
             "program": "${file}",
-            "console": "integratedTerminal"
+            "console": "integratedTerminal",
+            // "workingDirectory": "${workspaceFolder}/funcmol"
+            "cwd": "${workspaceFolder}/funcmol"
         }
     ]
 }

@@ -58,7 +58,7 @@ def compute_rmsd(coords1: torch.Tensor, coords2: torch.Tensor) -> float:
     return float(rmsd.item())
 
 
-@hydra.main(version_base=None, config_path="configs", config_name="field_recon")
+@hydra.main(version_base=None, config_path="configs", config_name="field_recon_copy")
 def main(config: DictConfig) -> None:
     # 设置全局随机种子
     seed = config.get('seed', 1234)
@@ -186,7 +186,7 @@ def main(config: DictConfig) -> None:
     if field_mode == 'gt_field':
         csv_path = output_dir / "field_evaluation_results.csv"
     elif field_mode == 'nf_field':
-        csv_path = output_dir / "nf_evaluation_results_9.csv"
+        csv_path = output_dir / "nf_evaluation_results_11.csv"
     else:
         raise ValueError(f"Unsupported field_mode: {field_mode}. Only 'gt_field' and 'nf_field' are supported.")
     
@@ -223,6 +223,9 @@ def main(config: DictConfig) -> None:
     
     print(f"Using reconstruction_batch_size: {reconstruction_batch_size}")
     
+    # 用于跟踪已处理的样本，避免重复写入
+    processed_samples = set()
+    
     # 批量处理样本
     for batch_start in tqdm(range(0, len(sample_indices), reconstruction_batch_size), desc="Processing batches"):
         batch_end = min(batch_start + reconstruction_batch_size, len(sample_indices))
@@ -249,7 +252,7 @@ def main(config: DictConfig) -> None:
                 
                 # 初始化decoder和codes变量
                 codes = None
-                decoder = None
+                current_decoder = None  # 当前批次使用的decoder
                 
                 if field_mode == 'gt_field':
                     # gt_field模式：为每个样本创建dummy decoder和codes
@@ -282,11 +285,14 @@ def main(config: DictConfig) -> None:
                                 batch_fields.append(field_b[0])  # [n_points, n_atom_types, 3]
                             return torch.stack(batch_fields, dim=0)  # [B, n_points, n_atom_types, 3]
                     
-                    decoder = BatchDummyDecoder(converter, batch_gt_coords, batch_gt_types)
+                    current_decoder = BatchDummyDecoder(converter, batch_gt_coords, batch_gt_types)
                     codes = dummy_codes
                 
                 elif field_mode == 'nf_field':
-                    # nf_field模式：批量编码
+                    # nf_field模式：使用全局的decoder（已在循环外加载）
+                    current_decoder = decoder  # 使用全局的decoder
+                    
+                    # 批量编码
                     from torch_geometric.data import Data, Batch
                     
                     # 创建批量Data对象
@@ -313,9 +319,15 @@ def main(config: DictConfig) -> None:
                 save_gradient_ascent_sdf = autoregressive_config.get("save_gradient_ascent_sdf", False)
                 enable_timing = autoregressive_config.get("enable_timing", False)
                 
+                # 验证 decoder 和 codes 都已设置
+                if current_decoder is None:
+                    raise ValueError(f"decoder is None for field_mode={field_mode}. This should not happen.")
+                if codes is None:
+                    raise ValueError(f"codes is None for field_mode={field_mode}. This should not happen.")
+                
                 # 构建gnf2mol调用参数（批量模式）
                 gnf2mol_kwargs = {
-                    "decoder": decoder,
+                    "decoder": current_decoder,
                     "codes": codes,  # [actual_batch_size, grid_size**3, code_dim]
                     "sample_id": batch_sample_indices[0] if actual_batch_size == 1 else None  # 批量模式时不使用单个sample_id
                 }
@@ -342,14 +354,26 @@ def main(config: DictConfig) -> None:
                     gt_coords = batch_gt_coords[b]
                     gt_types = batch_gt_types[b]
                     
-                    # 确保recon_coords在正确的设备上
+                    # 确保recon_coords和recon_types在正确的设备上
                     recon_coords_device = recon_coords[b].to(gt_coords.device)
-                    recon_types_device = recon_types[b]
+                    recon_types_device = recon_types[b].to(gt_coords.device)
                     
-                    # 计算RMSD和统计信息
-                    rmsd = compute_rmsd(gt_coords, recon_coords_device)
-                    atom_count_mismatch = gt_coords.shape[0] != recon_coords[b].shape[0]
+                    # 过滤掉填充的原子（类型为-1的）
+                    valid_mask = recon_types_device != -1
+                    valid_recon_coords = recon_coords_device[valid_mask]
+                    valid_recon_types = recon_types_device[valid_mask]
+                    
+                    # 计算RMSD和统计信息（使用过滤后的有效原子）
+                    rmsd = compute_rmsd(gt_coords, valid_recon_coords)
+                    atom_count_mismatch = gt_coords.shape[0] != valid_recon_coords.shape[0]
                     original_size = gt_coords.shape[0]
+                    
+                    # 检查是否已处理过（避免重复写入）
+                    sample_key = (sample_idx, field_mode, field_method)
+                    if sample_key in processed_samples:
+                        print(f"Warning: Sample {sample_idx} with {field_mode}/{field_method} already processed, skipping duplicate.")
+                        continue
+                    processed_samples.add(sample_key)
                     
                     # Save result immediately to CSV
                     result_row = {
@@ -371,9 +395,7 @@ def main(config: DictConfig) -> None:
                             result_row[f'gt_{element}_count'] = count
                         
                         # 计算重建分子的原子统计
-                        # 使用gnf2mol返回的实际原子类型信息
-                        # 过滤掉填充的原子（值为-1）
-                        valid_recon_types = recon_types_device[recon_types_device != -1]
+                        # 使用已经过滤后的有效原子类型
                         for i, element in enumerate(elements):
                             count = (valid_recon_types == i).sum().item()
                             result_row[f'recon_{element}_count'] = count
@@ -385,8 +407,8 @@ def main(config: DictConfig) -> None:
                     # Save molecular coordinates and types(NOTE: sdf/xyz/mol?)
                     mol_file = mol_save_dir / f"sample_{sample_idx:04d}_{field_method}.npz"
                     np.savez(mol_file, 
-                            coords=recon_coords_device.cpu().numpy(),
-                            types=gt_types.cpu().numpy(),
+                            coords=valid_recon_coords.cpu().numpy(),  # 保存过滤后的有效坐标
+                            types=valid_recon_types.cpu().numpy(),  # 保存过滤后的有效类型
                             gt_coords=gt_coords.cpu().numpy(),
                             rmsd=rmsd)
                     
@@ -399,6 +421,13 @@ def main(config: DictConfig) -> None:
                     sample_idx = batch_sample_indices[b]
                     gt_coords = batch_gt_coords[b]
                     gt_types = batch_gt_types[b]
+                    
+                    # 检查是否已处理过（避免重复写入）
+                    sample_key = (sample_idx, field_mode, field_method)
+                    if sample_key in processed_samples:
+                        print(f"Warning: Sample {sample_idx} with {field_mode}/{field_method} already processed (error case), skipping duplicate.")
+                        continue
+                    processed_samples.add(sample_key)
                     
                     error_row = {
                         'sample_idx': sample_idx,
@@ -425,6 +454,180 @@ def main(config: DictConfig) -> None:
                     # Append error result to CSV
                     error_df = pd.DataFrame([error_row])
                     error_df.to_csv(csv_path, mode='a', header=False, index=False)
+    
+    # Load and analyze results from CSV file
+            try:
+                # 0. Define field method (converter), save path (gt_field version, dataset name, )
+                # Create converter with specific field method
+                method_config = config_dict.copy()
+                method_config['converter']['gradient_field_method'] = field_method
+                converter = create_gnf_converter(method_config)
+                
+                # 初始化decoder和codes变量
+                # 注意：decoder在全局作用域中已经定义，这里不需要重新定义
+                codes = None
+                
+                if field_mode == 'gt_field':
+                    # 2.1 Convert to field using gt_field function (also can change to mode: using trained nf decoder of encoded gt_mol)
+                    # For gt_field mode, we need to create a dummy decoder and codes                    
+                    # Create dummy codes (needed for gnf2mol)
+                    # 使用正确的维度: [batch, grid_size**3, code_dim]
+                    grid_size = config.get('dset', {}).get('grid_size', 9)
+                    code_dim = config.get('encoder', {}).get('code_dim', 128)
+                    dummy_codes = torch.randn(1, grid_size**3, code_dim, device=gt_coords.device)
+                    
+                    # Create a dummy decoder that returns the ground truth field
+                    class DummyDecoder:
+                        def __init__(self, converter, gt_coords, gt_types):
+                            self.converter = converter
+                            self.gt_coords = gt_coords
+                            self.gt_types = gt_types
+                        
+                        def __call__(self, query_points, codes):
+                            return self.converter.mol2gnf(
+                                self.gt_coords.unsqueeze(0), 
+                                self.gt_types.unsqueeze(0), 
+                                query_points
+                            )
+                    
+                    dummy_decoder = DummyDecoder(converter, gt_coords, gt_types)
+                    decoder = dummy_decoder  # 设置decoder变量
+                    codes = dummy_codes  # 设置codes变量
+                    
+                elif field_mode == 'nf_field':
+                    # 2.1 Convert to field using trained nf decoder of encoded gt_mol
+                    # Use neural field encoder to get codes
+                    # Create a torch_geometric Batch object for the encoder
+                    from torch_geometric.data import Data, Batch
+                    
+                    # Create a Data object for the single molecule
+                    data = Data(
+                        pos=gt_coords,  # [n_atoms, 3]
+                        x=gt_types,     # [n_atoms]
+                        batch=torch.zeros(gt_coords.shape[0], dtype=torch.long, device=gt_coords.device)  # [n_atoms]
+                    )
+                    
+                    # Create a batch with single molecule
+                    batch = Batch.from_data_list([data])
+                    # Move to GPU
+                    batch = batch.cuda()
+                    
+                    with torch.no_grad():
+                        codes = encoder(batch)
+                
+                # 2.2 Reconstruct mol
+                # 从配置中读取保存参数
+                autoregressive_config = config_dict.get("converter", {}).get("autoregressive_clustering", {})
+                save_clustering_history = autoregressive_config.get("enable_clustering_history", False)
+                save_gradient_ascent_sdf = autoregressive_config.get("save_gradient_ascent_sdf", False)
+                enable_timing = autoregressive_config.get("enable_timing", False)
+                
+                # 构建gnf2mol调用参数
+                gnf2mol_kwargs = {
+                    "decoder": decoder,
+                    "codes": codes,
+                    "sample_id": sample_idx  # 传入样本索引作为文件标识符
+                }
+                
+                # 只在启用时才添加保存相关参数
+                if save_clustering_history:
+                    gnf2mol_kwargs["save_clustering_history"] = True
+                    gnf2mol_kwargs["clustering_history_dir"] = str(output_dir / "clustering_history")
+                
+                if save_gradient_ascent_sdf:
+                    gnf2mol_kwargs["save_gradient_ascent_sdf"] = True
+                    gnf2mol_kwargs["gradient_ascent_sdf_dir"] = str(output_dir / "gradient_ascent_sdf")
+                    gnf2mol_kwargs["gradient_ascent_sdf_interval"] = autoregressive_config.get("gradient_ascent_sdf_interval", 100)
+                
+                if enable_timing:
+                    gnf2mol_kwargs["enable_timing"] = True
+                
+                recon_coords, recon_types = converter.gnf2mol(**gnf2mol_kwargs)
+                
+                # 2.3 Save mol (if use gt_field, save in /exps/gt_field; if use predicted_field, save in the nf path under /exps/neural_field)
+                # Note: Currently we only save results to CSV, not individual mol files
+                
+                # 3. If mol exist: analyze rmsd. save results (csv: rmsd, data_id, size, atom_count_mismatch, ), summary (mean, std, min, max)
+                # 确保recon_coords和recon_types在正确的设备上
+                recon_coords_device = recon_coords[0].to(gt_coords.device)
+                recon_types_device = recon_types[0].to(gt_coords.device)
+                
+                # 过滤掉填充的原子（类型为-1的）
+                valid_mask = recon_types_device != -1
+                valid_recon_coords = recon_coords_device[valid_mask]
+                valid_recon_types = recon_types_device[valid_mask]
+                
+                # For gt_field and nf_field modes, compare with original samples
+                rmsd = compute_rmsd(gt_coords, valid_recon_coords)  # 使用过滤后的有效坐标
+                atom_count_mismatch = gt_coords.shape[0] != valid_recon_coords.shape[0]
+                original_size = gt_coords.shape[0]
+                
+                # Save result immediately to CSV
+                result_row = {
+                    'sample_idx': sample_idx,
+                    'field_mode': field_mode,
+                    'field_method': field_method,
+                    'rmsd': rmsd,
+                    'size': original_size,
+                    'atom_count_mismatch': atom_count_mismatch
+                }
+                
+                # 为nf_field模式添加原子统计信息
+                if field_mode == 'nf_field':
+                    elements = config.dset.elements  # ["C", "H", "O", "N", "F"]
+                    
+                    # For nf_field mode, calculate original molecule atom statistics
+                    for i, element in enumerate(elements):
+                        count = (gt_types == i).sum().item()
+                        result_row[f'gt_{element}_count'] = count
+                    
+                    # 计算重建分子的原子统计
+                    # 使用已经过滤后的有效原子类型
+                    for i, element in enumerate(elements):
+                        count = (valid_recon_types == i).sum().item()
+                        result_row[f'recon_{element}_count'] = count
+                
+                # Append to CSV file immediately
+                result_df = pd.DataFrame([result_row])
+                result_df.to_csv(csv_path, mode='a', header=False, index=False)
+                
+                # Save molecular coordinates and types(NOTE: sdf/xyz/mol?)
+                mol_file = mol_save_dir / f"sample_{sample_idx:04d}_{field_method}.npz"
+                np.savez(mol_file, 
+                        coords=recon_coords_device.cpu().numpy(),
+                        types=gt_types.cpu().numpy(),
+                        gt_coords=gt_coords.cpu().numpy(),
+                        rmsd=rmsd)
+                
+            except Exception as e:
+                print(f"Error processing sample {sample_idx} with {field_method}: {e}")
+                import traceback
+                traceback.print_exc()
+                # Save error result as well
+                error_row = {
+                    'sample_idx': sample_idx,
+                    'field_mode': field_mode,
+                    'field_method': field_method,
+                    'rmsd': float('inf'),
+                    'size': gt_coords.shape[0],
+                    'atom_count_mismatch': True
+                }
+                
+                # 为nf_field模式添加原子统计信息（错误情况下设为0）
+                if field_mode == 'nf_field':
+                    elements = config.dset.elements  # ["C", "H", "O", "N", "F"]
+                    
+                    # 计算原始分子的原子统计
+                    for i, element in enumerate(elements):
+                        count = (gt_types == i).sum().item()
+                        error_row[f'gt_{element}_count'] = count
+                    
+                    # 重建分子统计设为0（因为重建失败）
+                    for element in elements:
+                        error_row[f'recon_{element}_count'] = 0
+                
+                error_df = pd.DataFrame([error_row])
+                error_df.to_csv(csv_path, mode='a', header=False, index=False)
     
     # Load and analyze results from CSV file
     print(f"Results saved to: {csv_path}")

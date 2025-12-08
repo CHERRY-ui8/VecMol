@@ -22,7 +22,7 @@ import hydra
 
 # Set GPU environment
 # os.environ['CUDA_VISIBLE_DEVICES'] = "0,2,3,4,5"
-os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2"
+os.environ['CUDA_VISIBLE_DEVICES'] = "2"
 
 from funcmol.models.element_predictor import create_element_predictor
 from funcmol.utils.utils_fm import (
@@ -256,12 +256,16 @@ class PredictorLightningModule(pl.LightningModule):
         
         # 计算BCE loss（使用BCEWithLogitsLoss，内部会处理sigmoid）
         loss = self.bce_criterion(pred_element_existence, gt_element_existence)
-        
+        acc_list = ((pred_element_existence>0) == gt_element_existence).float().mean(0)
         # Log metrics
         self.log('val_loss', loss, batch_size=len(batch),
                  on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
-        
-        return loss
+        self.log('val_acc_H', acc_list[0], batch_size=len(batch), on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log('val_acc_C', acc_list[1], batch_size=len(batch), on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log('val_acc_N', acc_list[2], batch_size=len(batch), on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log('val_acc_O', acc_list[3], batch_size=len(batch), on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log('val_acc_F', acc_list[4], batch_size=len(batch), on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        return {"loss": loss, "acc_list": acc_list}
     
     def on_train_epoch_start(self):
         """Called at the beginning of training epoch"""
