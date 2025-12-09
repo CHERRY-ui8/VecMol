@@ -52,6 +52,7 @@ autoregressive_clustering:
   min_samples_decay_factor: 0.7  # 每轮min_samples衰减因子
   min_min_samples: 2  # min_samples下限
   max_clustering_iterations: 10  # 最大迭代轮数
-  bond_length_tolerance: 0.4  # 键长合理性检查的容差（单位：Å），在标准键长基础上增加的容差
+  bond_length_tolerance: 0.4  # 键长合理性检查的上限容差（单位：Å），在标准键长基础上增加的容差
+  bond_length_lower_tolerance: 0.2  # 键长合理性检查的下限容差（单位：Å），从标准键长中减去的容差
   enable_clustering_history: False  # 是否记录聚类历史，默认False
   enable_timing: False  # 是否启用时间统计，默认False

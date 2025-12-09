@@ -62,10 +62,12 @@ class GNFConverter(nn.Module):
                 min_samples_decay_factor: float = 0.7,  # 每轮min_samples衰减因子
                 min_min_samples: int = 2,  # min_samples下限
                 max_clustering_iterations: int = 10,  # 最大迭代轮数
-                bond_length_tolerance: float = 0.4,  # 键长合理性检查的容差（单位：Å），在标准键长基础上增加的容差
+                bond_length_tolerance: float = 0.4,  # 键长合理性检查的上限容差（单位：Å），在标准键长基础上增加的容差
+                bond_length_lower_tolerance: float = 0.2,  # 键长合理性检查的下限容差（单位：Å），从标准键长中减去的容差
                 enable_clustering_history: bool = False,  # 是否记录聚类历史
                 debug_bond_validation: bool = False,  # 是否输出键长检查的调试信息
-                gradient_batch_size: Optional[int] = None):  # 梯度计算时的批次大小，None表示一次性处理所有点
+                gradient_batch_size: Optional[int] = None,  # 梯度计算时的批次大小，None表示一次性处理所有点
+                n_initial_atoms_no_bond_check: int = 3):  # 前N个原子不受键长限制（无论上限还是下限）
         super().__init__()
         self.sigma = sigma
         self.n_query_points = n_query_points
@@ -96,6 +98,7 @@ class GNFConverter(nn.Module):
         self.min_min_samples = min_min_samples
         self.max_clustering_iterations = max_clustering_iterations
         self.bond_length_tolerance = bond_length_tolerance
+        self.bond_length_lower_tolerance = bond_length_lower_tolerance
         self.enable_clustering_history = enable_clustering_history
         self.debug_bond_validation = debug_bond_validation
         self.gradient_batch_size = gradient_batch_size
@@ -127,6 +130,7 @@ class GNFConverter(nn.Module):
         # 初始化拆解后的模块
         self.bond_validator = BondValidator(
             bond_length_tolerance=bond_length_tolerance,
+            bond_length_lower_tolerance=bond_length_lower_tolerance,
             debug=debug_bond_validation
         )
         self.connectivity_analyzer = ConnectivityAnalyzer(bond_validator=self.bond_validator)
@@ -169,6 +173,7 @@ class GNFConverter(nn.Module):
             min_min_samples=min_min_samples,
             max_clustering_iterations=max_clustering_iterations,
             debug_bond_validation=debug_bond_validation,
+            n_initial_atoms_no_bond_check=n_initial_atoms_no_bond_check,
         )
         
         # 初始化采样模块
@@ -407,6 +412,9 @@ class GNFConverter(nn.Module):
             
             # 合并所有类型
             t_merge_start = time.perf_counter() if enable_timing else None
+            # 初始化连通分支相关的时间变量，避免在else分支中未定义
+            t_connected_start = None
+            t_connected_end = None
             if coords_list:
                 merged_coords = torch.cat(coords_list, dim=0)
                 merged_types = torch.cat(types_list, dim=0)

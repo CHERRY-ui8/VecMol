@@ -668,9 +668,12 @@ def create_gnf_converter(config: dict) -> GNFConverter:
     min_min_samples = autoregressive_config["min_min_samples"]
     max_clustering_iterations = autoregressive_config["max_clustering_iterations"]
     bond_length_tolerance = autoregressive_config["bond_length_tolerance"]
+    bond_length_lower_tolerance = autoregressive_config.get("bond_length_lower_tolerance", 0.2)  # 默认值0.2
     enable_clustering_history = autoregressive_config["enable_clustering_history"]
     # 调试选项（可选，默认为False）
     debug_bond_validation = autoregressive_config.get("debug_bond_validation", False)
+    # 前N个原子不受键长限制（可选，默认为3）
+    n_initial_atoms_no_bond_check = autoregressive_config.get("n_initial_atoms_no_bond_check", 3)
     
     # 获取梯度批次大小（可选，默认为None，表示一次性处理所有点）
     gradient_batch_size = gnf_config.get("gradient_batch_size", None)
@@ -705,9 +708,11 @@ def create_gnf_converter(config: dict) -> GNFConverter:
         min_min_samples=min_min_samples,
         max_clustering_iterations=max_clustering_iterations,
         bond_length_tolerance=bond_length_tolerance,
+        bond_length_lower_tolerance=bond_length_lower_tolerance,
         enable_clustering_history=enable_clustering_history,
         debug_bond_validation=debug_bond_validation,
         gradient_batch_size=gradient_batch_size,
+        n_initial_atoms_no_bond_check=n_initial_atoms_no_bond_check,
     )
 
 

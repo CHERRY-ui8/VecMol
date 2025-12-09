@@ -43,7 +43,7 @@ class ConnectivityAnalyzer:
         for i in range(n_atoms):
             for j in range(i + 1, n_atoms):
                 distance = distances[i, j]
-                threshold = self.bond_validator.get_bond_length_threshold(int(atom_types[i]), int(atom_types[j]))
+                threshold = self.bond_validator.get_bond_length_upper_threshold(int(atom_types[i]), int(atom_types[j]))
                 
                 if distance < threshold:
                     adjacency_matrix[i, j] = True

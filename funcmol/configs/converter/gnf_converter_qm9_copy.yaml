@@ -2,7 +2,7 @@ sigma: 1
 # 也许不能太多，要控制，不是所有元素都需要收敛，收敛太慢也是收敛能力差的一种表现
 n_iter: 600  # 每次迭代都会调用decoder，很费时间，1000-2000
 # 早停机制配置（可选）
-enable_early_stopping: False  # 启用早停机制，当梯度收敛时提前停止，可大幅减少迭代次数
+enable_early_stopping: True  # 启用早停机制，当梯度收敛时提前停止，可大幅减少迭代次数
 convergence_threshold: 1e-6  # 收敛阈值（梯度模长变化），仅在启用早停时有效
 min_iterations: 50  # 最少迭代次数（早停前必须达到的最小迭代数），仅在启用早停时有效
 
@@ -36,11 +36,11 @@ field_variance_weight: 0.01         # softmax温度参数：值越小，分布�
 # 如果是None，则所有原子类型将使用统一的 n_query_points
 # 键为原子类型符号（C, H, O, N, F），值为对应的 query_points 数
 n_query_points_per_type:
-  C: 4000  # 碳原子的 query_points 数
+  C: 5000  # 碳原子的 query_points 数
   H: 4000  # 氢原子的 query_points 数
   O: 300  # 氧原子的 query_points 数
-  N: 250  # 氮原子的 query_points 数
-  F: 150  # 氟原子的 query_points 数
+  N: 200  # 氮原子的 query_points 数
+  F: 100  # 氟原子的 query_points 数
 
 # 不同方法的参数配置
 method_configs:
@@ -54,7 +54,7 @@ method_configs:
 
   tanh:
     n_query_points: 2000 # 1000
-    step_size: 0.05  #  0.02
+    step_size: 0.04  #  0.02
     sig_sf: 0.1
     sig_mag: 2
     # DBSCAN聚类参数
@@ -73,16 +73,15 @@ default_config: # softmax, logsumexp, inverse_square
 # 自回归聚类配置（可选）
 autoregressive_clustering:
   enable: True  # 是否启用自回归聚类，默认False
-  max_clustering_iterations: 10  # 最大迭代轮数
+  max_clustering_iterations: 5  # 最大迭代轮数
 
-  initial_min_samples: 80  # 初始min_samples，null表示使用默认min_samples
+  initial_min_samples: 40  # 初始min_samples，null表示使用默认min_samples
   min_samples_decay_factor: 0.2  # 每轮min_samples衰减因子
-  min_min_samples: 5  # min_samples下限
+  min_min_samples: 6  # min_samples下限
   
   # 这个值需要调得较大？并不应该
-  bond_length_tolerance: 0.5  # 键长合理性检查的上限容差（单位：Å），在标准键长基础上增加的容差
-  bond_length_lower_tolerance: 0.5  # 键长合理性检查的下限容差（单位：Å），从标准键长中减去的容差
-  n_initial_atoms_no_bond_check: 2  # 前N个原子不受键长限制（无论上限还是下限），避免第一个错误原子阻止后续正确原子被重建
+  bond_length_tolerance: 1  # 键长合理性检查的上限容差（单位：Å），在标准键长基础上增加的容差
+  bond_length_lower_tolerance: 0.2  # 键长合理性检查的下限容差（单位：Å），从标准键长中减去的容差
   debug_bond_validation: True  # 是否输出键长检查的调试信息，默认False
 
   enable_clustering_history: True  # 是否记录聚类历史，默认False

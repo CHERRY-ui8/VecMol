@@ -52,6 +52,10 @@ def compute_rmsd(coords1: torch.Tensor, coords2: torch.Tensor) -> float:
     if coords1.device != coords2.device:
         coords2 = coords2.to(coords1.device)
     
+    # 确保类型一致（Float32）
+    if coords1.dtype != coords2.dtype:
+        coords2 = coords2.to(coords1.dtype)
+    
     dists = torch.cdist(coords1, coords2)
     row_indices, col_indices = linear_sum_assignment(dists.cpu().numpy())
     rmsd = torch.sqrt(torch.mean(dists[row_indices, col_indices] ** 2))
@@ -186,7 +190,7 @@ def main(config: DictConfig) -> None:
     if field_mode == 'gt_field':
         csv_path = output_dir / "field_evaluation_results.csv"
     elif field_mode == 'nf_field':
-        csv_path = output_dir / "nf_evaluation_results_9.csv"
+        csv_path = output_dir / "nf_evaluation_results_11.csv"
     else:
         raise ValueError(f"Unsupported field_mode: {field_mode}. Only 'gt_field' and 'nf_field' are supported.")
     

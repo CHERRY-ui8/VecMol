@@ -50,8 +50,8 @@
             2,
             3
           ],
-          "gif_path": "/home/huayuchen/Neurl-voxel/funcmol/field_set/recon/gt_field_sample_4_gaussian_mag.gif",
-          "comparison_path": "/home/huayuchen/Neurl-voxel/funcmol/field_set/recon/gt_field_sample_4_gaussian_mag_final.png"
+          "gif_path": "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/funcmol/field_set/recon/gt_field_sample_4_gaussian_mag.gif",
+          "comparison_path": "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/funcmol/field_set/recon/gt_field_sample_4_gaussian_mag_final.png"
         }
       }
     },
@@ -98,8 +98,8 @@
             2,
             3
           ],
-          "gif_path": "/home/huayuchen/Neurl-voxel/funcmol/field_set/recon/gt_field_sample_4_tanh.gif",
-          "comparison_path": "/home/huayuchen/Neurl-voxel/funcmol/field_set/recon/gt_field_sample_4_tanh_final.png"
+          "gif_path": "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/funcmol/field_set/recon/gt_field_sample_4_tanh.gif",
+          "comparison_path": "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/funcmol/field_set/recon/gt_field_sample_4_tanh_final.png"
         }
       }
     }

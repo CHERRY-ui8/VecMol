@@ -3,8 +3,8 @@
 
 使用方法:
     python -m funcmol.analysis.evaluate_molecules_from_codes \
-        --molecule_dir /home/huayuchen/Neurl-voxel/exps/funcmol/fm_qm9/20251108/molecule \
-        --output_dir /home/huayuchen/Neurl-voxel/funcmol/analysis/analysis_metrics
+        --molecule_dir /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251108/molecule \
+        --output_dir /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/funcmol/analysis/analysis_metrics
 """
 
 import sys

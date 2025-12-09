@@ -1,4 +1,6 @@
 import os
+import time
+import fcntl
 import torch
 from tqdm import tqdm
 
@@ -115,6 +117,9 @@ def compute_code_stats_offline(
 ) -> dict:
     """
     Computes statistics for codes offline.
+    
+    This function now supports caching to avoid recomputing statistics.
+    Cache files are saved in the same directory as the codes data.
 
     Args:
         loader (torch.utils.data.DataLoader): DataLoader containing the dataset.
@@ -125,6 +130,107 @@ def compute_code_stats_offline(
         dict: A dictionary containing the computed code statistics.
     """
     dataset = loader.dataset
+    
+    # 确定缓存文件路径
+    cache_path = None
+    if hasattr(dataset, 'use_lmdb') and dataset.use_lmdb:
+        # LMDB模式：使用LMDB路径作为缓存目录
+        lmdb_path = dataset.lmdb_path
+        cache_dir = os.path.dirname(lmdb_path)
+        # 生成缓存文件名：基于split和normalize_codes参数
+        cache_filename = f"code_stats_{split}_norm{normalize_codes}.pt"
+        cache_path = os.path.join(cache_dir, cache_filename)
+    elif hasattr(dataset, 'codes_dir'):
+        # 传统模式：使用codes_dir作为缓存目录
+        cache_dir = dataset.codes_dir
+        cache_filename = f"code_stats_{split}_norm{normalize_codes}.pt"
+        cache_path = os.path.join(cache_dir, cache_filename)
+    
+    # 尝试加载缓存
+    if cache_path and os.path.exists(cache_path):
+        try:
+            print(f"Loading cached code statistics from: {cache_path}")
+            cached_stats = torch.load(cache_path, weights_only=False)
+            print(f"Successfully loaded cached code statistics for {split} split")
+            print(f"====cached codes {split}====")
+            print(f"min: {cached_stats.get('min_normalized', 'N/A')}")
+            print(f"max: {cached_stats.get('max_normalized', 'N/A')}")
+            print(f"mean: {cached_stats.get('mean', 'N/A')}")
+            print(f"std: {cached_stats.get('std', 'N/A')}")
+            return cached_stats
+        except Exception as e:
+            print(f"Warning: Failed to load cached code statistics: {e}")
+            print("Will recompute statistics...")
+    
+    # 如果缓存不存在，使用文件锁确保只有一个进程计算统计信息
+    lock_path = None
+    lock_file = None
+    should_compute = False
+    
+    if cache_path:
+        # 创建锁文件路径
+        lock_path = cache_path + ".lock"
+        lock_dir = os.path.dirname(lock_path)
+        os.makedirs(lock_dir, exist_ok=True)
+        
+        try:
+            # 尝试获取文件锁（非阻塞）
+            lock_file = open(lock_path, 'w')
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            should_compute = True
+            print(f"Acquired lock for computing code statistics (process will compute stats)")
+        except (IOError, OSError):
+            # 无法获取锁，说明其他进程正在计算
+            if lock_file:
+                lock_file.close()
+            lock_file = None
+            should_compute = False
+            print(f"Another process is computing code statistics, waiting for cache file...")
+            
+            # 等待其他进程完成计算（最多等待2小时）
+            max_wait_time = 7200  # 2小时
+            wait_interval = 2  # 每2秒检查一次
+            elapsed_time = 0
+            
+            while elapsed_time < max_wait_time:
+                if os.path.exists(cache_path):
+                    try:
+                        print(f"Cache file found! Loading cached code statistics from: {cache_path}")
+                        cached_stats = torch.load(cache_path, weights_only=False)
+                        print(f"Successfully loaded cached code statistics for {split} split")
+                        print(f"====cached codes {split}====")
+                        print(f"min: {cached_stats.get('min_normalized', 'N/A')}")
+                        print(f"max: {cached_stats.get('max_normalized', 'N/A')}")
+                        print(f"mean: {cached_stats.get('mean', 'N/A')}")
+                        print(f"std: {cached_stats.get('std', 'N/A')}")
+                        return cached_stats
+                    except Exception as e:
+                        print(f"Warning: Failed to load cache file: {e}, continuing to wait...")
+                
+                time.sleep(wait_interval)
+                elapsed_time += wait_interval
+                if elapsed_time % 30 == 0:  # 每30秒打印一次
+                    print(f"Still waiting for cache file... ({elapsed_time}s elapsed)")
+            
+            # 如果超时，抛出错误
+            raise RuntimeError(
+                f"Timeout waiting for code statistics cache file. "
+                f"Expected cache file: {cache_path}. "
+                f"Please check if another process is still computing statistics."
+            )
+    
+    # 只有在获取到锁或没有缓存路径时才进行计算
+    if not should_compute and cache_path:
+        # 如果没有获取到锁，说明其他进程正在计算，我们已经在上面的等待循环中返回了
+        # 这里不应该到达，但为了安全起见，再次检查缓存
+        if os.path.exists(cache_path):
+            try:
+                cached_stats = torch.load(cache_path, weights_only=False)
+                return cached_stats
+            except Exception:
+                pass
+        raise RuntimeError("Unexpected state: should not compute but no cache available")
+    
     # 检查是否使用LMDB模式
     if hasattr(dataset, 'use_lmdb') and dataset.use_lmdb:
         # LMDB模式：使用流式处理计算统计信息，避免内存溢出
@@ -256,6 +362,29 @@ def compute_code_stats_offline(
         print(f"min_normalized: {min_normalized}")
         print(f"max_normalized: {max_normalized}")
         
+        # 保存缓存
+        if cache_path:
+            try:
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                # 先保存到临时文件，然后原子性地重命名
+                temp_cache_path = cache_path + ".tmp"
+                torch.save(code_stats, temp_cache_path)
+                os.rename(temp_cache_path, cache_path)
+                print(f"Saved code statistics cache to: {cache_path}")
+            except Exception as e:
+                print(f"Warning: Failed to save code statistics cache: {e}")
+        
+        # 释放文件锁
+        if lock_file:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                lock_file.close()
+                # 删除锁文件
+                if os.path.exists(lock_path):
+                    os.remove(lock_path)
+            except Exception as e:
+                print(f"Warning: Failed to release lock: {e}")
+        
         return code_stats
     else:
         # 传统模式：直接使用curr_codes属性
@@ -268,6 +397,30 @@ def compute_code_stats_offline(
             )
         
         code_stats = process_codes(codes, split, normalize_codes)
+        
+        # 保存缓存（传统模式）
+        if cache_path:
+            try:
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                # 先保存到临时文件，然后原子性地重命名
+                temp_cache_path = cache_path + ".tmp"
+                torch.save(code_stats, temp_cache_path)
+                os.rename(temp_cache_path, cache_path)
+                print(f"Saved code statistics cache to: {cache_path}")
+            except Exception as e:
+                print(f"Warning: Failed to save code statistics cache: {e}")
+        
+        # 释放文件锁
+        if lock_file:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                lock_file.close()
+                # 删除锁文件
+                if os.path.exists(lock_path):
+                    os.remove(lock_path)
+            except Exception as e:
+                print(f"Warning: Failed to release lock: {e}")
+        
         return code_stats
 
 

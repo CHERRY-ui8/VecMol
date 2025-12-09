@@ -17,7 +17,7 @@ exp_name: "nf_${dset.dset_name}/${now:%Y%m%d}"
 dirname: "${exp_dir}/${exp_name}"
 
 # For continue training and finetune decoder
-# reload_model_path: "/home/huayuchen/Neurl-voxel/exps/neural_field/nf_qm9/20251024/lightning_logs/version_0/checkpoints/model-epoch=409.ckpt"
+# reload_model_path: "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251024/lightning_logs/version_0/checkpoints/model-epoch=409.ckpt"
 reload_model_path: null
 
 auto_resume: False  # 是否自动加载最新的checkpoint继续训练

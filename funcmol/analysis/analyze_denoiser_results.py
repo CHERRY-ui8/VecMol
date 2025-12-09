@@ -363,7 +363,7 @@ def compare_with_qm9(stats, total_atoms_per_mol, output_dir=None):
 
 def main():
     """主函数"""
-    csv_path = '/home/huayuchen/Neurl-voxel/exps/funcmol/fm_qm9/20251108/denoiser_evaluation_results.csv'
+    csv_path = '/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251108/denoiser_evaluation_results.csv'
     
     # 分析数据
     result = analyze_denoiser_results(csv_path)

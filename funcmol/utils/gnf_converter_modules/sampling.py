@@ -6,7 +6,6 @@ import torch.nn as nn
 import numpy as np
 import time
 from typing import Optional, Tuple, List, Dict
-from sklearn.cluster import DBSCAN
 from funcmol.utils.gnf_converter_modules.dataclasses import ClusteringHistory
 
 
@@ -233,60 +232,85 @@ class SamplingProcessor:
             # 按原子类型分离结果并进行聚类（只处理存在的类型）
             t_clustering_start = time.perf_counter() if enable_timing else None
             
+            # 使用跨原子类型iteration循环
+            # 1. 先为每个原子类型准备簇
+            type_clusters_data = {}  # {atom_type: (clusters_with_tags, iteration_thresholds)}
+            type_points_dict = {}  # {atom_type: points}
+            
             for type_idx, t in enumerate(existing_types):
-                # 在处理当前原子类型之前，预先对后续原子类型进行初始聚类，找出所有簇作为参考点
-                if type_idx < len(existing_types) - 1:  # 不是最后一个原子类型
-                    preliminary_points = []
-                    preliminary_types = []
-                    for future_type_idx in range(type_idx + 1, len(existing_types)):
-                        future_t = existing_types[future_type_idx]
-                        future_start_idx = type_start_indices[future_type_idx]
-                        future_end_idx = future_start_idx + query_points_per_type[future_type_idx]
-                        future_type_points = final_points[future_start_idx:future_end_idx]
-                        future_z_np = future_type_points.detach().cpu().numpy()
-                        
-                        # 进行初始聚类，找出所有簇（不进行键长检查）
-                        if len(future_z_np) > 0:
-                            initial_clustering = DBSCAN(eps=self.eps, min_samples=self.min_min_samples).fit(future_z_np)
-                            initial_labels = initial_clustering.labels_
-                            for label in set(initial_labels):
-                                if label == -1:
-                                    continue  # 跳过噪声点
-                                cluster_points = future_z_np[initial_labels == label]
-                                center = np.mean(cluster_points, axis=0)
-                                preliminary_points.append(center)
-                                preliminary_types.append(future_t)
-                    
-                    # 将后续原子类型的初步簇添加到参考点中（用于当前原子类型的键长检查）
-                    if len(preliminary_points) > 0:
-                        all_reference_points.extend(preliminary_points)
-                        all_reference_types.extend(preliminary_types)
-                
                 start_idx = type_start_indices[type_idx]
                 end_idx = start_idx + query_points_per_type[type_idx]
                 type_points = final_points[start_idx:end_idx]  # [n_query_points_t, 3]
-                
-                # 聚类/合并
                 z_np = type_points.detach().cpu().numpy()
-                merged_points, history = self.clustering_processor.merge_points(
-                    z_np, 
-                    atom_type=t,
-                    reference_points=np.array(all_reference_points) if len(all_reference_points) > 0 else None,
-                    reference_types=np.array(all_reference_types) if len(all_reference_types) > 0 else None,
-                    record_history=self.enable_clustering_history
-                )
+                type_points_dict[t] = z_np
                 
+                # 准备簇
+                clusters_with_tags, iteration_thresholds = self.clustering_processor._prepare_clusters(z_np)
+                type_clusters_data[t] = (clusters_with_tags, iteration_thresholds)
+            
+            # 2. 外层循环iteration，内层循环原子类型
+            max_iterations = self.clustering_processor.max_clustering_iterations
+            type_pending_clusters = {t: [] for t in existing_types}  # {atom_type: pending_clusters}
+            type_all_merged_points = {t: [] for t in existing_types}  # {atom_type: [centers, ...]}
+            
+            # 初始化全局参考点（使用numpy数组以便修改）
+            global_ref_points = np.array(all_reference_points) if len(all_reference_points) > 0 else np.empty((0, 3))
+            global_ref_types = np.array(all_reference_types) if len(all_reference_types) > 0 else np.empty((0,), dtype=np.int64)
+            
+            for current_iteration in range(max_iterations):
+                # 内层循环：处理所有原子类型
+                for type_idx, t in enumerate(existing_types):
+                    clusters_with_tags, iteration_thresholds = type_clusters_data[t]
+                    pending_clusters = type_pending_clusters[t]
+                    
+                    # 获取当前原子类型已通过的原子数量
+                    current_type_atom_count = len(type_all_merged_points[t])
+                    
+                    # 处理当前iteration
+                    new_atoms, new_pending, stats, updated_ref_points, updated_ref_types = \
+                        self.clustering_processor.merge_points_single_iteration(
+                            clusters_with_tags, iteration_thresholds, current_iteration,
+                            atom_type=t,
+                            reference_points=global_ref_points if len(global_ref_points) > 0 else None,
+                            reference_types=global_ref_types if len(global_ref_types) > 0 else None,
+                            pending_clusters=pending_clusters,
+                            current_type_atom_count=current_type_atom_count
+                        )
+                    
+                    # 更新pending簇
+                    type_pending_clusters[t] = new_pending
+                    
+                    # 收集通过检查的原子
+                    if len(new_atoms) > 0:
+                        type_all_merged_points[t].extend(new_atoms.tolist())
+                        # 更新全局参考点
+                        global_ref_points = updated_ref_points
+                        global_ref_types = updated_ref_types
+                    
+                    # 输出调试信息
+                    if self.clustering_processor.debug_bond_validation:
+                        from collections import Counter
+                        from funcmol.utils.constants import ELEMENTS_HASH_INV
+                        atom_symbol = ELEMENTS_HASH_INV.get(t, f"Type{t}") if t is not None else "Unknown"
+                        print(f"\n{'='*60}")
+                        print(f"[Iteration {current_iteration}] 原子类型: {atom_symbol}, min_samples={stats['current_min_samples']}")
+                        print(f"  处理簇数: {stats['n_clusters_found']} (新簇: {stats['n_clusters_found'] - len(new_pending)}, 待重试: {len(new_pending)})")
+                        print(f"  结果: ✓通过={stats['n_passed']}, ✗拒绝={stats['n_rejected']}")
+                        if stats['n_rejected'] > 0:
+                            reason_str = ", ".join([f"{k}={v}" for k, v in stats['rejection_reasons'].items() if v > 0])
+                            print(f"  拒绝原因: {reason_str}")
+                        if len(global_ref_points) > 0:
+                            type_counts = Counter([ELEMENTS_HASH_INV.get(int(tt), f"Type{int(tt)}") for tt in global_ref_types])
+                            print(f"  当前参考点: {len(global_ref_points)} 个, 类型分布: {dict(type_counts)}")
+                        print(f"{'='*60}")
+            
+            # 3. 收集所有结果
+            for type_idx, t in enumerate(existing_types):
+                merged_points = np.array(type_all_merged_points[t]) if len(type_all_merged_points[t]) > 0 else np.empty((0, 3))
                 if len(merged_points) > 0:
                     merged_tensor = torch.from_numpy(merged_points).to(device)
                     coords_list.append(merged_tensor)
                     types_list.append(torch.full((len(merged_points),), t, dtype=torch.long, device=device))
-                    
-                    # 更新全局参考点（用于后续原子类型的键长检查）
-                    all_reference_points.extend(merged_points.tolist())
-                    all_reference_types.extend([t] * len(merged_points))
-                
-                if history is not None:
-                    all_clustering_histories.append(history)
             
             if enable_timing:
                 timing_info['clustering'] = time.perf_counter() - t_clustering_start

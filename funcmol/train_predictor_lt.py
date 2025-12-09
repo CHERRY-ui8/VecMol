@@ -22,7 +22,7 @@ import hydra
 
 # Set GPU environment
 # os.environ['CUDA_VISIBLE_DEVICES'] = "0,2,3,4,5"
-os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2"
+os.environ['CUDA_VISIBLE_DEVICES'] = "0"
 
 from funcmol.models.element_predictor import create_element_predictor
 from funcmol.utils.utils_fm import (
