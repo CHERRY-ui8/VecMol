@@ -35,6 +35,9 @@ ddpm:
   s1: 0.008
   sT: 0.008
   w: 1.0
+  
+  # 损失权重配置（仅当diffusion_method为"new_x0"时使用）
+  use_time_weight: True  # 是否使用时间步权重 1 + num_timesteps/(t+1)
 
 # nf_pretrained_path: ../exps/neural_field/nf_qm9
 # nf_pretrained_path: ../exps/neural_field/nf_qm9_20250812_181425_750832

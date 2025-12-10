@@ -65,6 +65,7 @@ class FuncMol(nn.Module):
             # 创建扩散常数并直接放在目标设备上
             self.diffusion_consts = create_diffusion_constants(config, device=self.device)
             self.num_timesteps = config.get("ddpm", {}).get("num_timesteps", 1000)
+            self.use_time_weight = config.get("ddpm", {}).get("use_time_weight", True)
         else:
             # 使用原有方法
             if config.get("denoiser", {}).get("use_gnn", False):
@@ -200,7 +201,7 @@ class FuncMol(nn.Module):
         if self.diffusion_method == "new":
             return compute_ddpm_loss(self.net, x_0, self.diffusion_consts, self.device)
         elif self.diffusion_method == "new_x0":
-            return compute_ddpm_loss_x0(self.net, x_0, self.diffusion_consts, self.device)
+            return compute_ddpm_loss_x0(self.net, x_0, self.diffusion_consts, self.device, use_time_weight=self.use_time_weight)
         else:
             raise ValueError("DDPM training step only available for 'new' or 'new_x0' diffusion method")
 

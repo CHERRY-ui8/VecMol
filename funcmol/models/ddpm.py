@@ -395,7 +395,7 @@ def compute_ddpm_loss(model: nn.Module, x_0: torch.Tensor, diffusion_consts: Dic
 
 
 def compute_ddpm_loss_x0(model: nn.Module, x_0: torch.Tensor, diffusion_consts: Dict[str, torch.Tensor], 
-                         device: torch.device) -> torch.Tensor:
+                         device: torch.device, use_time_weight: bool = True) -> torch.Tensor:
     """
     计算DDPM训练损失（预测x0版本）
     
@@ -404,14 +404,16 @@ def compute_ddpm_loss_x0(model: nn.Module, x_0: torch.Tensor, diffusion_consts: 
         x_0: 原始数据 [B, N*N*N, code_dim]
         diffusion_consts: 扩散常数
         device: 设备
+        use_time_weight: 是否使用时间步权重 1 + num_timesteps/(t+1)
     
     Returns:
         训练损失
     """
     batch_size = x_0.shape[0]
+    num_timesteps = diffusion_consts["betas"].shape[0]
     
     # 随机采样时间步
-    t = torch.randint(0, diffusion_consts["betas"].shape[0], (batch_size,), device=device).long()
+    t = torch.randint(0, num_timesteps, (batch_size,), device=device).long()
     
     # 生成噪声
     noise = torch.randn_like(x_0)
@@ -422,15 +424,28 @@ def compute_ddpm_loss_x0(model: nn.Module, x_0: torch.Tensor, diffusion_consts: 
     # 预测x0
     predicted_x0 = model(x_t, t)
     
-    # 计算损失：直接预测x0
-    # 注意：对于预测x0的版本，通常不需要时间步权重，因为预测x0比预测噪声更稳定
-    loss = F.mse_loss(predicted_x0, x_0, reduction='mean')
+    # 直接预测x_0
+    # 计算每个样本的损失 [B]
+    loss_per_sample = F.mse_loss(predicted_x0, x_0, reduction='none').mean(dim=tuple(range(1, predicted_x0.ndim)))
     
-    # 数值稳定性检查：如果loss过大，可能是数值问题
+    if use_time_weight:
+        # 计算时间步权重：1 + num_timesteps / (t + 1)
+        # t越小，权重越大（t=0时权重最大，t=num_timesteps-1时权重最小）
+        weights = 1.0 + num_timesteps / (t.float() + 1.0)  # [B]
+        # 应用权重并取平均
+        loss = (loss_per_sample * weights).mean()
+    else:
+        # 不使用权重，直接取平均
+        loss = loss_per_sample.mean()
+    
+    # 数值检查
     if torch.isnan(loss) or torch.isinf(loss):
         print("[WARNING] Loss is NaN or Inf in compute_ddpm_loss_x0")
         print(f"  predicted_x0: min={predicted_x0.min().item():.6f}, max={predicted_x0.max().item():.6f}, mean={predicted_x0.mean().item():.6f}")
         print(f"  x_0: min={x_0.min().item():.6f}, max={x_0.max().item():.6f}, mean={x_0.mean().item():.6f}")
+        if use_time_weight:
+            weights = 1.0 + num_timesteps / (t.float() + 1.0)
+            print(f"  weights: min={weights.min().item():.6f}, max={weights.max().item():.6f}, mean={weights.mean().item():.6f}")
         # 返回一个小的非零值以避免训练崩溃
         loss = torch.tensor(1e-6, device=device, requires_grad=True)
     
