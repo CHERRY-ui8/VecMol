@@ -26,7 +26,7 @@ ddpm:
   # 根据 num_timesteps 选择对应的 beta 配置：
   # - num_timesteps: 100   -> beta_start: 0.0005, beta_end: 0.05
   # - num_timesteps: 1000 -> beta_start: 0.0001, beta_end: 0.02
-  num_timesteps: 1000 # 1000
+  num_timesteps: 1000 # 1000, 100
   beta_start: 0.0001  # 当 num_timesteps: 100 时使用0.0005；当 num_timesteps: 1000 时改为 0.0001
   beta_end: 0.02      # 当 num_timesteps: 100 时使用0.05；当 num_timesteps: 1000 时改为 0.02
   schedule: "linear"  # 可选: "linear", "cosine", "sigmoid"
@@ -48,19 +48,13 @@ reload_model_path: null
 smooth_sigma: 0.5 # 2.0, 1.0, 0.5
 normalize_codes: 1
 on_the_fly: False  # use True to compute codes on the fly from neural field
-codes_dir: "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/codes/"
-
-# data augmentation for denoiser training
-use_data_augmentation: True  # 是否启用数据增强
-data_augmentation:
-  apply_rotation: True  # 是否应用旋转增强
-  apply_translation: False  # 是否应用平移增强
+codes_dir: "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/codes/"
 
 # training params
 num_epochs: 50000
 num_iterations: 50000  # 总迭代次数，用于学习率调度
 dset:
-  batch_size: 32
+  batch_size: 128
   num_workers: 4
 
 ckpt_every_n_epochs: 5  # 每隔多少epoch保存一次ckpt

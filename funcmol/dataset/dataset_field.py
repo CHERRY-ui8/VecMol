@@ -678,6 +678,10 @@ def create_gnf_converter(config: dict) -> GNFConverter:
     # 获取梯度批次大小（可选，默认为None，表示一次性处理所有点）
     gradient_batch_size = gnf_config.get("gradient_batch_size", None)
     
+    # 获取撒点范围（可选，默认为-7.0和7.0）
+    sampling_range_min = gnf_config.get("sampling_range_min", -7.0)
+    sampling_range_max = gnf_config.get("sampling_range_max", 7.0)
+    
     return GNFConverter(
         sigma=sigma,
         n_query_points=n_query_points,
@@ -713,6 +717,8 @@ def create_gnf_converter(config: dict) -> GNFConverter:
         debug_bond_validation=debug_bond_validation,
         gradient_batch_size=gradient_batch_size,
         n_initial_atoms_no_bond_check=n_initial_atoms_no_bond_check,
+        sampling_range_min=sampling_range_min,
+        sampling_range_max=sampling_range_max,
     )
 
 

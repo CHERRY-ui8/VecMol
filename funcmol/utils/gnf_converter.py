@@ -67,7 +67,9 @@ class GNFConverter(nn.Module):
                 enable_clustering_history: bool = False,  # 是否记录聚类历史
                 debug_bond_validation: bool = False,  # 是否输出键长检查的调试信息
                 gradient_batch_size: Optional[int] = None,  # 梯度计算时的批次大小，None表示一次性处理所有点
-                n_initial_atoms_no_bond_check: int = 3):  # 前N个原子不受键长限制（无论上限还是下限）
+                n_initial_atoms_no_bond_check: int = 3,  # 前N个原子不受键长限制（无论上限还是下限）
+                sampling_range_min: float = -7.0,  # 撒点范围的最小值（单位：Å）
+                sampling_range_max: float = 7.0):  # 撒点范围的最大值（单位：Å）
         super().__init__()
         self.sigma = sigma
         self.n_query_points = n_query_points
@@ -102,6 +104,8 @@ class GNFConverter(nn.Module):
         self.enable_clustering_history = enable_clustering_history
         self.debug_bond_validation = debug_bond_validation
         self.gradient_batch_size = gradient_batch_size
+        self.sampling_range_min = sampling_range_min
+        self.sampling_range_max = sampling_range_max
         
         # 为不同类型的原子设置不同的 sigma 参数
         # We model hydrogen explicitly and consider 5 chemical elements for QM9 (C, H, O, N, F), 
@@ -189,6 +193,8 @@ class GNFConverter(nn.Module):
             eps=eps,
             min_min_samples=min_min_samples,
             enable_clustering_history=enable_clustering_history,
+            sampling_range_min=sampling_range_min,
+            sampling_range_max=sampling_range_max,
         )
     
     def forward(self, coords: torch.Tensor, atom_types: torch.Tensor, 

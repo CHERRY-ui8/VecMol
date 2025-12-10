@@ -24,7 +24,7 @@ from omegaconf import OmegaConf
 import hydra
 
 # Set GPU environment
-os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3,4,5,6,7"
+os.environ['CUDA_VISIBLE_DEVICES'] = "1,2,3,4,5,6,7"
 
 from funcmol.models.funcmol import create_funcmol
 from funcmol.utils.utils_fm import (
@@ -32,7 +32,6 @@ from funcmol.utils.utils_fm import (
     compute_code_stats_offline, compute_codes,
     load_checkpoint_state_fm
 )
-from funcmol.utils.data_augmentation import augment_codes
 from funcmol.models.adamw import AdamW
 from funcmol.models.ema import ModelEma
 from funcmol.utils.utils_nf import infer_codes_occs_batch, load_neural_field, normalize_code
@@ -143,20 +142,22 @@ class FuncmolLightningModule(pl.LightningModule):
         # 获取codes
         codes, _ = self._process_batch(batch)
         
-        # 应用数据增强（仅在训练时）
-        if self.training and self.config.get("use_data_augmentation", True):
-            grid_size = self.config["dset"]["grid_size"]
-            anchor_spacing = self.config["dset"]["anchor_spacing"]
-            apply_rotation = self.config.get("data_augmentation", {}).get("apply_rotation", True)
-            apply_translation = self.config.get("data_augmentation", {}).get("apply_translation", False)
-            
-            codes = augment_codes(
-                codes, 
-                grid_size=grid_size, 
-                anchor_spacing=anchor_spacing,
-                apply_rotation=apply_rotation,
-                apply_translation=apply_translation
-            )
+        # 已移除：对codes的数据增强（使用bilinear插值）
+        # 注意：在infer_codes.py中对分子坐标的增强（生成10个pt文件）仍然保留
+        # 这里移除的是训练时对已生成codes的插值增强，避免bilinear插值误差
+        # if self.training and self.config.get("use_data_augmentation", True):
+        #     grid_size = self.config["dset"]["grid_size"]
+        #     anchor_spacing = self.config["dset"]["anchor_spacing"]
+        #     apply_rotation = self.config.get("data_augmentation", {}).get("apply_rotation", True)
+        #     apply_translation = self.config.get("data_augmentation", {}).get("apply_translation", False)
+        #     
+        #     codes = augment_codes(
+        #         codes, 
+        #         grid_size=grid_size, 
+        #         anchor_spacing=anchor_spacing,
+        #         apply_rotation=apply_rotation,
+        #         apply_translation=apply_translation
+        #     )
         
         # 添加调试信息
         # if batch_idx == 0:  # 只在第一个batch打印

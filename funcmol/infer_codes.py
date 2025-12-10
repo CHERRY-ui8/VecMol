@@ -228,8 +228,11 @@ def main(config):
     apply_translation = config.get("data_augmentation", {}).get("apply_translation", True)
     anchor_spacing = config.get("dset", {}).get("anchor_spacing", 1.5)
     
+    # 如果禁用数据增强，强制设置为1（只生成原始版本）
+    if not use_data_augmentation_config:
+        num_augmentations = 1
     # 如果不是训练集，强制禁用数据增强
-    if split != "train" and use_data_augmentation_config:
+    elif split != "train" and use_data_augmentation_config:
         num_augmentations = 1
 
     # check if codes already exist (检查所有增强版本的文件)

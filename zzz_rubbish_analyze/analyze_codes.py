@@ -3,8 +3,28 @@ import matplotlib.pyplot as plt
 import sys
 import os
 from pathlib import Path
+import lmdb
+import pickle
+import random
+import traceback
 
-sys.path.append('/home/huayuchen/Neurl-voxel')
+# 自动找到项目根目录（包含funcmol目录的目录）
+script_dir = Path(__file__).parent.absolute()
+# 从脚本目录向上查找，直到找到包含funcmol目录的目录
+project_root = script_dir
+while project_root.parent != project_root:  # 直到根目录
+    if (project_root / "funcmol").exists() and (project_root / "funcmol" / "configs").exists():
+        break
+    project_root = project_root.parent
+else:
+    # 如果找不到，尝试使用硬编码路径
+    project_root = Path("/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield")
+    if not (project_root / "funcmol" / "configs").exists():
+        project_root = Path("/home/huayuchen/Neurl-voxel")
+
+# 添加项目根目录到Python路径
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
 import hydra
 from funcmol.utils.utils_fm import add_noise_to_code
@@ -14,8 +34,92 @@ import numpy as np
 # 设置为cpu
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
+def load_codes_from_lmdb(lmdb_path: str, keys_path: str, max_samples: int = None, random_sample: bool = False):
+    """
+    从LMDB数据库加载codes（支持采样，避免内存溢出）
+    
+    Args:
+        lmdb_path: LMDB数据库路径
+        keys_path: keys文件路径
+        max_samples: 最大采样数量
+        random_sample: 是否随机采样
+    
+    Returns:
+        raw_codes: 采样后的codes
+    """
+    # 加载keys
+    keys = torch.load(keys_path, weights_only=False)
+    total_samples = len(keys)
+    print(f"LMDB数据库包含 {total_samples} 个样本")
+    
+    # 确定采样数量
+    if max_samples is None:
+        # 不限制，使用全部样本
+        indices = list(range(total_samples))
+        print(f"使用全部 {total_samples} 个样本")
+    else:
+        sample_size = min(max_samples, total_samples)
+        if total_samples > max_samples:
+            if random_sample:
+                # 随机采样
+                indices = random.sample(range(total_samples), sample_size)
+                indices.sort()  # 排序以便顺序读取
+                print(f"随机采样 {sample_size} 个样本进行分析")
+            else:
+                # 顺序采样前N个
+                indices = list(range(sample_size))
+                print(f"顺序采样前 {sample_size} 个样本进行分析")
+        else:
+            indices = list(range(total_samples))
+            print(f"使用全部 {total_samples} 个样本（未超过max_samples限制）")
+    
+    # 打开LMDB数据库
+    db = lmdb.open(
+        lmdb_path,
+        map_size=10*(1024*1024*1024),  # 10GB
+        create=False,
+        subdir=True,
+        readonly=True,
+        lock=False,
+        readahead=True,
+        meminit=False,
+        max_readers=1,
+    )
+    
+    # 逐个加载样本
+    all_codes = []
+    print(f"正在从LMDB加载 {len(indices)} 个样本...")
+    for i, idx in enumerate(indices):
+        if (i + 1) % 1000 == 0:
+            print(f"  已加载 {i + 1}/{len(indices)} 个样本...")
+        
+        key = keys[idx]
+        # 确保key是bytes格式
+        if isinstance(key, str):
+            key = key.encode('utf-8')
+        
+        # 从LMDB读取
+        with db.begin(buffers=True) as txn:
+            value = txn.get(key)
+            if value is None:
+                print(f"警告: 键 {key} 未找到，跳过")
+                continue
+            code_raw = pickle.loads(value)
+            all_codes.append(code_raw)
+    
+    db.close()
+    
+    # 合并所有codes
+    if not all_codes:
+        print("错误: 未能加载任何codes")
+        return None
+    
+    raw_codes = torch.stack(all_codes, dim=0)
+    print(f"成功加载 {raw_codes.shape[0]} 个样本，shape: {raw_codes.shape}")
+    return raw_codes
 
-def load_codes(mode: str, codes_path: str = None):
+
+def load_codes(mode: str, codes_path: str = None, max_samples: int = None, random_sample: bool = False):
     """
     加载codes（真实或生成的）
     
@@ -35,21 +139,74 @@ def load_codes(mode: str, codes_path: str = None):
             codes_path = "/home/huayuchen/Neurl-voxel/exps/neural_field/nf_qm9/20250911/lightning_logs/version_1/checkpoints/codes/train/codes.pt"
         
         if not os.path.exists(codes_path):
-            print(f"错误: codes文件不存在: {codes_path}")
+            print(f"错误: codes路径不存在: {codes_path}")
             return None
         
         try:
-            raw_codes = torch.load(codes_path, map_location=device)
-            print(f"成功加载预计算的codes: {raw_codes.shape}")
+            # 检查是文件还是目录
+            if os.path.isdir(codes_path):
+                # 如果是目录，优先检查LMDB
+                lmdb_path = os.path.join(codes_path, "codes.lmdb")
+                keys_path = os.path.join(codes_path, "codes_keys.pt")
+                
+                if os.path.exists(lmdb_path) and os.path.exists(keys_path):
+                    # 使用LMDB加载
+                    print(f"检测到LMDB格式，使用LMDB加载（支持大量数据）")
+                    return load_codes_from_lmdb(lmdb_path, keys_path, max_samples, random_sample)
+                
+                # 如果不是LMDB，查找所有codes_*.pt文件
+                codes_dir = Path(codes_path)
+                code_files = sorted(list(codes_dir.glob("codes_*.pt")))
+                if not code_files:
+                    # 也尝试查找codes.pt
+                    single_file = codes_dir / "codes.pt"
+                    if single_file.exists():
+                        code_files = [single_file]
+                    else:
+                        print(f"错误: 在目录 {codes_path} 中未找到任何codes文件 (codes_*.pt, codes.pt, 或 codes.lmdb)")
+                        return None
+                
+                print(f"找到 {len(code_files)} 个codes文件:")
+                for i, file in enumerate(code_files[:10]):  # 显示前10个
+                    print(f"  {i+1}. {file.name}")
+                if len(code_files) > 10:
+                    print(f"  ... 还有 {len(code_files) - 10} 个文件")
+                
+                # 如果文件太多，建议使用LMDB
+                if len(code_files) > 5:
+                    print(f"⚠️  警告: 发现 {len(code_files)} 个codes文件，建议转换为LMDB格式以避免内存问题")
+                    print(f"   转换命令: python funcmol/dataset/convert_codes_to_lmdb.py --codes_dir {os.path.dirname(codes_path)} --splits {os.path.basename(codes_path)}")
+                
+                # 加载所有codes文件
+                all_codes = []
+                for code_file in code_files:
+                    codes = torch.load(code_file, map_location=device)
+                    all_codes.append(codes)
+                    print(f"  加载: {code_file.name} - shape: {codes.shape}")
+                
+                # 合并所有codes
+                raw_codes = torch.cat(all_codes, dim=0)
+                print(f"合并后的codes shape: {raw_codes.shape}")
+            else:
+                # 如果是单个文件，直接加载
+                raw_codes = torch.load(codes_path, map_location=device)
+                print(f"成功加载预计算的codes: {raw_codes.shape}")
             
-            # 只取前10000个样本进行分析
-            if raw_codes.shape[0] > 10000:
-                raw_codes = raw_codes[:10000]
-                print(f"使用前10000个样本进行分析")
+            # 只取前max_samples个样本进行分析（如果指定了max_samples且样本太多）
+            if max_samples is not None and raw_codes.shape[0] > max_samples:
+                if random_sample:
+                    # 随机采样
+                    indices = random.sample(range(raw_codes.shape[0]), max_samples)
+                    raw_codes = raw_codes[indices]
+                    print(f"⚠️  样本数较多 ({raw_codes.shape[0]}), 随机采样 {max_samples} 个样本进行分析")
+                else:
+                    raw_codes = raw_codes[:max_samples]
+                    print(f"⚠️  样本数较多 ({raw_codes.shape[0]}), 使用前 {max_samples} 个样本进行分析")
             
             return raw_codes
         except Exception as e:
             print(f"加载codes失败: {e}")
+            traceback.print_exc()
             return None
     
     elif mode == 'generated':
@@ -96,7 +253,8 @@ def load_codes(mode: str, codes_path: str = None):
         return None
 
 def analyze_codes(mode: str = 'real', codes_path: str = None, 
-                  output_prefix: str = None):
+                  output_prefix: str = None, max_samples: int = None, 
+                  random_sample: bool = False):
     """
     分析codes（真实或生成的）
     
@@ -116,7 +274,12 @@ def analyze_codes(mode: str = 'real', codes_path: str = None,
     print(f"使用设备: {device}")
     
     # 1. 加载配置
-    with hydra.initialize(config_path="funcmol/configs", version_base=None):
+    # 使用绝对路径指向配置文件目录
+    config_dir = project_root / "funcmol" / "configs"
+    if not config_dir.exists():
+        raise FileNotFoundError(f"配置文件目录不存在: {config_dir}")
+    
+    with hydra.initialize_config_dir(config_dir=str(config_dir), version_base=None):
         cfg = hydra.compose(config_name="train_fm_qm9")
     
     print(f"\n=== 配置信息 ===")
@@ -126,7 +289,7 @@ def analyze_codes(mode: str = 'real', codes_path: str = None,
     print(f"grid_size: {cfg.dset.grid_size}")
     
     # 2. 加载codes
-    raw_codes = load_codes(mode, codes_path)
+    raw_codes = load_codes(mode, codes_path, max_samples=max_samples, random_sample=random_sample)
     if raw_codes is None:
         return None, None, None
     
@@ -487,62 +650,156 @@ def diagnose_voxel_codes(raw_codes, grid_size, output_prefix=None, reduce_method
 
 def analyze_codes_stats(codes, name):
     """
-    分析codes的统计信息
+    分析codes的统计信息（优化内存使用）
     """
     
     print(f"\n{name} 基本统计:")
     print(f"  形状: {codes.shape}")
     print(f"  总元素数: {codes.numel():,}")
-    print(f"  最小值: {codes.min().item():.6f}")
-    print(f"  最大值: {codes.max().item():.6f}")
-    print(f"  均值: {codes.mean().item():.6f}")
-    print(f"  标准差: {codes.std().item():.6f}")
-    print(f"  中位数: {codes.median().item():.6f}")
     
-    # 检查异常值
-    nan_count = torch.isnan(codes).sum().item()
-    inf_count = torch.isinf(codes).sum().item()
-    print(f"  NaN数量: {nan_count}")
-    print(f"  Inf数量: {inf_count}")
+    # 对于大数据集，使用更节省内存的方式计算
+    total_elements = codes.numel()
+    is_large = total_elements > 100_000_000  # 超过1亿元素
     
-    # 分析3σ异常值比例
-    mean_val = codes.mean().item()
-    std_val = codes.std().item()
-    lower_3sigma = mean_val - 3 * std_val
-    upper_3sigma = mean_val + 3 * std_val
-    
-    beyond_3sigma = ((codes < lower_3sigma) | (codes > upper_3sigma)).float()
-    beyond_3sigma_ratio = beyond_3sigma.mean().item()
-    beyond_3sigma_count = beyond_3sigma.sum().item()
-    
-    print(f"\n{name} 3σ异常值分析:")
-    print(f"  3σ范围: [{lower_3sigma:.6f}, {upper_3sigma:.6f}]")
-    print(f"  超出3σ的值数量: {beyond_3sigma_count:,} / {codes.numel():,}")
-    print(f"  超出3σ的值比例: {beyond_3sigma_ratio:.6f} ({beyond_3sigma_ratio*100:.4f}%)")
-    print(f"  理论期望比例: 0.002700 (0.2700%)")
-    print(f"  实际/理论比例: {beyond_3sigma_ratio/0.0027:.2f}x")
-    
-    # 判断状态
-    if beyond_3sigma_ratio > 0.01:
-        status = "⚠️ 异常"
-    elif beyond_3sigma_ratio > 0.005:
-        status = "⚠️ 注意"
+    if is_large:
+        print(f"  ⚠️  数据量较大，使用分批计算以节省内存...")
+        # 分批计算统计量
+        codes_flat = codes.flatten()
+        batch_size = 10_000_000  # 每批1000万元素
+        
+        # 基本统计（可以一次性计算，因为只是标量）
+        min_val = codes.min().item()
+        max_val = codes.max().item()
+        mean_val = codes.mean().item()
+        std_val = codes.std().item()
+        
+        # 中位数需要更多内存，对于大数据集可以跳过或采样
+        try:
+            median_val = codes.median().item()
+        except RuntimeError:
+            print(f"  ⚠️  中位数计算内存不足，跳过")
+            median_val = None
+        
+        # 检查异常值
+        nan_count = torch.isnan(codes).sum().item()
+        inf_count = torch.isinf(codes).sum().item()
+        
+        print(f"  最小值: {min_val:.6f}")
+        print(f"  最大值: {max_val:.6f}")
+        print(f"  均值: {mean_val:.6f}")
+        print(f"  标准差: {std_val:.6f}")
+        if median_val is not None:
+            print(f"  中位数: {median_val:.6f}")
+        print(f"  NaN数量: {nan_count}")
+        print(f"  Inf数量: {inf_count}")
+        
+        # 分批计算3σ异常值
+        print(f"  正在计算3σ异常值（分批处理）...")
+        lower_3sigma = mean_val - 3 * std_val
+        upper_3sigma = mean_val + 3 * std_val
+        
+        beyond_3sigma_count = 0
+        num_batches = (len(codes_flat) + batch_size - 1) // batch_size
+        for i in range(num_batches):
+            start_idx = i * batch_size
+            end_idx = min((i + 1) * batch_size, len(codes_flat))
+            batch = codes_flat[start_idx:end_idx]
+            beyond_3sigma_count += ((batch < lower_3sigma) | (batch > upper_3sigma)).sum().item()
+            if (i + 1) % 10 == 0:
+                print(f"    已处理 {i + 1}/{num_batches} 批次...")
+        
+        beyond_3sigma_ratio = beyond_3sigma_count / total_elements
+        
+        print(f"\n{name} 3σ异常值分析:")
+        print(f"  3σ范围: [{lower_3sigma:.6f}, {upper_3sigma:.6f}]")
+        print(f"  超出3σ的值数量: {beyond_3sigma_count:,} / {total_elements:,}")
+        print(f"  超出3σ的值比例: {beyond_3sigma_ratio:.6f} ({beyond_3sigma_ratio*100:.4f}%)")
+        print(f"  理论期望比例: 0.002700 (0.2700%)")
+        print(f"  实际/理论比例: {beyond_3sigma_ratio/0.0027:.2f}x")
+        
+        # 判断状态
+        if beyond_3sigma_ratio > 0.01:
+            status = "⚠️ 异常"
+        elif beyond_3sigma_ratio > 0.005:
+            status = "⚠️ 注意"
+        else:
+            status = "✅ 正常"
+        print(f"  状态: {status}")
+        
+        # 对于大数据集，只计算1σ和3σ，跳过其他
+        print(f"\n{name} 不同σ范围异常值比例（大数据集仅计算关键值）:")
+        for sigma in [1, 3]:
+            lower_bound = mean_val - sigma * std_val
+            upper_bound = mean_val + sigma * std_val
+            
+            beyond_count = 0
+            for i in range(num_batches):
+                start_idx = i * batch_size
+                end_idx = min((i + 1) * batch_size, len(codes_flat))
+                batch = codes_flat[start_idx:end_idx]
+                beyond_count += ((batch < lower_bound) | (batch > upper_bound)).sum().item()
+            
+            beyond_ratio = beyond_count / total_elements
+            theoretical_ratios = {1: 0.3173, 3: 0.0027}
+            theoretical_ratio = theoretical_ratios[sigma]
+            print(f"  ±{sigma}σ: {beyond_ratio:.4f} ({beyond_ratio*100:5.2f}%) [理论: {theoretical_ratio:.4f} ({theoretical_ratio*100:5.2f}%)]")
+        
+        # 释放内存
+        del codes_flat
+        torch.cuda.empty_cache() if codes.is_cuda else None
+        
     else:
-        status = "✅ 正常"
-    print(f"  状态: {status}")
-    
-    # 分析不同σ范围的异常值比例
-    print(f"\n{name} 不同σ范围异常值比例:")
-    for sigma in [1, 2, 3, 4, 5]:
-        lower_bound = mean_val - sigma * std_val
-        upper_bound = mean_val + sigma * std_val
-        beyond_sigma = ((codes < lower_bound) | (codes > upper_bound)).float()
-        beyond_ratio = beyond_sigma.mean().item()
+        # 小数据集，使用原有方法
+        print(f"  最小值: {codes.min().item():.6f}")
+        print(f"  最大值: {codes.max().item():.6f}")
+        print(f"  均值: {codes.mean().item():.6f}")
+        print(f"  标准差: {codes.std().item():.6f}")
+        print(f"  中位数: {codes.median().item():.6f}")
         
-        theoretical_ratios = [0.3173, 0.0455, 0.0027, 0.0001, 0.0000]
-        theoretical_ratio = theoretical_ratios[sigma-1]
+        # 检查异常值
+        nan_count = torch.isnan(codes).sum().item()
+        inf_count = torch.isinf(codes).sum().item()
+        print(f"  NaN数量: {nan_count}")
+        print(f"  Inf数量: {inf_count}")
         
-        print(f"  ±{sigma}σ: {beyond_ratio:.4f} ({beyond_ratio*100:5.2f}%) [理论: {theoretical_ratio:.4f} ({theoretical_ratio*100:5.2f}%)]")
+        # 分析3σ异常值比例
+        mean_val = codes.mean().item()
+        std_val = codes.std().item()
+        lower_3sigma = mean_val - 3 * std_val
+        upper_3sigma = mean_val + 3 * std_val
+        
+        beyond_3sigma = ((codes < lower_3sigma) | (codes > upper_3sigma)).float()
+        beyond_3sigma_ratio = beyond_3sigma.mean().item()
+        beyond_3sigma_count = beyond_3sigma.sum().item()
+        
+        print(f"\n{name} 3σ异常值分析:")
+        print(f"  3σ范围: [{lower_3sigma:.6f}, {upper_3sigma:.6f}]")
+        print(f"  超出3σ的值数量: {beyond_3sigma_count:,} / {codes.numel():,}")
+        print(f"  超出3σ的值比例: {beyond_3sigma_ratio:.6f} ({beyond_3sigma_ratio*100:.4f}%)")
+        print(f"  理论期望比例: 0.002700 (0.2700%)")
+        print(f"  实际/理论比例: {beyond_3sigma_ratio/0.0027:.2f}x")
+        
+        # 判断状态
+        if beyond_3sigma_ratio > 0.01:
+            status = "⚠️ 异常"
+        elif beyond_3sigma_ratio > 0.005:
+            status = "⚠️ 注意"
+        else:
+            status = "✅ 正常"
+        print(f"  状态: {status}")
+        
+        # 分析不同σ范围的异常值比例
+        print(f"\n{name} 不同σ范围异常值比例:")
+        for sigma in [1, 2, 3, 4, 5]:
+            lower_bound = mean_val - sigma * std_val
+            upper_bound = mean_val + sigma * std_val
+            beyond_sigma = ((codes < lower_bound) | (codes > upper_bound)).float()
+            beyond_ratio = beyond_sigma.mean().item()
+            
+            theoretical_ratios = [0.3173, 0.0455, 0.0027, 0.0001, 0.0000]
+            theoretical_ratio = theoretical_ratios[sigma-1]
+            
+            print(f"  ±{sigma}σ: {beyond_ratio:.4f} ({beyond_ratio*100:5.2f}%) [理论: {theoretical_ratio:.4f} ({theoretical_ratio*100:5.2f}%)]")
 
 def create_visualization(raw_codes, normalized_codes, smooth_codes, smooth_sigma, 
                         mode='real', output_prefix=None):
@@ -696,7 +953,7 @@ def create_visualization(raw_codes, normalized_codes, smooth_codes, smooth_sigma
             axes[1].set_title('No Comparison Available')
     
     plt.tight_layout()
-    output_path = f'/home/huayuchen/Neurl-voxel/{output_file}'
+    output_path = f'/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/zzz_rubbish_analyze/{output_file}'
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"\n可视化图表已保存到: {output_file}")
     plt.close()
@@ -714,6 +971,8 @@ if __name__ == "__main__":
     parser.add_argument('--voxel_diagnose', action='store_true', help='real模式下进行体素维度分布诊断')
     parser.add_argument('--voxel_reduce', choices=['mean','pc1'], default='mean', help='体素诊断的通道聚合方式')
     parser.add_argument('--voxel_topk_bc', type=int, default=32, help='体素诊断中按BC展示的Top-K直方图数量')
+    parser.add_argument('--max_samples', type=int, default=None, help='最大采样数量（默认None表示加载全部数据，用于LMDB或大量数据时可限制采样）')
+    parser.add_argument('--random_sample', action='store_true', default=False, help='是否随机采样（仅当指定--max_samples时有效）')
     
     args = parser.parse_args()
     
@@ -726,7 +985,9 @@ if __name__ == "__main__":
         _VOXEL_TOPK = int(args.voxel_topk_bc)
         raw_codes, normalized_codes, smooth_codes = analyze_codes(
             mode=args.mode,
-            codes_path=args.codes_path
+            codes_path=args.codes_path,
+            max_samples=args.max_samples,
+            random_sample=args.random_sample
         )
         
         if raw_codes is not None:

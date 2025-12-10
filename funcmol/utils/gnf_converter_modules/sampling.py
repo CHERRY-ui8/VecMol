@@ -25,6 +25,8 @@ class SamplingProcessor:
         eps: float = 0.5,
         min_min_samples: int = 2,
         enable_clustering_history: bool = False,
+        sampling_range_min: float = -7.0,
+        sampling_range_max: float = 7.0,
     ):
         """
         初始化采样处理器
@@ -41,6 +43,8 @@ class SamplingProcessor:
             eps: DBSCAN的eps参数（用于初步聚类）
             min_min_samples: min_samples下限（用于初步聚类）
             enable_clustering_history: 是否记录聚类历史
+            sampling_range_min: 撒点范围的最小值（单位：Å）
+            sampling_range_max: 撒点范围的最大值（单位：Å）
         """
         self.gradient_field_computer = gradient_field_computer
         self.gradient_ascent_optimizer = gradient_ascent_optimizer
@@ -52,6 +56,8 @@ class SamplingProcessor:
         self.field_variance_weight = field_variance_weight
         self.eps = eps
         self.min_min_samples = min_min_samples
+        self.sampling_range_min = sampling_range_min
+        self.sampling_range_max = sampling_range_max
         self.enable_clustering_history = enable_clustering_history
     
     def process_atom_types_matrix(
@@ -109,7 +115,7 @@ class SamplingProcessor:
         
         # 1. 初始化采样点 - 为所有原子类型一次性采样
         t_init_start = time.perf_counter() if enable_timing else None
-        init_min, init_max = -7.0, 7.0
+        init_min, init_max = self.sampling_range_min, self.sampling_range_max
         n_candidates = max_query_points * self.gradient_sampling_candidate_multiplier
         candidate_points = torch.rand(n_candidates, 3, device=device) * (init_max - init_min) + init_min
         if enable_timing:

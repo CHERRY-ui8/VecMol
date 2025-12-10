@@ -111,8 +111,9 @@ class CodeDataset(Dataset):
                     subdir=True,
                     readonly=True,
                     lock=False,
-                    readahead=False,
+                    readahead=True,  # 启用readahead以提高读取性能
                     meminit=False,
+                    max_readers=256,  # 增加最大读取器数量，支持更多并发worker
                 )
             
             self.db = _thread_local.lmdb_connections[self.lmdb_path]
@@ -129,7 +130,7 @@ class CodeDataset(Dataset):
             return self.curr_codes[index]
     
     def _getitem_lmdb(self, index):
-        """LMDB模式下的数据获取 - 进程安全版本"""
+        """LMDB模式下的数据获取 - 进程安全版本（优化版）"""
         # 确保数据库连接在worker进程中建立
         if self.db is None:
             self._connect_db()
@@ -139,17 +140,25 @@ class CodeDataset(Dataset):
         if isinstance(key, str):
             key = key.encode('utf-8')
         
+        # 优化：使用buffers=True避免额外的内存拷贝
         # 使用更安全的事务处理
         try:
-            with self.db.begin() as txn:
-                code_raw = pickle.loads(txn.get(key))
+            with self.db.begin(buffers=True) as txn:
+                value = txn.get(key)
+                if value is None:
+                    raise KeyError(f"Key not found: {key}")
+                # 直接反序列化，避免额外的内存拷贝
+                code_raw = pickle.loads(value)
         except Exception as e:
             # 如果事务失败，重新连接数据库
             print(f"LMDB transaction failed, reconnecting: {e}")
             self._close_db()
             self._connect_db()
-            with self.db.begin() as txn:
-                code_raw = pickle.loads(txn.get(key))
+            with self.db.begin(buffers=True) as txn:
+                value = txn.get(key)
+                if value is None:
+                    raise KeyError(f"Key not found: {key}")
+                code_raw = pickle.loads(value)
         
         return code_raw
     

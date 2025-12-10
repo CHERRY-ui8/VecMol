@@ -29,11 +29,12 @@ def convert_codes_to_lmdb(codes_dir, split, lmdb_path, keys_path):
     if not os.path.exists(split_dir):
         raise FileNotFoundError(f"Codes directory not found: {split_dir}")
     
-    # 查找所有codes文件
+    # 查找所有codes文件（排除 codes_keys.pt）
     list_codes = [
         f for f in os.listdir(split_dir)
         if os.path.isfile(os.path.join(split_dir, f)) and \
-        f.startswith("codes") and f.endswith(".pt")
+        f.startswith("codes") and f.endswith(".pt") and \
+        f != "codes_keys.pt"
     ]
     
     if not list_codes:

@@ -30,7 +30,7 @@ This script can be used for both field type evaluation (stage1) and neural field
 """
 
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import torch
 import random
 import pandas as pd
@@ -73,6 +73,15 @@ def main(config: DictConfig) -> None:
     # 确保CUDA操作的确定性
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    # 设置PyTorch的确定性模式（PyTorch 1.7+）
+    try:
+        torch.use_deterministic_algorithms(True, warn_only=True)
+    except AttributeError:
+        # 旧版本PyTorch不支持此选项
+        pass
+    # 设置环境变量以确保完全确定性
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'  # 确保CUDA操作的确定性
     
     # 设置PyTorch内存优化环境变量
     os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True,max_split_size_mb:128'
@@ -190,7 +199,7 @@ def main(config: DictConfig) -> None:
     if field_mode == 'gt_field':
         csv_path = output_dir / "field_evaluation_results.csv"
     elif field_mode == 'nf_field':
-        csv_path = output_dir / "nf_evaluation_results_11.csv"
+        csv_path = output_dir / "nf_evaluation_results_12.csv"
     else:
         raise ValueError(f"Unsupported field_mode: {field_mode}. Only 'gt_field' and 'nf_field' are supported.")
     
