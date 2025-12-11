@@ -233,7 +233,7 @@ def load_codes(mode: str, codes_path: str = None, max_samples: int = None, rando
         all_codes = []
         for code_file in code_files:
             try:
-                codes = torch.load(code_file, map_location=device)
+                codes = torch.load(code_file, map_location='cpu')
                 all_codes.append(codes)
                 print(f"成功加载: {code_file.name} - shape: {codes.shape}")
             except Exception as e:

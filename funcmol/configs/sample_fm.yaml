@@ -10,11 +10,11 @@ defaults:
 # fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251029/lightning_logs/version_0/checkpoints/model-epoch=199.ckpt
 # fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251103/lightning_logs/version_0/checkpoints/model-epoch=99.ckpt
 # fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251108/lightning_logs/version_1/checkpoints/model-epoch=364.ckpt
-fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251210/lightning_logs/version_3/checkpoints/last.ckpt
+fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251210/lightning_logs/version_4/checkpoints/last.ckpt
 dirname: ../exps/funcmol/fm_qm9/20251210
 
 # 生成参数
-max_samples: 100  # 要生成的分子数量
+max_samples: 3  # 要生成的分子数量
 field_methods: ['tanh']  # 要使用的field方法
 
 diffusion_method: "new_x0" #  方法选择: "old" (WJS) 或 "new" (DDPM) 或 "new_x0" (DDPM with x0)

@@ -172,25 +172,6 @@ class GNNDenoiser(nn.Module):
             batch=grid_batch
         )
         
-        # 构建图 - 直接在这里实现
-        # 使用预创建的网格坐标
-        n_grid_actual = self.grid_size ** 3
-        grid_coords = self.grid_coords.to(self.device)  # [n_grid, 3]
-        
-        # 为每个batch复制网格坐标
-        grid_coords = grid_coords.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, n_grid, 3]
-        grid_coords = grid_coords.reshape(-1, 3)  # [batch_size * n_grid, 3]
-        
-        # 创建batch索引
-        grid_batch = torch.arange(batch_size, device=self.device).repeat_interleave(n_grid_actual)
-        
-        # 使用 radius_graph 构建图
-        edge_index = radius_graph(
-            x=grid_coords,
-            r=self.radius,
-            batch=grid_batch
-        )
-        
         # 输入投影
         h = self.input_projection(y)  # (batch_size, n_grid, hidden_dim)
         h = h.reshape(-1, self.hidden_dim)  # (batch_size * n_grid, hidden_dim)
