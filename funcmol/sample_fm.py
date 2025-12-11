@@ -195,7 +195,7 @@ def main(config: DictConfig) -> None:
                 valid_recon_types = recon_types_device[recon_types_device != -1]
                 for i, element in enumerate(elements):
                     count = (valid_recon_types == i).sum().item()
-                    result_row[f'generated_{element}_count'] = count
+                    result_row[f'{element}_count'] = count
                 
                 # 追加到CSV文件
                 result_df = pd.DataFrame([result_row])
@@ -220,7 +220,7 @@ def main(config: DictConfig) -> None:
                 }
                 # 生成分子原子统计设为0
                 for element in elements:
-                    error_row[f'generated_{element}_count'] = 0
+                    error_row[f'{element}_count'] = 0
                 
                 error_df = pd.DataFrame([error_row])
                 error_df.to_csv(csv_path, mode='a', header=False, index=False)
