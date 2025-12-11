@@ -304,15 +304,15 @@ def p_sample_x0(model: nn.Module, x_t: torch.Tensor, t: torch.Tensor,
         return predicted_x0
     else:
         # 使用DDPM标准的采样公式计算x_{t-1}的均值
-        # μ_t = (√(α̅_{t-1}) * β_t / (1 - α̅_t)) * x_t + (√(α_t) * (1 - α̅_{t-1}) / (1 - α̅_t)) * x̂_0
+        # μ_t = (√(α_t) * (1 - α̅_{t-1}) / (1 - α̅_t)) * x_t + (√(α̅_{t-1}) * β_t / (1 - α̅_t)) * x̂_0
         eps = 1e-8
         one_minus_alphas_cumprod_t = (1.0 - alphas_cumprod_t).clamp(min=eps)
         one_minus_alphas_cumprod_prev_t = (1.0 - alphas_cumprod_prev_t).clamp(min=eps)
         
         # 计算model_mean：直接使用predicted_x0，不需要先计算predicted_noise
         model_mean = (
-            sqrt_alphas_cumprod_prev_t * betas_t / one_minus_alphas_cumprod_t * x_t
-            + sqrt_alphas_t * one_minus_alphas_cumprod_prev_t / one_minus_alphas_cumprod_t * predicted_x0
+            sqrt_alphas_t * one_minus_alphas_cumprod_prev_t / one_minus_alphas_cumprod_t * x_t
+            + sqrt_alphas_cumprod_prev_t * betas_t / one_minus_alphas_cumprod_t * predicted_x0
         )
         
         # 添加噪声（使用后验方差）
@@ -353,6 +353,7 @@ def p_sample_loop_x0(model: nn.Module, shape: Tuple[int, ...], diffusion_consts:
     for i in iterator:
         t = torch.full((shape[0],), i, device=device, dtype=torch.long)
         x_t = p_sample_x0(model, x_t, t, diffusion_consts, clip_denoised=clip_denoised)
+        print(x_t.mean(), x_t.std(), x_t.min(), x_t.max())
     
     return x_t
 
