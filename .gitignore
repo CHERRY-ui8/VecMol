@@ -7,3 +7,4 @@ funcmol/outputs/*
 __pycache__/
 *.py[cod]
 *$py.class
+debug.log

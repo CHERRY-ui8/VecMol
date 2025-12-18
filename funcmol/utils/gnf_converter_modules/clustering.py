@@ -60,21 +60,33 @@ class ClusteringProcessor:
         """
         if len(points) == 0:
             # 计算iteration_thresholds（即使没有簇也需要）
-            initial_min_samples = self.initial_min_samples if self.initial_min_samples is not None else self.min_samples
-            current_min_samples = initial_min_samples
-            iteration_thresholds = []
-            iteration = 0
-            while iteration < self.max_clustering_iterations:
-                iteration_thresholds.append((iteration, current_min_samples))
-                if current_min_samples <= self.min_min_samples:
-                    break
-                current_min_samples = max(int(current_min_samples * self.min_samples_decay_factor), self.min_min_samples)
-                iteration += 1
+            if self.enable_autoregressive_clustering:
+                initial_min_samples = self.initial_min_samples if self.initial_min_samples is not None else self.min_samples
+                current_min_samples = initial_min_samples
+                iteration_thresholds = []
+                iteration = 0
+                while iteration < self.max_clustering_iterations:
+                    iteration_thresholds.append((iteration, current_min_samples))
+                    if current_min_samples <= self.min_min_samples:
+                        break
+                    current_min_samples = max(int(current_min_samples * self.min_samples_decay_factor), self.min_min_samples)
+                    iteration += 1
+            else:
+                # 非自回归模式：只使用一次迭代
+                iteration_thresholds = [(0, self.min_samples)]
             return [], iteration_thresholds
         
-        # 1. 首先用min_min_samples找出所有可能的簇
-        initial_min_samples = self.initial_min_samples if self.initial_min_samples is not None else self.min_samples
-        initial_clustering = DBSCAN(eps=self.eps, min_samples=self.min_min_samples).fit(points)
+        # 1. 根据是否启用自回归聚类选择初始聚类参数
+        if self.enable_autoregressive_clustering:
+            # 自回归模式：使用min_min_samples找出所有可能的簇
+            initial_min_samples = self.initial_min_samples if self.initial_min_samples is not None else self.min_samples
+            clustering_min_samples = self.min_min_samples
+        else:
+            # 非自回归模式：直接使用min_samples进行单次聚类
+            initial_min_samples = self.min_samples
+            clustering_min_samples = self.min_samples
+        
+        initial_clustering = DBSCAN(eps=self.eps, min_samples=clustering_min_samples).fit(points)
         initial_labels = initial_clustering.labels_
         
         # 2. 收集所有簇及其samples数量
@@ -89,15 +101,19 @@ class ClusteringProcessor:
         
         if len(all_clusters) == 0:
             # 计算iteration_thresholds（即使没有簇也需要）
-            current_min_samples = initial_min_samples
-            iteration_thresholds = []
-            iteration = 0
-            while iteration < self.max_clustering_iterations:
-                iteration_thresholds.append((iteration, current_min_samples))
-                if current_min_samples <= self.min_min_samples:
-                    break
-                current_min_samples = max(int(current_min_samples * self.min_samples_decay_factor), self.min_min_samples)
-                iteration += 1
+            if self.enable_autoregressive_clustering:
+                current_min_samples = initial_min_samples
+                iteration_thresholds = []
+                iteration = 0
+                while iteration < self.max_clustering_iterations:
+                    iteration_thresholds.append((iteration, current_min_samples))
+                    if current_min_samples <= self.min_min_samples:
+                        break
+                    current_min_samples = max(int(current_min_samples * self.min_samples_decay_factor), self.min_min_samples)
+                    iteration += 1
+            else:
+                # 非自回归模式：只使用一次迭代
+                iteration_thresholds = [(0, self.min_samples)]
             return [], iteration_thresholds
         
         # 2.5. 合并距离太近的簇（距离 < eps），避免重复原子
@@ -129,15 +145,20 @@ class ClusteringProcessor:
         all_clusters = merged_clusters
         
         # 3. 计算min_samples的衰减序列
-        current_min_samples = initial_min_samples
-        iteration_thresholds = []  # [(iteration, min_samples), ...]
-        iteration = 0
-        while iteration < self.max_clustering_iterations:
-            iteration_thresholds.append((iteration, current_min_samples))
-            if current_min_samples <= self.min_min_samples:
-                break
-            current_min_samples = max(int(current_min_samples * self.min_samples_decay_factor), self.min_min_samples)
-            iteration += 1
+        if self.enable_autoregressive_clustering:
+            # 自回归模式：计算衰减序列
+            current_min_samples = initial_min_samples
+            iteration_thresholds = []  # [(iteration, min_samples), ...]
+            iteration = 0
+            while iteration < self.max_clustering_iterations:
+                iteration_thresholds.append((iteration, current_min_samples))
+                if current_min_samples <= self.min_min_samples:
+                    break
+                current_min_samples = max(int(current_min_samples * self.min_samples_decay_factor), self.min_min_samples)
+                iteration += 1
+        else:
+            # 非自回归模式：只使用一次迭代，使用min_samples
+            iteration_thresholds = [(0, self.min_samples)]
         
         # 4. 为每个簇分配iteration tag
         clusters_with_tags = []  # [(center, iteration_tag, n_samples, cluster_points), ...]
@@ -300,9 +321,17 @@ class ClusteringProcessor:
             return points, None
 
         # 使用自回归聚类逻辑：预先找出所有满足min_min_samples的簇，并分配iteration tag
-        # 1. 首先用min_min_samples找出所有可能的簇
-        initial_min_samples = self.initial_min_samples if self.initial_min_samples is not None else self.min_samples
-        initial_clustering = DBSCAN(eps=self.eps, min_samples=self.min_min_samples).fit(points)
+        # 1. 根据是否启用自回归聚类选择初始聚类参数
+        if self.enable_autoregressive_clustering:
+            # 自回归模式：使用min_min_samples找出所有可能的簇
+            initial_min_samples = self.initial_min_samples if self.initial_min_samples is not None else self.min_samples
+            clustering_min_samples = self.min_min_samples
+        else:
+            # 非自回归模式：直接使用min_samples进行单次聚类
+            initial_min_samples = self.min_samples
+            clustering_min_samples = self.min_samples
+        
+        initial_clustering = DBSCAN(eps=self.eps, min_samples=clustering_min_samples).fit(points)
         initial_labels = initial_clustering.labels_
         
         # 2. 收集所有簇及其samples数量
@@ -364,15 +393,20 @@ class ClusteringProcessor:
         
         # 3. 根据samples数量计算每个簇应该在第几个iteration被聚类出来
         # 计算min_samples的衰减序列，确定每个samples数量对应的iteration
-        current_min_samples = initial_min_samples
-        iteration_thresholds = []  # [(iteration, min_samples), ...]
-        iteration = 0
-        while iteration < self.max_clustering_iterations:
-            iteration_thresholds.append((iteration, current_min_samples))
-            if current_min_samples <= self.min_min_samples:
-                break
-            current_min_samples = max(int(current_min_samples * self.min_samples_decay_factor), self.min_min_samples)
-            iteration += 1
+        if self.enable_autoregressive_clustering:
+            # 自回归模式：计算衰减序列
+            current_min_samples = initial_min_samples
+            iteration_thresholds = []  # [(iteration, min_samples), ...]
+            iteration = 0
+            while iteration < self.max_clustering_iterations:
+                iteration_thresholds.append((iteration, current_min_samples))
+                if current_min_samples <= self.min_min_samples:
+                    break
+                current_min_samples = max(int(current_min_samples * self.min_samples_decay_factor), self.min_min_samples)
+                iteration += 1
+        else:
+            # 非自回归模式：只使用一次迭代，使用min_samples
+            iteration_thresholds = [(0, self.min_samples)]
         
         # 4. 为每个簇分配iteration tag
         # samples数量越少，需要的min_samples越小，对应的iteration越大

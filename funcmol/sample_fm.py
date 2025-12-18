@@ -2,6 +2,7 @@ import sys
 sys.path.append("..")  # 添加上级目录到sys.path以便导入模块
 
 import os
+os.environ['CUDA_VISIBLE_DEVICES'] = "0"
 from funcmol.models.funcmol import create_funcmol
 import hydra
 import torch
@@ -41,6 +42,95 @@ def get_next_generated_idx(csv_path):
         return 0
 
 
+def extract_checkpoint_identifier(fm_path: str) -> str:
+    """
+    Extract a unique identifier from checkpoint path for creating independent output directories.
+    
+    Args:
+        fm_path: Path to the checkpoint file (e.g., .ckpt file)
+    
+    Returns:
+        A unique identifier string, e.g., "20251212_version_2_last" or "version_0_epoch_199"
+    """
+    path = Path(fm_path)
+    parts = path.parts
+    
+    # Extract date (if present, typically in format YYYYMMDD)
+    date = None
+    for part in parts:
+        if part.isdigit() and len(part) == 8:  # YYYYMMDD format
+            try:
+                # Validate it's a reasonable date
+                year = int(part[:4])
+                month = int(part[4:6])
+                day = int(part[6:8])
+                if 2000 <= year <= 2100 and 1 <= month <= 12 and 1 <= day <= 31:
+                    date = part
+                    break
+            except (ValueError, IndexError):
+                continue
+    
+    # Extract version (e.g., version_0, version_1, version_2)
+    version = None
+    for part in parts:
+        if part.startswith('version_') and part[8:].isdigit():
+            version = part
+            break
+    
+    # Extract checkpoint filename and convert to identifier
+    checkpoint_name = None
+    if path.suffix == '.ckpt':
+        filename = path.stem  # filename without extension
+        if filename == 'last':
+            checkpoint_name = 'last'
+        elif filename.startswith('model-epoch='):
+            # Extract epoch number: "model-epoch=199" -> "epoch_199"
+            epoch_str = filename.replace('model-epoch=', '')
+            try:
+                epoch_num = int(epoch_str)
+                checkpoint_name = f'epoch_{epoch_num}'
+            except ValueError:
+                checkpoint_name = filename.replace('=', '_').replace('-', '_')
+        else:
+            # Use filename as-is, but clean it
+            checkpoint_name = filename.replace('=', '_').replace('-', '_')
+    else:
+        # If not a .ckpt file, use the directory name
+        checkpoint_name = path.name
+    
+    # Clean checkpoint_name to ensure it's safe for directory names
+    # Remove or replace invalid characters
+    invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|']
+    for char in invalid_chars:
+        checkpoint_name = checkpoint_name.replace(char, '_')
+    
+    # Combine parts
+    identifier_parts = []
+    if date:
+        identifier_parts.append(date)
+    if version:
+        identifier_parts.append(version)
+    if checkpoint_name:
+        identifier_parts.append(checkpoint_name)
+    
+    if not identifier_parts:
+        # Fallback: use a hash or the full path's last few components
+        # Use the last 3 path components as identifier
+        if len(parts) >= 3:
+            identifier_parts = list(parts[-3:])
+        else:
+            identifier_parts = [path.name]
+    
+    identifier = '_'.join(identifier_parts)
+    
+    # Final cleanup: ensure no consecutive underscores and no leading/trailing underscores
+    while '__' in identifier:
+        identifier = identifier.replace('__', '_')
+    identifier = identifier.strip('_')
+    
+    return identifier if identifier else 'checkpoint'
+
+
 @hydra.main(config_path="configs", config_name="sample_fm", version_base=None)
 def main(config: DictConfig) -> None:
     # 设置PyTorch内存优化环境变量
@@ -78,13 +168,20 @@ def main(config: DictConfig) -> None:
         except ValueError:
             exp_name = Path(fm_path).parent.parent.name
     
-    output_dir = exps_root / "funcmol" / exp_name
+    # 基础输出目录
+    base_output_dir = exps_root / "funcmol" / exp_name
+    base_output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 提取checkpoint标识并创建独立的子目录
+    checkpoint_identifier = extract_checkpoint_identifier(fm_path)
+    output_dir = base_output_dir / "samples" / checkpoint_identifier
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # 获取生成参数
     max_samples = config.get('max_samples', 10)  # 默认生成10个分子
     field_methods = config.get('field_methods', ['tanh'])  # 默认使用tanh方法
     
+    print(f"Checkpoint identifier: {checkpoint_identifier}")
     print(f"Generating {max_samples} molecules with field_methods: {field_methods}")
     print(f"Output directory: {output_dir}")
     print("fm_pretrained_path: ", config["fm_pretrained_path"])
@@ -107,7 +204,7 @@ def main(config: DictConfig) -> None:
         decoder.set_code_stats(code_stats)
         print("Loaded neural field decoder")
     
-    # 初始化CSV文件
+    # 初始化CSV文件（使用新的独立输出目录）
     csv_path = output_dir / "denoiser_evaluation_results.csv"
     elements = config.dset.elements  # ["C", "H", "O", "N", "F"]
     csv_columns = ['generated_idx', 'field_method', 'diffusion_method', 'size']
@@ -121,7 +218,7 @@ def main(config: DictConfig) -> None:
         results_df = pd.DataFrame(columns=csv_columns)
         results_df.to_csv(csv_path, index=False)
     
-    # 创建分子数据保存目录
+    # 创建分子数据保存目录（使用新的独立输出目录）
     mol_save_dir = output_dir / "molecule"
     mol_save_dir.mkdir(parents=True, exist_ok=True)
     

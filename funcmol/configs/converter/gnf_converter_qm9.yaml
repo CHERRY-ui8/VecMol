@@ -1,6 +1,6 @@
 sigma: 1
 # 也许不能太多，要控制，不是所有元素都需要收敛，收敛太慢也是收敛能力差的一种表现
-n_iter: 400  # 每次迭代都会调用decoder，很费时间（NOTE: 如果撒点范围-7到7，请用600）
+n_iter: 1000  # 每次迭代都会调用decoder，很费时间（NOTE: 如果撒点范围-7到7，请用600）
 # 早停机制配置（可选）
 enable_early_stopping: False  # 启用早停机制，当梯度收敛时提前停止，可大幅减少迭代次数
 convergence_threshold: 1e-6  # 收敛阈值（梯度模长变化），仅在启用早停时有效
@@ -72,7 +72,7 @@ method_configs:
     sig_mag: 2
     # DBSCAN聚类参数
     eps: 0.05
-    min_samples: 10
+    min_samples: 5
   
 
 default_config: # softmax, logsumexp, inverse_square
@@ -85,7 +85,7 @@ default_config: # softmax, logsumexp, inverse_square
 
 # 自回归聚类配置（可选）
 autoregressive_clustering:
-  enable: True  # 是否启用自回归聚类，默认False
+  enable: False  # 是否启用自回归聚类，默认False
   max_clustering_iterations: 10  # 最大迭代轮数
 
   initial_min_samples: 80  # 初始min_samples，null表示使用默认min_samples
@@ -93,7 +93,7 @@ autoregressive_clustering:
   min_min_samples: 5  # min_samples下限
   
   # 这个值需要调得较大？并不应该
-  bond_length_tolerance: 0.5  # 键长合理性检查的上限容差（单位：Å），在标准键长基础上增加的容差
+  bond_length_tolerance: 2  # 键长合理性检查的上限容差（单位：Å），在标准键长基础上增加的容差
   bond_length_lower_tolerance: 0.5  # 键长合理性检查的下限容差（单位：Å），从标准键长中减去的容差
   n_initial_atoms_no_bond_check: 2  # 前N个原子不受键长限制（无论上限还是下限），避免第一个错误原子阻止后续正确原子被重建
   debug_bond_validation: True  # 是否输出键长检查的调试信息，默认False

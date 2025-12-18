@@ -49,37 +49,42 @@ class FuncMol(nn.Module):
         self.diffusion_method = config.get("diffusion_method", "old")  # "old", "new" 或 "new_x0"
         
         if self.diffusion_method == "new" or self.diffusion_method == "new_x0":
+            # 统一从denoiser配置读取所有模型参数
+            denoiser_config = config.get("denoiser", {})
             self.net = GNNDenoiser(
                 code_dim=config["decoder"]["code_dim"],
-                hidden_dim=config.get("ddpm", {}).get("hidden_dim", 128),
-                num_layers=config.get("ddpm", {}).get("num_layers", 4),
-                time_emb_dim=config.get("ddpm", {}).get("time_emb_dim", 64),
-                cutoff=config.get("denoiser", {}).get("cutoff", 5.0),
-                radius=config.get("denoiser", {}).get("radius", 2.0),
-                dropout=config.get("ddpm", {}).get("dropout", 0.1),
+                hidden_dim=denoiser_config.get("hidden_dim", 128),
+                num_layers=denoiser_config.get("num_layers", 4),
+                time_emb_dim=denoiser_config.get("time_emb_dim", 64),
+                cutoff=denoiser_config.get("cutoff", 5.0),
+                radius=denoiser_config.get("radius", 2.0),
+                dropout=denoiser_config.get("dropout", 0.1),
                 grid_size=config["dset"]["grid_size"],
                 anchor_spacing=config["dset"]["anchor_spacing"],
-                use_radius_graph=config.get("denoiser", {}).get("use_radius_graph", True),
+                use_radius_graph=denoiser_config.get("use_radius_graph", True),
                 device=self.device
             ).to(self.device)
-            # 创建扩散常数并直接放在目标设备上
+            # 创建扩散常数并直接放在目标设备上（扩散过程参数仍从ddpm配置读取）
             self.diffusion_consts = create_diffusion_constants(config, device=self.device)
-            self.num_timesteps = config.get("ddpm", {}).get("num_timesteps", 1000)
-            self.use_time_weight = config.get("ddpm", {}).get("use_time_weight", True)
+            # 扩散过程参数仍从ddpm配置读取
+            ddpm_config = config.get("ddpm", {})
+            self.num_timesteps = ddpm_config.get("num_timesteps", 1000)
+            self.use_time_weight = ddpm_config.get("use_time_weight", True)
         else:
             # 使用原有方法
-            if config.get("denoiser", {}).get("use_gnn", False):
-                # 使用GNN denoiser
+            denoiser_config = config.get("denoiser", {})
+            if denoiser_config.get("use_gnn", False):
+                # 使用GNN denoiser（统一使用hidden_dim和num_layers参数）
                 self.net = GNNDenoiser(
                     code_dim=config["decoder"]["code_dim"],
-                    hidden_dim=config["denoiser"]["n_hidden_units"],
-                    num_layers=config["denoiser"]["num_blocks"],
-                    cutoff=config["denoiser"]["cutoff"],
-                    radius=config["denoiser"]["radius"],
-                    dropout=config["denoiser"]["dropout"],
+                    hidden_dim=denoiser_config.get("hidden_dim", 128),
+                    num_layers=denoiser_config.get("num_layers", 4),
+                    cutoff=denoiser_config.get("cutoff", 5.0),
+                    radius=denoiser_config.get("radius", 2.0),
+                    dropout=denoiser_config.get("dropout", 0.1),
                     grid_size=config["dset"]["grid_size"],
                     anchor_spacing=config["dset"]["anchor_spacing"],
-                    use_radius_graph=config["denoiser"]["use_radius_graph"]
+                    use_radius_graph=denoiser_config.get("use_radius_graph", True)
                 )
             else:
                 # 使用MLP denoiser

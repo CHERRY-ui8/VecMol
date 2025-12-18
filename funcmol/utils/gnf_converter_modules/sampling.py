@@ -255,7 +255,11 @@ class SamplingProcessor:
                 type_clusters_data[t] = (clusters_with_tags, iteration_thresholds)
             
             # 2. 外层循环iteration，内层循环原子类型
-            max_iterations = self.clustering_processor.max_clustering_iterations
+            # 如果未启用自回归聚类，只执行一次迭代（iteration 0）
+            if self.clustering_processor.enable_autoregressive_clustering:
+                max_iterations = self.clustering_processor.max_clustering_iterations
+            else:
+                max_iterations = 1  # 只执行一次迭代
             type_pending_clusters = {t: [] for t in existing_types}  # {atom_type: pending_clusters}
             type_all_merged_points = {t: [] for t in existing_types}  # {atom_type: [centers, ...]}
             

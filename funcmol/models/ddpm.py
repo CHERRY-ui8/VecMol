@@ -11,7 +11,7 @@ from typing import Dict, Optional, Tuple
 # 1. β 调度与常数
 # ===========================
 def get_beta_schedule(beta_start: float, beta_end: float, num_timesteps: int, 
-                    schedule: str = "linear", w: float = 6.0) -> torch.Tensor:
+                    schedule: str = "linear", w: float = 6.0, s: float = 0.008) -> torch.Tensor:
     """
     获取β调度序列
     
@@ -21,6 +21,7 @@ def get_beta_schedule(beta_start: float, beta_end: float, num_timesteps: int,
         num_timesteps: 时间步数
         schedule: 调度类型 ("linear", "cosine", 或 "sigmoid")
         w: sigmoid调度的宽度参数（仅用于sigmoid调度）
+        s: cosine调度的偏移参数（仅用于cosine调度），控制余弦曲线的偏移，默认0.008
     
     Returns:
         betas: β序列张量
@@ -29,7 +30,7 @@ def get_beta_schedule(beta_start: float, beta_end: float, num_timesteps: int,
         betas = np.linspace(beta_start, beta_end, num_timesteps, dtype=np.float64)
     elif schedule == "cosine":
         # 修复：使用正确的边界，避免alphas_cumprod[-1]=0的问题
-        s = 0.008
+        # s参数控制余弦曲线的偏移，影响噪声添加的曲线形状
         timesteps = num_timesteps
         x = np.linspace(0, timesteps, timesteps + 1)
         alphas_cumprod = np.cos(((x / timesteps) + s) / (1 + s) * np.pi * 0.5) ** 2
@@ -353,7 +354,6 @@ def p_sample_loop_x0(model: nn.Module, shape: Tuple[int, ...], diffusion_consts:
     for i in iterator:
         t = torch.full((shape[0],), i, device=device, dtype=torch.long)
         x_t = p_sample_x0(model, x_t, t, diffusion_consts, clip_denoised=clip_denoised)
-        print(x_t.mean(), x_t.std(), x_t.min(), x_t.max())
     
     return x_t
 
@@ -477,5 +477,6 @@ def create_diffusion_constants(config: dict, device: Optional[torch.device] = No
         num_timesteps=ddpm_config.get("num_timesteps", 1000),
         schedule=ddpm_config.get("schedule", "linear"),
         w=ddpm_config.get("w", 6.0),
+        s=ddpm_config.get("s", 0.008),  # cosine调度的偏移参数
     )
     return prepare_diffusion_constants(betas, device=device)

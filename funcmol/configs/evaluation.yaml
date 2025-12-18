@@ -1,0 +1,50 @@
+# 分子分析配置文件
+# 用于配置实验目录、文件路径和分析选项
+
+# 实验基础目录
+experiment_dir: "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251217"
+
+# CSV文件配置（用于原子统计分析）
+csv:
+  # CSV文件路径列表（NOTE: 可以是多个文件，会合并分析）
+  files:
+    # - "denoiser_evaluation_results_1.csv"
+    # - "denoiser_evaluation_results_2.csv"
+    # - "denoiser_evaluation_results_3.csv"
+    - "samples/20251217_version_1_last/denoiser_evaluation_results.csv"
+    
+# 分子文件目录配置（用于结构分析和质量评估）
+molecule:
+  # molecule目录路径（相对于experiment_dir或绝对路径）
+  dir: "samples/20251217_version_1_last/molecule"
+  
+  # 分子文件匹配模式（用于查找.npz文件）
+  pattern: "generated_*.npz"
+
+# 输出目录配置
+output:
+  # 输出目录（相对于experiment_dir或绝对路径）
+  # 如果为null，将自动创建在experiment_dir下的analysis_results目录
+  dir: null
+  # 或者指定绝对路径：
+  # dir: "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251212/analysis_results"
+
+# 分析选项配置
+analysis:
+  # 是否运行CSV原子统计分析（analyze_denoiser_results）
+  csv_analysis: true
+  
+  # 是否运行分子结构分析（analyze_molecule_structure）
+  structure_analysis: true
+  
+  # 是否运行分子质量评估（evaluate_molecules_from_codes）
+  quality_evaluation: true
+  
+  # 是否与QM9数据集对比（仅在csv_analysis为true时有效）
+  compare_with_qm9: true
+
+# 数据集配置
+dataset:
+  name: "qm9"
+  elements: ["C", "H", "O", "N", "F"]
+  atom_decoder: "qm9_with_h"

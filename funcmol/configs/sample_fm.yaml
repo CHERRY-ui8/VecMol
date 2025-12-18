@@ -10,29 +10,32 @@ defaults:
 # fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251029/lightning_logs/version_0/checkpoints/model-epoch=199.ckpt
 # fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251103/lightning_logs/version_0/checkpoints/model-epoch=99.ckpt
 # fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251108/lightning_logs/version_1/checkpoints/model-epoch=364.ckpt
-fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251210/lightning_logs/version_4/checkpoints/last.ckpt
-dirname: ../exps/funcmol/fm_qm9/20251210
+fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251217/lightning_logs/version_1/checkpoints/model-epoch=144.ckpt
+dirname: ../exps/funcmol/fm_qm9/20251217
 
 # 生成参数
-max_samples: 3  # 要生成的分子数量
+max_samples: 1000  # 要生成的分子数量
 field_methods: ['tanh']  # 要使用的field方法
 
 diffusion_method: "new_x0" #  方法选择: "old" (WJS) 或 "new" (DDPM) 或 "new_x0" (DDPM with x0)
 
 # DDPM配置（仅当diffusion_method为"new"时使用）
 ddpm:
-  num_timesteps: 1000  # 精细方案：使用1000步以获得更细粒度的扩散过程
-  hidden_dim: 128  # 与checkpoint中的实际模型架构保持一致
-  num_layers: 4  # 与checkpoint中的实际模型架构保持一致
-  time_emb_dim: 64  # 与checkpoint中的实际模型架构保持一致
-  
+  num_timesteps: 1000  # 使用1000步以获得更细粒度的扩散过程
+  hidden_dim: 256 # 128
+  num_layers: 6 # 4
+  time_emb_dim: 128 # 64
+
   # Beta调度配置
   # 根据 num_timesteps 选择对应的 beta 配置：
   # - num_timesteps: 100   -> beta_start: 0.0005, beta_end: 0.05
   # - num_timesteps: 1000 -> beta_start: 0.0001, beta_end: 0.02
   beta_start: 0.0001  # 当 num_timesteps: 100 时使用0.0005；当 num_timesteps: 1000 时改为 0.0001
   beta_end: 0.02     # 当 num_timesteps: 100 时使用0.05；当 num_timesteps: 1000 时改为 0.02
-  schedule: "linear"  # 可选: "linear", "cosine", "sigmoid"
+  schedule: "cosine"  # 可选: "linear", "cosine", "sigmoid"
+  
+  # Cosine调度参数（仅当schedule为"cosine"时使用）
+  s: 0.008  # cosine调度的偏移参数，控制余弦曲线的偏移，影响噪声添加的曲线形状（s越小曲线越陡峭，s越大曲线越平缓）
   
   # Sigmoid调度参数（仅当schedule为"sigmoid"时使用）
   s1: 0.008

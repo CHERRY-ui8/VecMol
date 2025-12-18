@@ -24,7 +24,8 @@ from omegaconf import OmegaConf
 import hydra
 
 # Set GPU environment
-os.environ['CUDA_VISIBLE_DEVICES'] = "1,2,3,4,5,6,7"
+# os.environ['CUDA_VISIBLE_DEVICES'] = "1,2,3,4,5,6,7"
+os.environ['CUDA_VISIBLE_DEVICES'] = "2,3,4,5"
 
 from funcmol.models.funcmol import create_funcmol
 from funcmol.utils.utils_fm import (
@@ -428,6 +429,36 @@ def main(config):
     config_nf = nf_config
     config_nf["debug"] = config["debug"]
     config_nf["dset"]["batch_size"] = config["dset"]["batch_size"]
+    
+    # 根据配置选择使用数据增强的codes还是原始codes
+    if not config["on_the_fly"]:
+        use_augmented_codes = config.get("use_augmented_codes", False)
+        
+        # 优先使用新的配置方式（codes_dir_no_aug / codes_dir_with_aug）
+        if use_augmented_codes:
+            codes_dir = config.get("codes_dir_with_aug")
+            if codes_dir is None:
+                raise ValueError(
+                    "use_augmented_codes=True 但未指定 codes_dir_with_aug。\n"
+                    "请在配置文件中设置 codes_dir_with_aug 路径。"
+                )
+            print(f">> 使用数据增强的codes: {codes_dir}")
+        else:
+            codes_dir = config.get("codes_dir_no_aug")
+            if codes_dir is None:
+                # 兼容旧配置：如果codes_dir_no_aug未设置，尝试使用旧的codes_dir
+                codes_dir = config.get("codes_dir")
+                if codes_dir is None:
+                    raise ValueError(
+                        "use_augmented_codes=False 但未指定 codes_dir_no_aug 或 codes_dir。\n"
+                        "请在配置文件中设置 codes_dir_no_aug 路径。"
+                    )
+                print(f">> 使用兼容的codes_dir: {codes_dir}")
+            else:
+                print(f">> 使用原始codes（无数据增强）: {codes_dir}")
+        
+        # 设置config中的codes_dir，供create_code_loaders使用
+        config["codes_dir"] = codes_dir
     
     # Create data loaders
     try:

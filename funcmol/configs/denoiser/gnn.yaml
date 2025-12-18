@@ -1,14 +1,14 @@
 use_gnn: True
 
-# 注意：此参数应与训练配置中的ddpm.hidden_dim保持一致
-n_hidden_units: 128
+# 模型架构参数（用于所有diffusion_method）
+# 当diffusion_method为"new"或"new_x0"时，这些参数用于GNNDenoiser
+# 当diffusion_method为"old"时，这些参数也用于GNNDenoiser（如果use_gnn=True）
+hidden_dim: 128  # GNN隐藏层维度，可选值：128, 256
+num_layers: 4    # GNN层数，可选值：4, 6
+time_emb_dim: 64 # 时间嵌入维度（仅用于new/new_x0方法），可选值：64, 128
+dropout: 0.1     # Dropout率，可选值：0.1, 0.15
 
-num_blocks: 6
-
-dropout: 0.1
-
-cutoff: 5.0
-
-radius: 3.0
-
-use_radius_graph: True
+# GNN图构建参数
+cutoff: 5.0          # 截断距离
+radius: 6.0          # 半径图构建的半径
+use_radius_graph: True  # 是否使用半径图

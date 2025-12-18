@@ -10,6 +10,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from collections import defaultdict
 import os
+import argparse
 try:
     from scipy import stats as scipy_stats
     HAS_SCIPY = True
@@ -363,7 +364,28 @@ def compare_with_qm9(stats, total_atoms_per_mol, output_dir=None):
 
 def main():
     """主函数"""
-    csv_path = '/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251108/denoiser_evaluation_results.csv'
+    parser = argparse.ArgumentParser(description='分析denoiser生成的分子结果CSV文件')
+    parser.add_argument(
+        '--csv_path',
+        type=str,
+        default=None,
+        help='CSV文件路径（如果未指定，将使用默认路径）'
+    )
+    parser.add_argument(
+        '--output_dir',
+        type=str,
+        default=None,
+        help='输出目录（如果未指定，将保存到CSV文件所在目录的analysis_results文件夹）'
+    )
+    
+    args = parser.parse_args()
+    
+    # 如果没有指定CSV路径，使用默认路径
+    if args.csv_path is None:
+        # 默认路径
+        csv_path = '/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251212/denoiser_evaluation_results.csv'
+    else:
+        csv_path = args.csv_path
     
     # 分析数据
     result = analyze_denoiser_results(csv_path)
@@ -372,9 +394,14 @@ def main():
     
     stats, all_atom_counts, df = result
     
-    # 创建可视化 - 保存到funcmol/analysis/目录
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    output_dir = os.path.join(script_dir, 'analysis_results')
+    # 创建可视化 - 保存到实验目录下的analysis_results文件夹
+    # 从CSV路径推断实验目录
+    if args.output_dir is None:
+        exp_dir = os.path.dirname(os.path.abspath(csv_path))
+        output_dir = os.path.join(exp_dir, 'analysis_results')
+    else:
+        output_dir = args.output_dir
+    
     print(f"\n" + "=" * 60)
     print("生成可视化图表...")
     print("=" * 60)

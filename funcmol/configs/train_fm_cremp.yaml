@@ -27,6 +27,9 @@ ddpm:
   num_timesteps: 1000
   schedule: "linear"  # 可选: "linear", "cosine", "sigmoid"
   
+  # Cosine调度参数（仅当schedule为"cosine"时使用）
+  s: 0.008  # cosine调度的偏移参数，控制余弦曲线的偏移，影响噪声添加的曲线形状（s越小曲线越陡峭，s越大曲线越平缓）
+  
   # Sigmoid调度参数（仅当schedule为"sigmoid"时使用）
   s1: 0.008
   sT: 0.008

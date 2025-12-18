@@ -165,13 +165,14 @@ def main(config):
     
     # 自动计算 dirname，基于 nf_pretrained_path 的目录
     checkpoint_dir = os.path.dirname(nf_pretrained_path)
-    dirname = os.path.join(checkpoint_dir, "codes", config.get("split", "train"))
     
     # 将 config 转换为普通字典以避免结构化配置限制
     if isinstance(config, omegaconf.dictconfig.DictConfig):
         config = omegaconf.OmegaConf.to_container(config, resolve=True)
     
-    config["dirname"] = dirname
+    # 保存yaml配置中的split，确保它不会被checkpoint配置覆盖
+    yaml_split = config.get("split", "train")
+    yaml_use_data_augmentation = config.get("use_data_augmentation", False)
     
     # 设置设备
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -202,6 +203,23 @@ def main(config):
         else:
             config_model[key] = config[key]
     config = config_model  # update config with checkpoint config
+    
+    # 确保yaml配置中的split和use_data_augmentation优先（覆盖checkpoint中的配置）
+    config["split"] = yaml_split
+    config["use_data_augmentation"] = yaml_use_data_augmentation
+    
+    # 根据是否使用数据增强来决定保存目录（在合并配置后确定）
+    use_data_augmentation_config = config.get("use_data_augmentation", False)
+    split = config.get("split", "train")
+    
+    if use_data_augmentation_config and split == "train":
+        # 使用数据增强时，保存到 codes 目录
+        dirname = os.path.join(checkpoint_dir, "codes", split)
+    else:
+        # 不使用数据增强时，保存到 code_no_aug 目录
+        dirname = os.path.join(checkpoint_dir, "code_no_aug", split)
+    
+    config["dirname"] = dirname
     enc, _ = load_neural_field(checkpoint, config)
 
     # 创建GNFConverter实例用于数据加载
@@ -220,8 +238,7 @@ def main(config):
 
     # 获取数据增强配置
     # 数据增强只应该在训练集上使用，验证集和测试集应该使用原始数据
-    split = config.get("split", "train")
-    use_data_augmentation_config = config.get("use_data_augmentation", False)
+    # 注意：split 和 use_data_augmentation_config 已在上面定义（第174-175行）
     use_data_augmentation = use_data_augmentation_config and (split == "train")
     num_augmentations = config.get("num_augmentations", 1)  # 每个分子生成多少个增强版本（包括原始版本）
     apply_rotation = config.get("data_augmentation", {}).get("apply_rotation", True)
