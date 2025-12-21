@@ -14,8 +14,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import torch._dynamo
 torch._dynamo.config.suppress_errors = True
 
+from torch_geometric.loader import DataLoader
+from torch_geometric.utils import to_dense_batch
+
 from funcmol.utils.utils_nf import load_neural_field
 from funcmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
+from funcmol.utils.utils_fm import compute_position_weights
+from funcmol.models.encoder import create_grid_coords
 
 
 def _random_rot_matrix(device=None) -> torch.Tensor:
@@ -71,7 +76,7 @@ def apply_rotation_to_batch(batch, device):
     coords = batch.pos  # [total_atoms, 3]
     
     # 计算每个分子的中心
-    from torch_geometric.utils import to_dense_batch
+    
     coords_dense, mask = to_dense_batch(coords, batch.batch, fill_value=0.0)
     # coords_dense: [B, max_atoms, 3]
     
@@ -214,7 +219,8 @@ def main(config):
     
     if use_data_augmentation_config and split == "train":
         # 使用数据增强时，保存到 codes 目录
-        dirname = os.path.join(checkpoint_dir, "codes", split)
+        # dirname = os.path.join(checkpoint_dir, "codes", split)
+        dirname = os.path.join(checkpoint_dir, "codes_no_shuffle", split)
     else:
         # 不使用数据增强时，保存到 code_no_aug 目录
         dirname = os.path.join(checkpoint_dir, "code_no_aug", split)
@@ -227,6 +233,17 @@ def main(config):
     
     # data loader
     loader = create_field_loaders(config, gnf_converter, split=config["split"])
+    
+    # 强制禁用shuffle以保持数据顺序（确保codes索引与原始数据索引对应） 
+    loader = DataLoader(
+        loader.dataset,
+        batch_size=min(config["dset"]["batch_size"], len(loader.dataset)),
+        num_workers=config["dset"]["num_workers"],
+        shuffle=False,  # 强制禁用shuffle，保持顺序
+        pin_memory=True,
+        drop_last=True,
+    )
+    print(f">> DataLoader shuffle disabled to preserve data order")
 
     # Print config
     print(f">> config: {config}")
@@ -252,18 +269,38 @@ def main(config):
     elif split != "train" and use_data_augmentation_config:
         num_augmentations = 1
 
+    # 获取position_weight配置（如果启用）- 需要在检查文件存在之前定义
+    position_weight_config = config.get("position_weight", {})
+    compute_position_weights_flag = position_weight_config.get("enabled", False)
+    radius = position_weight_config.get("radius", 3.0)
+    weight_alpha = position_weight_config.get("alpha", 0.5)
+    grid_size = config.get("dset", {}).get("grid_size", 9)
+
     # check if codes already exist (检查所有增强版本的文件)
     all_codes_exist = True
+    all_weights_exist = True
     for aug_idx in range(num_augmentations):
         codes_file_path = os.path.join(config["dirname"], f"codes_{aug_idx:03d}.pt")
         if not os.path.exists(codes_file_path):
             all_codes_exist = False
             break
+        
+        # 如果启用了position_weight计算，也检查weights文件
+        if compute_position_weights_flag:
+            weights_file_path = os.path.join(config["dirname"], f"position_weights_{aug_idx:03d}.pt")
+            if not os.path.exists(weights_file_path):
+                all_weights_exist = False
     
     if all_codes_exist:
-        print(f">> all codes files already exist in {config['dirname']}")
-        print(">> skipping code inference")
-        return
+        if compute_position_weights_flag and not all_weights_exist:
+            print(f">> codes files exist but position_weights files are missing")
+            print(f">> will recompute codes to generate position_weights")
+        else:
+            print(f">> all codes files already exist in {config['dirname']}")
+            if compute_position_weights_flag:
+                print(f">> all position_weights files also exist")
+            print(">> skipping code inference")
+            return
     
     if use_data_augmentation:
         print(">> Data augmentation enabled:")
@@ -276,9 +313,22 @@ def main(config):
     print(f">> start code inference in {config['split']} split")
     enc.eval()
 
-    # 创建临时目录存储每个batch的codes
+    # 创建临时目录存储每个batch的codes和position_weights
     temp_dir = os.path.join(config["dirname"], "temp_batches")
     os.makedirs(temp_dir, exist_ok=True)
+    
+    # position_weight配置已在上面定义，这里直接使用
+    if compute_position_weights_flag:
+        print(">> Position weight computation enabled:")
+        print(f"   - radius: {radius}")
+        print(f"   - alpha: {weight_alpha}")
+        print(f"   - grid_size: {grid_size}")
+        # 创建grid坐标（只需要创建一次）
+        grid_coords = create_grid_coords(1, grid_size, device=device, anchor_spacing=anchor_spacing)
+        grid_coords = grid_coords.squeeze(0).cpu()  # [n_grid, 3], 移到CPU
+    else:
+        grid_coords = None
+        print(">> Position weight computation disabled")
 
     with torch.no_grad():
         t0 = time.time()
@@ -307,10 +357,33 @@ def main(config):
                 codes_batch = enc(augmented_batch)
                 codes_batch_cpu = codes_batch.detach().cpu()
                 
+                # 计算position_weights（如果启用）
+                position_weights_batch = None
+                if compute_position_weights_flag:
+                    # 获取原子坐标（使用增强后的batch）
+                    atom_coords = augmented_batch.pos.cpu()  # [N_total_atoms, 3]
+                    batch_idx_atoms = augmented_batch.batch.cpu()  # [N_total_atoms]
+                    
+                    # 计算position weights
+                    position_weights_batch = compute_position_weights(
+                        atom_coords=atom_coords,
+                        grid_coords=grid_coords,
+                        batch_idx=batch_idx_atoms,
+                        radius=radius,
+                        weight_alpha=weight_alpha,
+                        device=torch.device('cpu')  # 在CPU上计算以节省GPU内存
+                    )  # [B, n_grid]
+                
                 # 立即保存到临时文件
                 temp_file = os.path.join(temp_dir, f"codes_{aug_idx:03d}_batch_{batch_idx:06d}.pt")
                 torch.save(codes_batch_cpu, temp_file)
                 del codes_batch_cpu  # 立即释放内存
+                
+                # 保存position_weights（如果计算了）
+                if position_weights_batch is not None:
+                    temp_weights_file = os.path.join(temp_dir, f"position_weights_{aug_idx:03d}_batch_{batch_idx:06d}.pt")
+                    torch.save(position_weights_batch, temp_weights_file)
+                    del position_weights_batch  # 立即释放内存
             
             batch_idx += 1
             # 每处理完一个batch就释放GPU内存
@@ -366,6 +439,46 @@ def main(config):
                 del final_codes, merged_codes_list
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
+            
+            # 合并position_weights文件（如果存在）
+            if compute_position_weights_flag:
+                weights_batch_files = sorted([
+                    os.path.join(temp_dir, f)
+                    for f in os.listdir(temp_dir)
+                    if f.startswith(f"position_weights_{aug_idx:03d}_batch_") and f.endswith(".pt")
+                ])
+                
+                if weights_batch_files:
+                    weights_file_path = os.path.join(config["dirname"], f"position_weights_{aug_idx:03d}.pt")
+                    
+                    # 分块合并position_weights
+                    merged_weights_list = []
+                    for i in range(0, len(weights_batch_files), merge_batch_size):
+                        weights_chunk = weights_batch_files[i:i + merge_batch_size]
+                        
+                        chunk_weights = []
+                        for weights_file in weights_chunk:
+                            weights = torch.load(weights_file, weights_only=False)
+                            chunk_weights.append(weights)
+                            os.remove(weights_file)  # 立即删除临时文件
+                        
+                        merged_chunk = torch.cat(chunk_weights, dim=0)
+                        merged_weights_list.append(merged_chunk)
+                        del chunk_weights, merged_chunk
+                        
+                        if len(merged_weights_list) >= 5:
+                            temp_merged = torch.cat(merged_weights_list, dim=0)
+                            merged_weights_list = [temp_merged]
+                            del temp_merged
+                    
+                    # 最终合并并保存
+                    if merged_weights_list:
+                        final_weights = torch.cat(merged_weights_list, dim=0)
+                        torch.save(final_weights, weights_file_path)
+                        print(f"   - saved position_weights_{aug_idx:03d}.pt: shape {final_weights.shape}")
+                        del final_weights, merged_weights_list
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
         
         # 删除临时目录
         try:

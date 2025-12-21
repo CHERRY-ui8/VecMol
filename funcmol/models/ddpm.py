@@ -362,7 +362,7 @@ def p_sample_loop_x0(model: nn.Module, shape: Tuple[int, ...], diffusion_consts:
 # 6. DDPM 训练损失计算
 # ===========================
 def compute_ddpm_loss(model: nn.Module, x_0: torch.Tensor, diffusion_consts: Dict[str, torch.Tensor], 
-                     device: torch.device) -> torch.Tensor:
+                     device: torch.device, position_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
     """
     计算DDPM训练损失（预测噪声epsilon版本）
     
@@ -371,6 +371,7 @@ def compute_ddpm_loss(model: nn.Module, x_0: torch.Tensor, diffusion_consts: Dic
         x_0: 原始数据 [B, N*N*N, code_dim]
         diffusion_consts: 扩散常数
         device: 设备
+        position_weights: 位置权重 [B, N*N*N]，可选
     
     Returns:
         训练损失
@@ -390,13 +391,24 @@ def compute_ddpm_loss(model: nn.Module, x_0: torch.Tensor, diffusion_consts: Dic
     predicted_noise = model(x_t, t)
     
     # 计算损失
-    loss = F.mse_loss(predicted_noise, noise)
+    if position_weights is not None:
+        # 应用位置权重：对每个位置计算MSE，然后加权平均
+        # predicted_noise: [B, N*N*N, code_dim], noise: [B, N*N*N, code_dim]
+        # position_weights: [B, N*N*N]
+        squared_diff = (predicted_noise - noise) ** 2  # [B, N*N*N, code_dim]
+        squared_diff_per_pos = squared_diff.mean(dim=-1)  # [B, N*N*N]
+        # 应用权重并取平均
+        loss = (position_weights * squared_diff_per_pos).mean()
+    else:
+        # 不使用位置权重，直接计算MSE
+        loss = F.mse_loss(predicted_noise, noise)
     
     return loss
 
 
 def compute_ddpm_loss_x0(model: nn.Module, x_0: torch.Tensor, diffusion_consts: Dict[str, torch.Tensor], 
-                         device: torch.device, use_time_weight: bool = True) -> torch.Tensor:
+                         device: torch.device, use_time_weight: bool = True, 
+                         position_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
     """
     计算DDPM训练损失（预测x0版本）
     
@@ -406,6 +418,7 @@ def compute_ddpm_loss_x0(model: nn.Module, x_0: torch.Tensor, diffusion_consts: 
         diffusion_consts: 扩散常数
         device: 设备
         use_time_weight: 是否使用时间步权重 1 + num_timesteps/(t+1)
+        position_weights: 位置权重 [B, N*N*N]，可选
     
     Returns:
         训练损失
@@ -425,9 +438,20 @@ def compute_ddpm_loss_x0(model: nn.Module, x_0: torch.Tensor, diffusion_consts: 
     # 预测x0
     predicted_x0 = model(x_t, t)
     
-    # 直接预测x_0
-    # 计算每个样本的损失 [B]
-    loss_per_sample = F.mse_loss(predicted_x0, x_0, reduction='none').mean(dim=tuple(range(1, predicted_x0.ndim)))
+    # 计算每个位置的损失
+    if position_weights is not None:
+        # 应用位置权重：对每个位置计算MSE
+        # predicted_x0: [B, N*N*N, code_dim], x_0: [B, N*N*N, code_dim]
+        # position_weights: [B, N*N*N]
+        squared_diff = (predicted_x0 - x_0) ** 2  # [B, N*N*N, code_dim]
+        squared_diff_per_pos = squared_diff.mean(dim=-1)  # [B, N*N*N]
+        # 应用位置权重
+        weighted_loss_per_pos = position_weights * squared_diff_per_pos  # [B, N*N*N]
+        # 计算每个样本的损失 [B]
+        loss_per_sample = weighted_loss_per_pos.mean(dim=1)  # [B]
+    else:
+        # 不使用位置权重，直接计算每个样本的损失 [B]
+        loss_per_sample = F.mse_loss(predicted_x0, x_0, reduction='none').mean(dim=tuple(range(1, predicted_x0.ndim)))
     
     if use_time_weight:
         # 计算时间步权重：1 + num_timesteps / (t + 1)
@@ -447,6 +471,8 @@ def compute_ddpm_loss_x0(model: nn.Module, x_0: torch.Tensor, diffusion_consts: 
         if use_time_weight:
             weights = 1.0 + num_timesteps / (t.float() + 1.0)
             print(f"  weights: min={weights.min().item():.6f}, max={weights.max().item():.6f}, mean={weights.mean().item():.6f}")
+        if position_weights is not None:
+            print(f"  position_weights: min={position_weights.min().item():.6f}, max={position_weights.max().item():.6f}, mean={position_weights.mean().item():.6f}")
         # 返回一个小的非零值以避免训练崩溃
         loss = torch.tensor(1e-6, device=device, requires_grad=True)
     

@@ -24,20 +24,23 @@ from omegaconf import OmegaConf
 import hydra
 
 # Set GPU environment
+# os.environ['CUDA_VISIBLE_DEVICES'] = "1"
 # os.environ['CUDA_VISIBLE_DEVICES'] = "1,2,3,4,5,6,7"
-os.environ['CUDA_VISIBLE_DEVICES'] = "2,3,4,5"
+os.environ['CUDA_VISIBLE_DEVICES'] = "0,2,3,4,5"
 
 from funcmol.models.funcmol import create_funcmol
 from funcmol.utils.utils_fm import (
     add_noise_to_code,
     compute_code_stats_offline, compute_codes,
-    load_checkpoint_state_fm
+    load_checkpoint_state_fm,
+    compute_position_weights
 )
 from funcmol.models.adamw import AdamW
 from funcmol.models.ema import ModelEma
 from funcmol.utils.utils_nf import infer_codes_occs_batch, load_neural_field, normalize_code
 from funcmol.dataset.dataset_code import create_code_loaders
 from funcmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
+from funcmol.models.encoder import create_grid_coords
 
 
 def plot_loss_curve(train_losses, val_losses, save_path, title_suffix=""):
@@ -67,13 +70,19 @@ class FuncmolLightningModule(pl.LightningModule):
     """
     PyTorch Lightning module for training Funcmol (denoiser)
     """
-    def __init__(self, config, enc, dec_module, code_stats):
+    def __init__(self, config, enc, dec_module, code_stats, field_loader_train=None, field_loader_val=None):
         super().__init__()
         self.config = config
         self.enc = enc
         self.dec_module = dec_module
         self.code_stats = code_stats
-        self.save_hyperparameters(ignore=['enc', 'dec_module', 'code_stats'])
+        self.save_hyperparameters(ignore=['enc', 'dec_module', 'code_stats', 'field_loader_train', 'field_loader_val'])
+        
+        # Store field loaders for position weight computation when on_the_fly=False
+        self.field_loader_train = field_loader_train
+        self.field_loader_val = field_loader_val
+        self._field_dataset_train = field_loader_train.dataset if field_loader_train is not None else None
+        self._field_dataset_val = field_loader_val.dataset if field_loader_val is not None else None
         
         # Create Funcmol model
         self.funcmol = create_funcmol(config)
@@ -86,6 +95,17 @@ class FuncmolLightningModule(pl.LightningModule):
             self.funcmol_ema = ModelEma(self.funcmol, decay=config["ema_decay"])
 
         self._freeze_nf()
+        
+        # Position weight configuration
+        self.position_weight_config = config.get("position_weight", {})
+        self.use_position_weight = self.position_weight_config.get("enabled", False)
+        
+        # Position weight augmentation info (for modulo mapping when codes are augmented)
+        # These are set from config in main() when datasets are created
+        self.num_augmentations_train = config.get("num_augmentations_train")
+        self.num_augmentations_val = config.get("num_augmentations_val")
+        self.field_dataset_size_train = config.get("field_dataset_size_train")
+        self.field_dataset_size_val = config.get("field_dataset_size_val")
         
         # Track losses for plotting # TODO: remove these
         self.train_losses = []
@@ -103,14 +123,37 @@ class FuncmolLightningModule(pl.LightningModule):
         
     def _process_batch(self, batch):
         """
-        Process a batch and return codes and smooth_codes
+        Process a batch and return codes, smooth_codes, and position_weights (if available)
         
         Args:
-            batch: Data batch
+            batch: Data batch (may be tuple of (codes, position_weights) if position_weights are pre-computed)
             
         Returns:
-            tuple: (codes, smooth_codes)
+            tuple: (codes, smooth_codes, position_weights) or (codes, smooth_codes, None)
         """
+        # Check if batch contains position_weights (from dataset)
+        # DataLoader会将多个样本的返回值组合：如果dataset返回tuple，DataLoader返回tuple of lists
+        position_weights = None
+        if isinstance(batch, (list, tuple)) and len(batch) == 2:
+            # Dataset returns (codes, position_weights), DataLoader返回(codes_list, position_weights_list)
+            codes_list, position_weights_list = batch
+            # Stack codes
+            if isinstance(codes_list, list):
+                codes = torch.stack(codes_list)
+            else:
+                codes = codes_list
+            # Stack position_weights
+            if isinstance(position_weights_list, list):
+                position_weights = torch.stack(position_weights_list)
+            else:
+                position_weights = position_weights_list
+        else:
+            # Dataset returns only codes
+            if isinstance(batch, list):
+                codes = torch.stack(batch)
+            else:
+                codes = batch
+        
         if self.config["on_the_fly"]:
             with torch.no_grad():
                 codes, _ = infer_codes_occs_batch(
@@ -118,12 +161,197 @@ class FuncmolLightningModule(pl.LightningModule):
                     code_stats=self.code_stats if self.config["normalize_codes"] else None
                 )
         else:
-            codes = normalize_code(batch, self.code_stats)
+            codes = normalize_code(codes, self.code_stats)
         
         with torch.no_grad():
             smooth_codes = add_noise_to_code(codes, smooth_sigma=self.config["smooth_sigma"])
         
-        return codes, smooth_codes
+        # Move position_weights to the same device as codes
+        if position_weights is not None:
+            position_weights = position_weights.to(codes.device)
+        
+        return codes, smooth_codes, position_weights
+    
+    def _compute_position_weights(self, batch, codes, batch_idx=None, is_training=True, precomputed_weights=None):
+        """
+        Get position weights for codes. First try to use precomputed weights from dataset,
+        otherwise compute on-the-fly (for on_the_fly=True mode).
+        
+        Args:
+            batch: Data batch (PyTorch Geometric Batch if on_the_fly=True, or codes tensor if False)
+            codes: Codes tensor [B, n_grid, code_dim]
+            batch_idx: Batch index in DataLoader (required for on_the_fly=False mode)
+            is_training: Whether this is training step (True) or validation step (False)
+            precomputed_weights: Pre-computed position weights from dataset [B, n_grid] or None
+            
+        Returns:
+            position_weights: [B, n_grid] or None if position weighting is disabled
+        """
+        if not self.use_position_weight:
+            return None
+        
+        # If precomputed weights are available, use them (much faster!)
+        if precomputed_weights is not None:
+            return precomputed_weights
+        
+        device = codes.device
+        B = codes.shape[0]
+        grid_size = self.config["dset"]["grid_size"]
+        anchor_spacing = self.config["dset"]["anchor_spacing"]
+        radius = self.position_weight_config.get("radius", 3.0)
+        weight_alpha = self.position_weight_config.get("alpha", 0.1)
+        
+        # Get grid coordinates
+        grid_coords = create_grid_coords(1, grid_size, device=device, anchor_spacing=anchor_spacing)
+        grid_coords = grid_coords.squeeze(0)  # [n_grid, 3]
+        
+        if self.config["on_the_fly"]:
+            # Extract atom coordinates from batch (PyTorch Geometric Batch)
+            atom_coords = batch.pos  # [N_total_atoms, 3]
+            batch_idx_atoms = batch.batch  # [N_total_atoms]
+            
+            # Compute position weights
+            position_weights = compute_position_weights(
+                atom_coords=atom_coords,
+                grid_coords=grid_coords,
+                batch_idx=batch_idx_atoms,
+                radius=radius,
+                weight_alpha=weight_alpha,
+                device=device
+            )
+        else:
+            # For on_the_fly=False, get atom coordinates from FieldDataset using index mapping
+            # Since codes and molecules have matching order (shuffle disabled), we can use batch_idx
+            # to calculate the dataset indices for this batch
+            
+            # Select the appropriate dataset (train or val)
+            field_dataset = self._field_dataset_train if is_training else self._field_dataset_val
+            
+            if field_dataset is None:
+                # If field dataset is not available, return None (position weighting disabled)
+                return None
+            
+            if batch_idx is None:
+                # batch_idx is required for on_the_fly=False mode
+                print("[WARNING] batch_idx is required for position weighting in on_the_fly=False mode")
+                return None
+            
+            try:
+                # Calculate the dataset indices for this batch
+                batch_size = self.config["dset"]["batch_size"]
+                start_idx = batch_idx * batch_size
+                end_idx = start_idx + B  # Use actual batch size (B) in case of last batch
+                
+                # Get augmentation info for modulo mapping
+                num_augmentations = self.num_augmentations_train if is_training else self.num_augmentations_val
+                field_dataset_size = self.field_dataset_size_train if is_training else self.field_dataset_size_val
+                
+                # If codes are augmented (num_augmentations > 1), use modulo mapping
+                # codes[i] corresponds to field_dataset[i % field_dataset_size]
+                if num_augmentations is not None and num_augmentations > 1 and field_dataset_size is not None:
+                    # Use modulo mapping: codes index -> field dataset index
+                    # codes[start_idx...end_idx] -> field_dataset[start_idx % field_dataset_size ... end_idx % field_dataset_size]
+                    # But we need to handle the mapping for each code in the batch
+                    all_atom_coords = []
+                    all_batch_indices = []
+                    
+                    for code_idx in range(start_idx, end_idx):
+                        # Map codes index to field dataset index using modulo
+                        field_idx = code_idx % field_dataset_size
+                        
+                        try:
+                            # Get molecule data from FieldDataset using modulo-mapped index
+                            mol_data = field_dataset[field_idx]
+                            
+                            # Extract atom coordinates
+                            if hasattr(mol_data, 'pos'):
+                                atom_coords = mol_data.pos  # [N_atoms, 3]
+                                all_atom_coords.append(atom_coords)
+                                # Create batch index for this molecule (within the current batch)
+                                batch_idx_for_mol = len(all_batch_indices)
+                                num_atoms = atom_coords.shape[0]
+                                all_batch_indices.append(torch.full((num_atoms,), batch_idx_for_mol, dtype=torch.long))
+                            else:
+                                print(f"[WARNING] Molecule at field index {field_idx} (codes index {code_idx}) does not have 'pos' attribute")
+                                return None
+                        except Exception as e:
+                            print(f"[WARNING] Failed to get molecule at field index {field_idx} (codes index {code_idx}): {e}")
+                            return None
+                else:
+                    # No augmentation or augmentation info not available, use direct mapping
+                    # Verify dataset length matches
+                    if start_idx >= len(field_dataset):
+                        print(f"[WARNING] batch_idx {batch_idx} is out of range for dataset (size: {len(field_dataset)})")
+                        return None
+                    
+                    # Clamp end_idx to dataset size
+                    end_idx = min(end_idx, len(field_dataset))
+                    
+                    # Get molecule data for this batch from FieldDataset
+                    all_atom_coords = []
+                    all_batch_indices = []
+                    
+                    for i in range(start_idx, end_idx):
+                        try:
+                            # Get molecule data from FieldDataset
+                            mol_data = field_dataset[i]
+                            
+                            # Extract atom coordinates
+                            if hasattr(mol_data, 'pos'):
+                                atom_coords = mol_data.pos  # [N_atoms, 3]
+                                all_atom_coords.append(atom_coords)
+                                # Create batch index for this molecule (within the current batch)
+                                batch_idx_for_mol = len(all_batch_indices)
+                                num_atoms = atom_coords.shape[0]
+                                all_batch_indices.append(torch.full((num_atoms,), batch_idx_for_mol, dtype=torch.long))
+                            else:
+                                print(f"[WARNING] Molecule at index {i} does not have 'pos' attribute")
+                                return None
+                        except Exception as e:
+                            print(f"[WARNING] Failed to get molecule at index {i}: {e}")
+                            return None
+                
+                if not all_atom_coords:
+                    print("[WARNING] No atom coordinates retrieved from FieldDataset")
+                    return None
+                
+                # Concatenate all atom coordinates
+                atom_coords = torch.cat(all_atom_coords, dim=0).to(device)  # [N_total_atoms, 3]
+                batch_idx_atoms = torch.cat(all_batch_indices, dim=0).to(device)  # [N_total_atoms]
+                
+                # Verify we got the correct number of molecules
+                actual_num_molecules = len(all_atom_coords)
+                if actual_num_molecules != B:
+                    print(f"[WARNING] Expected {B} molecules, got {actual_num_molecules}")
+                    # Adjust position_weights shape if needed
+                    # This can happen in the last batch if drop_last=False
+                    if actual_num_molecules < B:
+                        # If we got fewer molecules, we can only compute weights for those
+                        # This should not happen if drop_last=True, but handle it gracefully
+                        print(f"[WARNING] Batch size mismatch: codes has {B} samples but only {actual_num_molecules} molecules retrieved")
+                        # We'll compute weights for available molecules and pad if needed
+                        # But this is an error condition, so return None
+                        return None
+                
+                # Compute position weights
+                position_weights = compute_position_weights(
+                    atom_coords=atom_coords,
+                    grid_coords=grid_coords,
+                    batch_idx=batch_idx_atoms,
+                    radius=radius,
+                    weight_alpha=weight_alpha,
+                    device=device
+                )
+                
+                return position_weights
+                
+            except Exception as e:
+                print(f"[WARNING] Failed to compute position weights: {e}")
+                import traceback
+                traceback.print_exc()
+                return None
+        
+        return position_weights
     
     def training_step(self, batch, batch_idx):
         """Training step logic"""
@@ -140,8 +368,14 @@ class FuncmolLightningModule(pl.LightningModule):
 
     def _training_step_ddpm(self, batch, batch_idx):
         """DDPM训练步骤"""
-        # 获取codes
-        codes, _ = self._process_batch(batch)
+        # 获取codes和position_weights（如果已预计算）
+        codes, _, position_weights_precomputed = self._process_batch(batch)
+        
+        # 获取位置权重（优先使用预计算的，否则重新计算）
+        position_weights = self._compute_position_weights(
+            batch, codes, batch_idx=batch_idx, is_training=True,
+            precomputed_weights=position_weights_precomputed
+        )
         
         # 已移除：对codes的数据增强（使用bilinear插值）
         # 注意：在infer_codes.py中对分子坐标的增强（生成10个pt文件）仍然保留
@@ -166,7 +400,7 @@ class FuncmolLightningModule(pl.LightningModule):
         #     print(f"[DEBUG] Using diffusion constants: {list(self.funcmol.diffusion_consts.keys())}")
         
         # DDPM训练步骤 - 直接使用3维输入 [B, N*N*N, code_dim]
-        loss = self.funcmol.train_ddpm_step(codes)
+        loss = self.funcmol.train_ddpm_step(codes, position_weights=position_weights)
         
         # Update EMA model
         self.funcmol_ema.update(self.funcmol)
@@ -182,14 +416,30 @@ class FuncmolLightningModule(pl.LightningModule):
 
     def _training_step_original(self, batch, batch_idx):
         """原有训练方法"""
-        # Get codes and smooth codes
-        codes, smooth_codes = self._process_batch(batch)
+        # Get codes, smooth_codes, and position_weights (if precomputed)
+        codes, smooth_codes, position_weights_precomputed = self._process_batch(batch)
         
         # Forward pass through Funcmol
         pred_codes = self.funcmol(smooth_codes)
         
-        # Calculate loss
-        loss = self.criterion(pred_codes, codes)
+        # Calculate loss with position weights if enabled
+        if self.use_position_weight:
+            position_weights = self._compute_position_weights(
+                batch, codes, batch_idx=batch_idx, is_training=True,
+                precomputed_weights=position_weights_precomputed
+            )
+            if position_weights is not None:
+                # Apply position weights to MSE loss
+                squared_diff = (pred_codes - codes) ** 2  # [B, n_grid, code_dim]
+                squared_diff_per_pos = squared_diff.mean(dim=-1)  # [B, n_grid]
+                weighted_loss_per_pos = position_weights * squared_diff_per_pos  # [B, n_grid]
+                loss = weighted_loss_per_pos.mean()
+            else:
+                # Fallback to regular loss if weights cannot be computed
+                loss = self.criterion(pred_codes, codes)
+        else:
+            # Calculate loss without position weights
+            loss = self.criterion(pred_codes, codes)
         
         # Update EMA model
         self.funcmol_ema.update(self.funcmol)
@@ -214,11 +464,17 @@ class FuncmolLightningModule(pl.LightningModule):
 
     def _validation_step_ddpm(self, batch, batch_idx):
         """DDPM验证步骤"""
-        # 获取codes
-        codes, _ = self._process_batch(batch)
+        # 获取codes和position_weights（如果已预计算）
+        codes, _, position_weights_precomputed = self._process_batch(batch)
+        
+        # 获取位置权重（优先使用预计算的，否则重新计算）
+        position_weights = self._compute_position_weights(
+            batch, codes, batch_idx=batch_idx, is_training=False,
+            precomputed_weights=position_weights_precomputed
+        )
         
         # DDPM验证步骤 - 直接使用3维输入 [B, N*N*N, code_dim]
-        loss = self.funcmol.train_ddpm_step(codes)
+        loss = self.funcmol.train_ddpm_step(codes, position_weights=position_weights)
         
         # Log metrics
         self.log('val_loss', loss, batch_size=len(batch),
@@ -228,14 +484,30 @@ class FuncmolLightningModule(pl.LightningModule):
 
     def _validation_step_original(self, batch, batch_idx):
         """原有验证方法"""
-        # Get codes and smooth codes
-        codes, smooth_codes = self._process_batch(batch)
+        # Get codes, smooth_codes, and position_weights (if precomputed)
+        codes, smooth_codes, position_weights_precomputed = self._process_batch(batch)
         
         # Forward pass through EMA model
         pred_codes = self.funcmol_ema(smooth_codes)
         
-        # Calculate loss
-        loss = self.criterion(pred_codes, codes)
+        # Calculate loss with position weights if enabled
+        if self.use_position_weight:
+            position_weights = self._compute_position_weights(
+                batch, codes, batch_idx=batch_idx, is_training=False,
+                precomputed_weights=position_weights_precomputed
+            )
+            if position_weights is not None:
+                # Apply position weights to MSE loss
+                squared_diff = (pred_codes - codes) ** 2  # [B, n_grid, code_dim]
+                squared_diff_per_pos = squared_diff.mean(dim=-1)  # [B, n_grid]
+                weighted_loss_per_pos = position_weights * squared_diff_per_pos  # [B, n_grid]
+                loss = weighted_loss_per_pos.mean()
+            else:
+                # Fallback to regular loss if weights cannot be computed
+                loss = self.criterion(pred_codes, codes)
+        else:
+            # Calculate loss without position weights
+            loss = self.criterion(pred_codes, codes)
         
         # Log metrics
         self.log('val_loss', loss, batch_size=len(batch),
@@ -461,6 +733,9 @@ def main(config):
         config["codes_dir"] = codes_dir
     
     # Create data loaders
+    field_loader_train = None
+    field_loader_val = None
+    
     try:
         if config["on_the_fly"]:
             # Create GNFConverter instance for data loading
@@ -468,6 +743,10 @@ def main(config):
             
             loader_train = create_field_loaders(config, gnf_converter, split="train")
             loader_val = create_field_loaders(config, gnf_converter, split="val")
+            
+            # Store field loaders for position weight computation
+            field_loader_train = loader_train
+            field_loader_val = loader_val
             
             # # Handle cases where loaders are returned as lists
             # if isinstance(loader_train, list) and len(loader_train) > 0:
@@ -483,6 +762,84 @@ def main(config):
         else:
             loader_train = create_code_loaders(config, split="train")
             loader_val = create_code_loaders(config, split="val")
+            
+            # If position weighting is enabled, also create field loaders to get atom coordinates
+            position_weight_config = config.get("position_weight", {})
+            if position_weight_config.get("enabled", False):
+                print(">> Position weighting enabled for on_the_fly=False mode")
+                print(">> Creating field loaders to get atom coordinates...")
+                try:
+                    gnf_converter = create_gnf_converter(config)
+                    field_loader_train = create_field_loaders(config, gnf_converter, split="train")
+                    field_loader_val = create_field_loaders(config, gnf_converter, split="val")
+                    
+                    # Verify dataset lengths match
+                    code_dataset_train = loader_train.dataset
+                    code_dataset_val = loader_val.dataset if loader_val else None
+                    field_dataset_train = field_loader_train.dataset
+                    field_dataset_val = field_loader_val.dataset if field_loader_val else None
+                    
+                    len_codes_train = len(code_dataset_train)
+                    len_field_train = len(field_dataset_train)
+                    
+                    # Calculate num_augmentations if codes length is a multiple of field length
+                    num_augmentations_train = None
+                    if len_codes_train > 0 and len_field_train > 0:
+                        if len_codes_train % len_field_train == 0:
+                            num_augmentations_train = len_codes_train // len_field_train
+                            print(f">> Train split: codes dataset has {num_augmentations_train}x samples (augmentations)")
+                            print(f">>   Codes dataset: {len_codes_train} samples")
+                            print(f">>   Field dataset: {len_field_train} samples")
+                            print(f">>   Using modulo mapping: codes[i] -> field[i % {len_field_train}]")
+                        else:
+                            print(f">> WARNING: Codes dataset length ({len_codes_train}) is not a multiple of field dataset length ({len_field_train})")
+                            print(f">>   Cannot use modulo mapping for position weighting")
+                            num_augmentations_train = None
+                    
+                    if len_codes_train == len_field_train:
+                        print(f">> Train dataset lengths match: {len_codes_train} samples (no augmentation)")
+                        num_augmentations_train = 1
+                    
+                    if code_dataset_val and field_dataset_val:
+                        len_codes_val = len(code_dataset_val)
+                        len_field_val = len(field_dataset_val)
+                        
+                        # Calculate num_augmentations for val split
+                        if len_codes_val > 0 and len_field_val > 0:
+                            if len_codes_val % len_field_val == 0:
+                                num_augmentations_val = len_codes_val // len_field_val
+                                print(f">> Val split: codes dataset has {num_augmentations_val}x samples (augmentations)")
+                                print(f">>   Codes dataset: {len_codes_val} samples")
+                                print(f">>   Field dataset: {len_field_val} samples")
+                                print(f">>   Using modulo mapping: codes[i] -> field[i % {len_field_val}]")
+                            else:
+                                print(f">> WARNING: Val codes dataset length ({len_codes_val}) is not a multiple of field dataset length ({len_field_val})")
+                                num_augmentations_val = None
+                        else:
+                            num_augmentations_val = None
+                        
+                        if len_codes_val == len_field_val:
+                            print(f">> Val dataset lengths match: {len_codes_val} samples (no augmentation)")
+                            num_augmentations_val = 1
+                    else:
+                        num_augmentations_val = None
+                    
+                    print(">> Field loaders created successfully")
+                    print(">> Position weighting will use index-based mapping (codes and molecules have matching order)")
+                    
+                    # Store num_augmentations and field dataset sizes in config for later use in model
+                    config["num_augmentations_train"] = num_augmentations_train
+                    config["field_dataset_size_train"] = len_field_train
+                    if 'num_augmentations_val' in locals():
+                        config["num_augmentations_val"] = num_augmentations_val
+                    if 'len_field_val' in locals():
+                        config["field_dataset_size_val"] = len_field_val
+                except Exception as e:
+                    print(f">> Warning: Failed to create field loaders for position weighting: {e}")
+                    print(">> Position weighting will be disabled for on_the_fly=False mode")
+                    print(">> Consider using on_the_fly=True mode for position weighting support")
+                    import traceback
+                    traceback.print_exc()
             
             # # Handle cases where loaders are returned as lists
             # if isinstance(loader_train, list) and len(loader_train) > 0:
@@ -507,7 +864,9 @@ def main(config):
     config["num_iterations"] = config["num_epochs"] * len(loader_train)
     
     # Initialize Lightning model
-    model = FuncmolLightningModule(config, enc, dec_module, code_stats)
+    model = FuncmolLightningModule(config, enc, dec_module, code_stats, 
+                                   field_loader_train=field_loader_train, 
+                                   field_loader_val=field_loader_val)
     
     # Load checkpoint if specified
     if config["reload_model_path"] is not None:

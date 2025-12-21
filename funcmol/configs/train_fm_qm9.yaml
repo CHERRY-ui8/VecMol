@@ -41,6 +41,13 @@ ddpm:
   # 损失权重配置（仅当diffusion_method为"new_x0"时使用）
   use_time_weight: False  # 是否使用时间步权重 1 + num_timesteps/(t+1)
 
+# NOTE: 位置权重配置
+# 根据每个grid坐标附近原子的数量计算权重，对重要位置的codes在loss计算时加大权重
+position_weight:
+  enabled: True  # 是否启用位置权重
+  radius: 3.0     # 计算附近原子的半径阈值（单位：埃）
+  alpha: 0.5      # 权重系数：weight = 1 + alpha * num_atoms
+
 # nf_pretrained_path: ../exps/neural_field/nf_qm9
 # nf_pretrained_path: ../exps/neural_field/nf_qm9_20250812_181425_750832
 nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/model-epoch=999.ckpt
@@ -62,13 +69,14 @@ use_augmented_codes: True  # True: 使用数据增强的codes, False: 使用原�
 codes_dir_no_aug: "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/code_no_aug/"
 
 # 使用数据增强的codes路径（包含多个增强版本的codes）
-codes_dir_with_aug: "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/codes/"  # 例如: "/path/to/codes_with_augmentation/"
+codes_dir_with_aug: "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/codes_no_shuffle/" 
+# codes_dir_with_aug: "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/codes/"
 
 # training params
 num_epochs: 50000
 num_iterations: 50000  # 总迭代次数，用于学习率调度
 dset:
-  batch_size: 48
+  batch_size: 32
   num_workers: 4
 
 ckpt_every_n_epochs: 5  # 每隔多少epoch保存一次ckpt

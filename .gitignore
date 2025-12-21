@@ -4,7 +4,12 @@ funcmol/wandb/*
 funcmol/outputs/*
 
 # Python
+funcmol/dataset/__pycache__/*
+funcmol/models/__pycache__/*
 __pycache__/
 *.py[cod]
 *$py.class
 debug.log
+*.pyc
+
+graphs/*

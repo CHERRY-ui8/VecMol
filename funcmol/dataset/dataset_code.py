@@ -36,6 +36,10 @@ class CodeDataset(Dataset):
         self.dset_name = dset_name
         self.split = split
         self.codes_dir = os.path.join(codes_dir, self.split)
+        
+        # 检查是否存在position_weights文件
+        self.position_weights = None
+        self.use_position_weights = False
 
         # 检查是否存在LMDB数据库
         lmdb_path = os.path.join(self.codes_dir, "codes.lmdb")
@@ -59,6 +63,7 @@ class CodeDataset(Dataset):
                 self.num_augmentations = 0
                 self.use_lmdb = False
                 self.load_codes()
+                self._load_position_weights_files()
             else:
                 # 查找所有 codes_XXX.pt 文件
                 numbered_codes = [f for f in list_codes if f.startswith("codes_") and f.endswith(".pt")]
@@ -76,6 +81,7 @@ class CodeDataset(Dataset):
                     self.num_augmentations = 0
                     self.use_lmdb = False
                     self.load_codes()
+                    self._load_position_weights_files()
                 else:
                     # 没有找到 codes 文件
                     raise FileNotFoundError(
@@ -94,6 +100,21 @@ class CodeDataset(Dataset):
         
         print(f"  | Using LMDB database: {lmdb_path}")
         print(f"  | Database contains {len(self.keys)} codes")
+        
+        # 检查是否存在position_weights文件（LMDB格式）
+        weights_lmdb_path = os.path.join(os.path.dirname(lmdb_path), "position_weights.lmdb")
+        weights_keys_path = os.path.join(os.path.dirname(lmdb_path), "position_weights_keys.pt")
+        if os.path.exists(weights_lmdb_path) and os.path.exists(weights_keys_path):
+            self.position_weights_lmdb_path = weights_lmdb_path
+            self.position_weights_keys_path = weights_keys_path
+            self.position_weights_keys = torch.load(weights_keys_path, weights_only=False)
+            self.position_weights_db = None
+            self.use_position_weights = True
+            print(f"  | Found position_weights LMDB database: {weights_lmdb_path}")
+            print(f"  | Position weights database contains {len(self.position_weights_keys)} entries")
+        else:
+            # 检查是否存在position_weights文件（文件格式）
+            self._load_position_weights_files()
     
     def _connect_db(self):
         """建立只读数据库连接 - 进程安全版本"""
@@ -125,9 +146,26 @@ class CodeDataset(Dataset):
 
     def __getitem__(self, index):
         if hasattr(self, 'use_lmdb') and self.use_lmdb:
-            return self._getitem_lmdb(index)
+            code = self._getitem_lmdb(index)
         else:
-            return self.curr_codes[index]
+            code = self.curr_codes[index]
+        
+        # 如果存在position_weights，一起返回
+        if self.use_position_weights:
+            if hasattr(self, 'use_lmdb') and self.use_lmdb:
+                position_weight = self._get_position_weight_lmdb(index)
+            else:
+                if hasattr(self, 'position_weights') and self.position_weights is not None:
+                    position_weight = self.position_weights[index]
+                else:
+                    position_weight = None
+            if position_weight is not None:
+                return code, position_weight
+            else:
+                # 如果position_weight为None，只返回code（向后兼容）
+                return code
+        else:
+            return code
     
     def _getitem_lmdb(self, index):
         """LMDB模式下的数据获取 - 进程安全版本（优化版）"""
@@ -167,6 +205,107 @@ class CodeDataset(Dataset):
         if self.db is not None:
             self.db = None
             # 注意：不关闭共享连接，让其他worker继续使用
+
+    def _load_position_weights_files(self):
+        """加载position_weights文件（文件格式，非LMDB）"""
+        # 查找position_weights文件（支持多个augmentation版本）
+        list_weights = [
+            f for f in os.listdir(self.codes_dir)
+            if os.path.isfile(os.path.join(self.codes_dir, f)) and \
+            f.startswith("position_weights") and f.endswith(".pt")
+        ]
+        
+        if list_weights:
+            # 如果有多个position_weights文件（对应多个augmentation版本），需要合并
+            # 按照augmentation顺序合并：position_weights_000.pt, position_weights_001.pt, ...
+            numbered_weights = [f for f in list_weights if f.startswith("position_weights_") and f.endswith(".pt")]
+            if numbered_weights:
+                numbered_weights.sort()  # 按编号排序
+                print(f"  | Found {len(numbered_weights)} position_weights files (augmentation versions)")
+                
+                # 合并所有augmentation版本的position_weights
+                all_weights = []
+                for weights_file in numbered_weights:
+                    weights_path = os.path.join(self.codes_dir, weights_file)
+                    weights = torch.load(weights_path, weights_only=False)
+                    all_weights.append(weights)
+                    print(f"  |   - {weights_file}: shape {weights.shape}")
+                
+                # 合并所有augmentation版本
+                self.position_weights = torch.cat(all_weights, dim=0)
+                self.use_position_weights = True
+                print(f"  | Merged position_weights shape: {self.position_weights.shape}")
+                
+                # 验证长度是否匹配
+                if hasattr(self, 'curr_codes'):
+                    if len(self.position_weights) != len(self.curr_codes):
+                        print(f"  | WARNING: Position weights length ({len(self.position_weights)}) != codes length ({len(self.curr_codes)})")
+                        self.use_position_weights = False
+            elif len(list_weights) == 1:
+                # 单个position_weights文件（向后兼容）
+                weights_path = os.path.join(self.codes_dir, list_weights[0])
+                print(f"  | Loading position_weights from: {weights_path}")
+                self.position_weights = torch.load(weights_path, weights_only=False)
+                self.use_position_weights = True
+                print(f"  | Position weights shape: {self.position_weights.shape}")
+                
+                # 验证长度是否匹配
+                if hasattr(self, 'curr_codes'):
+                    if len(self.position_weights) != len(self.curr_codes):
+                        print(f"  | WARNING: Position weights length ({len(self.position_weights)}) != codes length ({len(self.curr_codes)})")
+                        self.use_position_weights = False
+            else:
+                print(f"  | WARNING: Found {len(list_weights)} position_weights files, expected 1 or numbered files. Disabling position_weights.")
+        else:
+            print(f"  | No position_weights files found in {self.codes_dir}")
+    
+    def _get_position_weight_lmdb(self, index):
+        """从LMDB获取position_weight"""
+        if not self.use_position_weights:
+            return None
+        
+        # 确保数据库连接在worker进程中建立
+        if not hasattr(self, 'position_weights_db') or self.position_weights_db is None:
+            self._connect_position_weights_db()
+        
+        key = self.position_weights_keys[index]
+        if isinstance(key, str):
+            key = key.encode('utf-8')
+        
+        try:
+            with self.position_weights_db.begin(buffers=True) as txn:
+                value = txn.get(key)
+                if value is None:
+                    return None
+                weight = pickle.loads(value)
+        except Exception as e:
+            print(f"LMDB position_weights transaction failed: {e}")
+            return None
+        
+        return weight
+    
+    def _connect_position_weights_db(self):
+        """建立position_weights LMDB数据库连接"""
+        if not hasattr(self, 'position_weights_lmdb_path'):
+            return
+        
+        if not hasattr(_thread_local, 'lmdb_connections'):
+            _thread_local.lmdb_connections = {}
+        
+        if self.position_weights_lmdb_path not in _thread_local.lmdb_connections:
+            _thread_local.lmdb_connections[self.position_weights_lmdb_path] = lmdb.open(
+                self.position_weights_lmdb_path,
+                map_size=10*(1024*1024*1024),
+                create=False,
+                subdir=True,
+                readonly=True,
+                lock=False,
+                readahead=True,
+                meminit=False,
+                max_readers=256,
+            )
+        
+        self.position_weights_db = _thread_local.lmdb_connections[self.position_weights_lmdb_path]
 
     def load_codes(self, index=None) -> None:
         """

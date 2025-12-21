@@ -13,7 +13,7 @@ import argparse
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import seaborn as sns
-
+from scipy import stats
 # 添加项目根目录到路径
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
@@ -309,7 +309,39 @@ def analyze_molecules(molecule_dir, output_dir=None):
         plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial']
         plt.rcParams['axes.unicode_minus'] = False
         
-        # 1. 最近距离分布
+        # 1. 最近距离分布 - 直方图 + KDE密度曲线
+        if len(all_min_distances) > 0:
+            fig, ax = plt.subplots(figsize=(10, 6))
+            
+            # 绘制直方图
+            n, bins, patches = ax.hist(all_min_distances, bins=100, edgecolor='black', 
+                                       alpha=0.7, density=False, color='steelblue', label='Histogram')
+            
+            # 添加KDE密度曲线
+            kde = stats.gaussian_kde(all_min_distances)
+            x_kde = np.linspace(all_min_distances.min(), all_min_distances.max(), 200)
+            y_kde = kde(x_kde) * len(all_min_distances) * (bins[1] - bins[0])  # 转换为频率
+            ax.plot(x_kde, y_kde, 'r-', linewidth=2, label='KDE Density')
+            
+            # 添加统计线
+            ax.axvline(all_min_distances.mean(), color='red', linestyle='--', linewidth=2,
+                      label=f'Mean: {all_min_distances.mean():.3f}Å')
+            ax.axvline(np.median(all_min_distances), color='green', linestyle='--', linewidth=2,
+                      label=f'Median: {np.median(all_min_distances):.3f}Å')
+            
+            ax.set_xlabel('Nearest Atom Distance (Å)', fontsize=12)
+            ax.set_ylabel('Frequency', fontsize=12)
+            ax.set_title('Nearest Atom Distance Distribution', fontsize=13, fontweight='bold')
+            ax.legend(fontsize=10)
+            ax.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            fig_path = output_dir / "nearest_atom_distance_distribution.png"
+            plt.savefig(fig_path, dpi=300, bbox_inches='tight')
+            print(f"最近原子距离分布统计图已保存到: {fig_path}")
+            plt.close()
+        
+        # 2. 综合结构分析图（包含最近距离、键长、连通性等）
         if len(all_min_distances) > 0:
             fig, axes = plt.subplots(2, 2, figsize=(15, 12))
             
@@ -360,6 +392,12 @@ def analyze_molecules(molecule_dir, output_dir=None):
             axes[1, 1].set_ylabel('Number of Molecules')
             axes[1, 1].set_title('Connected Components Distribution')
             axes[1, 1].grid(True, alpha=0.3, axis='y')
+            
+            plt.tight_layout()
+            fig_path = output_dir / "molecule_structure_analysis.png"
+            plt.savefig(fig_path, dpi=300, bbox_inches='tight')
+            print(f"综合结构分析图已保存到: {fig_path}")
+            plt.close()
         
         # 3. 分子跨度分布
         if len(coord_spans) > 0:
@@ -379,12 +417,6 @@ def analyze_molecules(molecule_dir, output_dir=None):
             fig_path = output_dir / "molecule_span_distribution.png"
             plt.savefig(fig_path, dpi=300, bbox_inches='tight')
             print(f"分子跨度分布图已保存到: {fig_path}")
-            plt.close()
-            
-            plt.tight_layout()
-            fig_path = output_dir / "molecule_structure_analysis.png"
-            plt.savefig(fig_path, dpi=300, bbox_inches='tight')
-            print(f"\n可视化图表已保存到: {fig_path}")
             plt.close()
         
         # 2. 所有原子对距离分布（如果数据量不太大）

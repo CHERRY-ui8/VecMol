@@ -1,4 +1,5 @@
 import math
+from typing import Optional
 
 import torch
 from torch import nn
@@ -193,20 +194,21 @@ class FuncMol(nn.Module):
         
         return score
 
-    def train_ddpm_step(self, x_0: torch.Tensor) -> torch.Tensor:
+    def train_ddpm_step(self, x_0: torch.Tensor, position_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         DDPM训练步骤
         
         Args:
             x_0: 原始数据 [B, N*N*N, code_dim]
+            position_weights: 位置权重 [B, N*N*N]，可选
         
         Returns:
             训练损失
         """
         if self.diffusion_method == "new":
-            return compute_ddpm_loss(self.net, x_0, self.diffusion_consts, self.device)
+            return compute_ddpm_loss(self.net, x_0, self.diffusion_consts, self.device, position_weights=position_weights)
         elif self.diffusion_method == "new_x0":
-            return compute_ddpm_loss_x0(self.net, x_0, self.diffusion_consts, self.device, use_time_weight=self.use_time_weight)
+            return compute_ddpm_loss_x0(self.net, x_0, self.diffusion_consts, self.device, use_time_weight=self.use_time_weight, position_weights=position_weights)
         else:
             raise ValueError("DDPM training step only available for 'new' or 'new_x0' diffusion method")
 

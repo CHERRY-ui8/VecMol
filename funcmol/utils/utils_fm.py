@@ -7,6 +7,85 @@ from tqdm import tqdm
 from funcmol.utils.utils_nf import load_network, infer_codes, normalize_code
 
 
+def compute_position_weights(
+    atom_coords: torch.Tensor,
+    grid_coords: torch.Tensor,
+    batch_idx: torch.Tensor,
+    radius: float = 3.0,
+    weight_alpha: float = 0.1,
+    device: torch.device = None
+) -> torch.Tensor:
+    """
+    Compute position weights for grid coordinates based on the number of nearby atoms.
+    
+    For each grid coordinate, count the number of atoms within the specified radius,
+    and compute weight as: weight = 1 + alpha * num_atoms
+    
+    Args:
+        atom_coords: Atom coordinates [N_atoms, 3]
+        grid_coords: Grid coordinates [B, n_grid, 3] or [n_grid, 3]
+        batch_idx: Batch index for atoms [N_atoms] indicating which molecule each atom belongs to
+        radius: Radius threshold in Angstroms for counting nearby atoms
+        weight_alpha: Weight coefficient for linear weighting: weight = 1 + alpha * num_atoms
+        device: Device to perform computation on. If None, uses atom_coords device.
+    
+    Returns:
+        weights: Position weights [B, n_grid]
+    """
+    if device is None:
+        device = atom_coords.device
+    
+    # Handle grid_coords shape: [n_grid, 3] -> [1, n_grid, 3]
+    if grid_coords.dim() == 2:
+        grid_coords = grid_coords.unsqueeze(0)  # [1, n_grid, 3]
+    
+    B = grid_coords.shape[0]
+    n_grid = grid_coords.shape[1]
+    
+    # Get unique batch indices
+    unique_batches = torch.unique(batch_idx)
+    B_actual = len(unique_batches)
+    
+    if B_actual != B:
+        # If grid_coords has batch dimension but batch_idx suggests different batch size,
+        # we need to handle this case
+        if B == 1:
+            # Single batch case: expand grid_coords to match actual batch size
+            grid_coords = grid_coords.expand(B_actual, -1, -1)  # [B_actual, n_grid, 3]
+            B = B_actual
+        else:
+            raise ValueError(f"Batch size mismatch: grid_coords has {B} batches, but batch_idx suggests {B_actual} batches")
+    
+    # Initialize weights
+    weights = torch.ones(B, n_grid, device=device, dtype=torch.float32)
+    
+    # Process each molecule in the batch
+    for b_idx, batch_id in enumerate(unique_batches):
+        # Get atoms belonging to this batch
+        atom_mask = (batch_idx == batch_id)
+        if not atom_mask.any():
+            # No atoms for this batch, keep weights as 1.0
+            continue
+        
+        batch_atom_coords = atom_coords[atom_mask]  # [N_atoms_b, 3]
+        batch_grid_coords = grid_coords[b_idx]  # [n_grid, 3]
+        
+        # Compute pairwise distances between grid points and atoms
+        # grid_coords: [n_grid, 3], atom_coords: [N_atoms_b, 3]
+        # distances: [n_grid, N_atoms_b]
+        distances = torch.cdist(batch_grid_coords, batch_atom_coords, p=2)  # [n_grid, N_atoms_b]
+        
+        # Count atoms within radius for each grid point
+        nearby_mask = distances < radius  # [n_grid, N_atoms_b]
+        num_nearby_atoms = nearby_mask.sum(dim=1).float()  # [n_grid]
+        
+        # Compute weights: weight = 1 + alpha * num_atoms
+        batch_weights = 1.0 + weight_alpha * num_nearby_atoms  # [n_grid]
+        weights[b_idx] = batch_weights
+    
+    return weights
+
+
 def add_noise_to_code(codes: torch.Tensor, smooth_sigma: float = 0.1) -> torch.Tensor:
     """
     Adds Gaussian noise to the input codes.

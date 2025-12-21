@@ -214,6 +214,152 @@ def convert_codes_to_lmdb(codes_dir, split, lmdb_path, keys_path):
         print("✅ LMDB file verification successful")
     except Exception as e:
         print(f"❌ LMDB file verification failed: {e}")
+    
+
+
+def convert_position_weights_to_lmdb(codes_dir, split, codes_keys):
+    """
+    将position_weights文件转换为LMDB数据库
+    
+    Args:
+        codes_dir (str): codes文件所在目录
+        split (str): 数据分割名称 (train/val/test)
+        codes_keys (list): codes的keys列表，用于确保position_weights和codes的索引一致
+    """
+    split_dir = os.path.join(codes_dir, split)
+    
+    # 查找position_weights文件
+    list_weights = [
+        f for f in os.listdir(split_dir)
+        if os.path.isfile(os.path.join(split_dir, f)) and \
+        f.startswith("position_weights") and f.endswith(".pt")
+    ]
+    
+    if not list_weights:
+        print(f"No position_weights files found in {split_dir}, skipping...")
+        return
+    
+    # 查找所有 position_weights_XXX.pt 文件
+    numbered_weights = [f for f in list_weights if f.startswith("position_weights_") and f.endswith(".pt")]
+    if numbered_weights:
+        numbered_weights.sort()  # 按编号排序
+        list_weights = numbered_weights
+    elif len(list_weights) == 1:
+        # 单个文件（向后兼容）
+        list_weights = list_weights
+    else:
+        print(f"Warning: Found {len(list_weights)} position_weights files, expected numbered files or single file. Skipping...")
+        return
+    
+    print(f"\nFound {len(list_weights)} position_weights files in {split_dir}")
+    for weight_file in list_weights:
+        print(f"  - {weight_file}")
+    
+    # 加载第一个文件获取shape信息
+    first_weight_path = os.path.join(split_dir, list_weights[0])
+    first_weights = torch.load(first_weight_path, weights_only=False)
+    print(f"  Position weights shape: {first_weights.shape}")
+    
+    samples_per_file = first_weights.shape[0]
+    total_samples = samples_per_file * len(list_weights)
+    del first_weights
+    gc.collect()
+    
+    print(f"Estimated total position_weights samples: {total_samples}")
+    
+    # 验证与codes的数量是否匹配
+    if len(codes_keys) != total_samples:
+        print(f"Warning: Position weights count ({total_samples}) != codes count ({len(codes_keys)})")
+        print("  Will still convert, but indices may not match correctly")
+    
+    # 创建position_weights LMDB数据库
+    weights_lmdb_path = os.path.join(split_dir, "position_weights.lmdb")
+    weights_keys_path = os.path.join(split_dir, "position_weights_keys.pt")
+    
+    # 删除旧的LMDB文件（如果存在）
+    if os.path.exists(weights_lmdb_path):
+        print(f"Removing existing position_weights LMDB file: {weights_lmdb_path}")
+        if os.path.isdir(weights_lmdb_path):
+            shutil.rmtree(weights_lmdb_path)
+        else:
+            os.remove(weights_lmdb_path)
+    
+    # 估算大小（position_weights通常比codes小很多）
+    estimated_size_per_sample = samples_per_file * 4 * 2.0 + 4096  # float32, 2倍开销
+    map_size = max(10 * (1024 * 1024 * 1024), total_samples * estimated_size_per_sample * 2)  # 至少10GB
+    
+    print(f"Creating position_weights LMDB database with map_size: {map_size / (1024**3):.2f} GB")
+    db = lmdb.open(weights_lmdb_path, map_size=int(map_size))
+    
+    BATCH_SIZE = 500
+    keys = []
+    global_index = 0
+    
+    try:
+        for weight_file in list_weights:
+            weight_path = os.path.join(split_dir, weight_file)
+            print(f"Processing {weight_file}...")
+            
+            weights = torch.load(weight_path, weights_only=False)
+            num_samples = weights.shape[0]
+            print(f"  Loaded {num_samples} samples, shape: {weights.shape}")
+            
+            num_batches = (num_samples + BATCH_SIZE - 1) // BATCH_SIZE
+            pbar = tqdm(range(0, num_samples, BATCH_SIZE), desc=f"  Writing {weight_file}", total=num_batches)
+            
+            for batch_start in pbar:
+                batch_end = min(batch_start + BATCH_SIZE, num_samples)
+                
+                with db.begin(write=True) as txn:
+                    for i in range(batch_start, batch_end):
+                        key = str(global_index).encode()
+                        
+                        weight_sample = weights[i].clone().detach()
+                        
+                        try:
+                            value = pickle.dumps(weight_sample, protocol=pickle.HIGHEST_PROTOCOL)
+                            txn.put(key, value)
+                            keys.append(str(global_index))
+                        except Exception as e:
+                            print(f"\nError serializing position_weight {global_index}: {e}")
+                        
+                        del weight_sample
+                        if 'value' in locals():
+                            del value
+                        
+                        global_index += 1
+                
+                gc.collect()
+                pbar.set_postfix({'samples': global_index})
+            
+            del weights
+            gc.collect()
+            print(f"  Completed {weight_file}, total samples so far: {global_index}")
+    
+    except Exception as e:
+        print(f"Error during position_weights conversion: {e}")
+        raise
+    finally:
+        db.close()
+    
+    # 保存keys列表
+    torch.save(keys, weights_keys_path)
+    
+    print(f"Successfully converted position_weights to LMDB: {weights_lmdb_path}")
+    print(f"Saved keys list: {weights_keys_path}")
+    print(f"Database contains {len(keys)} position_weights")
+    
+    # 验证
+    print("Verifying position_weights LMDB file...")
+    try:
+        verify_db = lmdb.open(weights_lmdb_path, readonly=True)
+        with verify_db.begin() as txn:
+            stat = txn.stat()
+            print(f"Position weights LMDB verification: {stat['entries']} entries")
+        verify_db.close()
+        print("✅ Position weights LMDB file verification successful")
+    except Exception as e:
+        print(f"❌ Position weights LMDB file verification failed: {e}")
 
 
 def main():
@@ -223,6 +369,8 @@ def main():
     parser.add_argument("--splits", type=str, nargs="+", 
                        default=["train", "val", "test"],
                        help="要转换的数据分割")
+    parser.add_argument("--skip_position_weights", action="store_true",
+                       help="跳过position_weights文件的转换")
     
     args = parser.parse_args()
     
@@ -240,9 +388,18 @@ def main():
         print(f"{'='*60}")
         
         try:
+            # 转换codes
             convert_codes_to_lmdb(args.codes_dir, split, lmdb_path, keys_path)
+            
+            # 如果需要转换position_weights，加载keys并转换
+            if not args.skip_position_weights:
+                if os.path.exists(keys_path):
+                    codes_keys = torch.load(keys_path, weights_only=False)
+                    convert_position_weights_to_lmdb(args.codes_dir, split, codes_keys)
         except Exception as e:
             print(f"Error converting {split}: {e}")
+            import traceback
+            traceback.print_exc()
             continue
 
 

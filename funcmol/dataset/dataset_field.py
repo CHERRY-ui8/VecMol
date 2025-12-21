@@ -550,15 +550,15 @@ def create_field_loaders(
         grid_dim=config["dset"]["grid_dim"],
         radius=config["dset"]["atomic_radius"],
         sample_full_grid=sample_full_grid,
-        debug_one_mol=config["debug_one_mol"],
-        debug_subset=config["debug_subset"],
+        debug_one_mol=config.get("debug_one_mol", False),
+        debug_subset=config.get("debug_subset", False),
     )
 
-    if config["debug_one_mol"]:
+    if config.get("debug_one_mol", False):
         if hasattr(dset, 'data'):
             dset.data = [dset.data[0]]  # 只保留第一个分子，不复制
         dset.field_idxs = torch.arange(1)  # 只保留一个分子
-    elif config["debug_subset"]:
+    elif config.get("debug_subset", False):
         if hasattr(dset, 'data'):
             dset.data = dset.data[:128]
         # dset.field_idxs = torch.arange(min(128, len(dset.field_idxs)))  # 限制为128个分子
