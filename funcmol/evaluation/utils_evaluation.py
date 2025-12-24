@@ -1,0 +1,150 @@
+"""
+评估工具函数和常量
+包含原子编码/解码器、标准键长、阈值等常量定义
+"""
+
+from pathlib import Path
+import os
+import torch
+import numpy as np
+from tqdm import tqdm
+
+# 原子编码器字典
+atom_encoder_dict = {
+    'qm9_with_h': {'H': 0, 'C': 1, 'N': 2, 'O': 3, 'F': 4},
+    'qm9_no_h': {'C': 0, 'N': 1, 'O': 2, 'F': 3},
+    'geom_with_h': {
+        'H': 0, 'B': 1, 'C': 2, 'N': 3, 'O': 4, 'F': 5, 'Al': 6, 'Si': 7, 'P': 8,
+        'S': 9, 'Cl': 10, 'As': 11, 'Br': 12, 'I': 13, 'Hg': 14, 'Bi': 15
+    },
+    'geom_no_h': {
+        'B': 0, 'C': 1, 'N': 2, 'O': 3, 'F': 4, 'Al': 5, 'Si': 6, 'P': 7, 'S': 8,
+        'Cl': 9, 'As': 10, 'Br': 11, 'I': 12, 'Hg': 13, 'Bi': 14
+    }
+}
+
+# 原子解码器字典
+atom_decoder_dict = {
+    'qm9_with_h': ['H', 'C', 'N', 'O', 'F'],
+    'qm9_no_h': ['C', 'N', 'O', 'F'],
+    'geom_with_h': ['H', 'B', 'C', 'N', 'O', 'F', 'Al', 'Si', 'P', 'S', 'Cl', 'As', 'Br',
+                     'I', 'Hg', 'Bi'],
+    'geom_no_h': ['B', 'C', 'N', 'O', 'F', 'Al', 'Si', 'P', 'S', 'Cl', 'As', 'Br', 'I',
+                  'Hg', 'Bi']
+}
+
+# 标准键长字典（单位：pm）
+# bonds1: 单键标准键长
+bonds1 = {
+    'H': {'H': 74, 'C': 109, 'N': 101, 'O': 96, 'F': 92,
+          'B': 119, 'Si': 148, 'P': 144, 'As': 152, 'S': 134,
+          'Cl': 127, 'Br': 141, 'I': 161},
+    'C': {'H': 109, 'C': 154, 'N': 147, 'O': 143, 'F': 135,
+          'Si': 185, 'P': 184, 'S': 182, 'Cl': 177, 'Br': 194,
+          'I': 214},
+    'N': {'H': 101, 'C': 147, 'N': 145, 'O': 140, 'F': 136,
+          'Cl': 175, 'Br': 214, 'S': 168, 'I': 222, 'P': 177},
+    'O': {'H': 96, 'C': 143, 'N': 140, 'O': 148, 'F': 142,
+          'Br': 172, 'S': 151, 'P': 163, 'Si': 163, 'Cl': 164,
+          'I': 194},
+    'F': {'H': 92, 'C': 135, 'N': 136, 'O': 142, 'F': 142,
+          'S': 158, 'Si': 160, 'Cl': 166, 'Br': 178, 'P': 156,
+          'I': 187},
+    'B': {'H': 119, 'Cl': 175},
+    'Si': {'Si': 233, 'H': 148, 'C': 185, 'O': 163, 'S': 200,
+           'F': 160, 'Cl': 202, 'Br': 215, 'I': 243},
+    'Cl': {'Cl': 199, 'H': 127, 'C': 177, 'N': 175, 'O': 164,
+           'P': 203, 'S': 207, 'B': 175, 'Si': 202, 'F': 166,
+           'Br': 214},
+    'S': {'H': 134, 'C': 182, 'N': 168, 'O': 151, 'S': 204,
+          'F': 158, 'Cl': 207, 'Br': 225, 'Si': 200, 'P': 210,
+          'I': 234},
+    'Br': {'Br': 228, 'H': 141, 'C': 194, 'O': 172, 'N': 214,
+           'Si': 215, 'S': 225, 'F': 178, 'Cl': 214, 'P': 222},
+    'P': {'P': 221, 'H': 144, 'C': 184, 'O': 163, 'Cl': 203,
+          'S': 210, 'F': 156, 'N': 177, 'Br': 222},
+    'I': {'H': 161, 'C': 214, 'Si': 243, 'N': 222, 'O': 194,
+          'S': 234, 'F': 187, 'I': 266},
+    'As': {'H': 152}
+}
+
+# bonds2: 双键标准键长
+bonds2 = {
+    'C': {'C': 134, 'N': 129, 'O': 120, 'S': 160},
+    'N': {'C': 129, 'N': 125, 'O': 121},
+    'O': {'C': 120, 'N': 121, 'O': 121, 'P': 150},
+    'P': {'O': 150, 'S': 186},
+    'S': {'P': 186}
+}
+
+# bonds3: 三键标准键长
+bonds3 = {
+    'C': {'C': 120, 'N': 116, 'O': 113},
+    'N': {'C': 116, 'N': 110},
+    'O': {'C': 113}
+}
+
+# 键判断阈值（单位：pm）
+margin1, margin2, margin3 = 40, 20, 12
+
+
+def resolve_path(path, base_dir=None):
+    """
+    解析路径（支持相对路径和绝对路径）
+    
+    Args:
+        path: 路径字符串
+        base_dir: 基础目录（用于解析相对路径）
+    
+    Returns:
+        解析后的绝对路径
+    """
+    if os.path.isabs(path):
+        return path
+    elif base_dir:
+        return os.path.join(base_dir, path)
+    else:
+        return path
+
+
+def load_molecules_from_npz(molecule_dir):
+    """
+    从 .npz 文件加载分子数据
+    
+    Args:
+        molecule_dir: 包含 .npz 文件的目录路径
+        
+    Returns:
+        list: 包含 (positions, atom_types) 元组的列表
+    """
+    molecule_dir = Path(molecule_dir)
+    npz_files = sorted(molecule_dir.glob("generated_*.npz"))
+    
+    molecules = []
+    
+    for npz_file in tqdm(npz_files, desc="加载分子文件"):
+        try:
+            data = np.load(npz_file)
+            coords = data['coords']  # (N, 3)
+            types = data['types']    # (N,)
+            
+            # 转换为torch张量
+            positions = torch.tensor(coords, dtype=torch.float32)
+            atom_types = torch.tensor(types, dtype=torch.long)
+            
+            # 过滤掉填充的原子
+            valid_mask = atom_types != -1
+            if not valid_mask.any():
+                continue
+            
+            positions = positions[valid_mask]
+            atom_types = atom_types[valid_mask]
+            
+            molecules.append((positions, atom_types))
+            
+        except Exception as e:
+            print(f"\n加载文件 {npz_file} 时出错: {e}")
+            continue
+    
+    return molecules
+

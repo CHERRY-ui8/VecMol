@@ -246,7 +246,8 @@ bonds3 = {'C': {'C': 120, 'N': 116, 'O': 113},
           'N': {'C': 116, 'N': 110},
           'O': {'C': 113}}
 
-margin1, margin2, margin3 = 10, 5, 3
+# margin1, margin2, margin3 = 10, 5, 3
+margin1, margin2, margin3 = 40, 20, 12
 
 def get_bond_order(atom1, atom2, distance, check_exists=False):
     distance = 100 * distance  # We change the metric
