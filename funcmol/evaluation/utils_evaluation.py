@@ -3,11 +3,7 @@
 包含原子编码/解码器、标准键长、阈值等常量定义
 """
 
-from pathlib import Path
 import os
-import torch
-import numpy as np
-from tqdm import tqdm
 
 # 原子编码器字典
 atom_encoder_dict = {
@@ -105,46 +101,4 @@ def resolve_path(path, base_dir=None):
         return os.path.join(base_dir, path)
     else:
         return path
-
-
-def load_molecules_from_npz(molecule_dir):
-    """
-    从 .npz 文件加载分子数据
-    
-    Args:
-        molecule_dir: 包含 .npz 文件的目录路径
-        
-    Returns:
-        list: 包含 (positions, atom_types) 元组的列表
-    """
-    molecule_dir = Path(molecule_dir)
-    npz_files = sorted(molecule_dir.glob("generated_*.npz"))
-    
-    molecules = []
-    
-    for npz_file in tqdm(npz_files, desc="加载分子文件"):
-        try:
-            data = np.load(npz_file)
-            coords = data['coords']  # (N, 3)
-            types = data['types']    # (N,)
-            
-            # 转换为torch张量
-            positions = torch.tensor(coords, dtype=torch.float32)
-            atom_types = torch.tensor(types, dtype=torch.long)
-            
-            # 过滤掉填充的原子
-            valid_mask = atom_types != -1
-            if not valid_mask.any():
-                continue
-            
-            positions = positions[valid_mask]
-            atom_types = atom_types[valid_mask]
-            
-            molecules.append((positions, atom_types))
-            
-        except Exception as e:
-            print(f"\n加载文件 {npz_file} 时出错: {e}")
-            continue
-    
-    return molecules
 

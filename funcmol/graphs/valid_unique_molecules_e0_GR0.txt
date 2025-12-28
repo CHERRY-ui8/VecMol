@@ -6,7 +6,6 @@ INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]CC
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
@@ -23,28 +22,22 @@ INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]C#C
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]C
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]C
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]C
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]C#C
 INVALID_AtomValence: 无法生成SMILES
-[H]OF
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
@@ -61,7 +54,6 @@ INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]C
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
@@ -71,9 +63,7 @@ INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]CC
 INVALID_AtomValence: 无法生成SMILES
-[H]C=C=O
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
@@ -82,7 +72,6 @@ INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]CC
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
@@ -94,13 +83,11 @@ INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]CC
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]C
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
@@ -112,29 +99,20 @@ INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]CC
-[H]C
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]CC
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[N-]=[N+]=O
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]C
-[H]C
 INVALID_AtomValence: 无法生成SMILES
-[H]CC
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]C
-[H]CC
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
@@ -145,49 +123,35 @@ INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]C
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]C
-[H]CC
-[H]CC
 INVALID_AtomValence: 无法生成SMILES
-[H]NC
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]C
-[H]CC
 INVALID_AtomValence: 无法生成SMILES
-[H]C
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]CO
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]C
 INVALID_AtomValence: 无法生成SMILES
-[H]C
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]C
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]C=C
-[H]CC
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
@@ -195,26 +159,19 @@ INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]C
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]C
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]C=C
-[H]C
-[H]C
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]C
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]C=C
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
@@ -228,32 +185,28 @@ INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]CC
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]C
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]CC
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]C
 INVALID_AtomValence: 无法生成SMILES
+[H]CC[H]
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]C
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
@@ -266,735 +219,20 @@ INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]C#C
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]C
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]CC
 INVALID_AtomValence: 无法生成SMILES
-[H]C=C
-[H]CC
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-[H]C
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-[H]CC
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H][H]
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]CC
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-[H]CC
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-[H]CC
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]N=O
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]CC
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-[H]CC
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]CC
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]N
-INVALID_AtomValence: 无法生成SMILES
-[H]CC
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C=C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C(C)C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]CC
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]CC
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]CC
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C#C
-[H]C
-[H]C=C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]CC
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C#C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-[H]C=C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]CF
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-[H]CC
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]CC
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]CC
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]CC
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]CC
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]ON
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]CC
-INVALID_AtomValence: 无法生成SMILES
-CC#N
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]CC
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C(=C)O
-INVALID_AtomValence: 无法生成SMILES
-[H]CC
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]CC
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-COF
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H][H]
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-[H]N=C
-[H]C=C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C#C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]NC
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-[H]OF
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]CC
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]CC
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
-INVALID_AtomValence: 无法生成SMILES
-INVALID_AtomValence: 无法生成SMILES
-[H]C
 INVALID_AtomValence: 无法生成SMILES
 INVALID_AtomValence: 无法生成SMILES

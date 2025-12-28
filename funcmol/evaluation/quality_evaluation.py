@@ -56,29 +56,29 @@ class SimpleSamplingMetrics:
                     valid.append(smiles)
                     all_smiles.append(smiles)
                     error_message[-1] += 1
-                except Chem.rdchem.AtomValenceException as e:
+                except Chem.rdchem.AtomValenceException:
                     error_message[1] += 1
                     try:
                         invalid_smiles = Chem.MolToSmiles(rdmol, sanitize=False)
                         all_smiles.append(f"INVALID_AtomValence: {invalid_smiles}")
                     except:
-                        all_smiles.append(f"INVALID_AtomValence: 无法生成SMILES")
-                except Chem.rdchem.KekulizeException as e:
+                        all_smiles.append("INVALID_AtomValence: 无法生成SMILES")
+                except Chem.rdchem.KekulizeException:
                     error_message[2] += 1
                     try:
                         invalid_smiles = Chem.MolToSmiles(rdmol, sanitize=False)
                         all_smiles.append(f"INVALID_Kekulize: {invalid_smiles}")
                     except:
-                        all_smiles.append(f"INVALID_Kekulize: 无法生成SMILES")
-                except (Chem.rdchem.AtomKekulizeException, ValueError) as e:
+                        all_smiles.append("INVALID_Kekulize: 无法生成SMILES")
+                except (Chem.rdchem.AtomKekulizeException, ValueError):
                     error_message[3] += 1
                     try:
                         invalid_smiles = Chem.MolToSmiles(rdmol, sanitize=False)
                         all_smiles.append(f"INVALID_Other: {invalid_smiles}")
                     except:
-                        all_smiles.append(f"INVALID_Other: 无法生成SMILES")
+                        all_smiles.append("INVALID_Other: 无法生成SMILES")
             else:
-                all_smiles.append(f"INVALID_NoRDKit: 无法构建RDKit分子")
+                all_smiles.append("INVALID_NoRDKit: 无法构建RDKit分子")
         
         self.validity_metric = len(valid) / len(generated) if generated else 0.0
         if num_components:
@@ -241,13 +241,20 @@ def load_molecules_from_npz(molecule_dir):
     return molecules
 
 
-def evaluate_quality(molecules, output_dir=None):
+def evaluate_quality(molecules,
+                      strict_margin1, strict_margin2, strict_margin3,
+                      medium_margin1, medium_margin2, medium_margin3,
+                      relaxed_margin1, relaxed_margin2, relaxed_margin3,
+                      output_dir=None):
     """
     评估分子质量指标
     
     Args:
         molecules: Molecule 对象列表
         output_dir: 输出目录（可选）
+        strict_margin1/2/3: 严格标准的margin值（pm单位）
+        medium_margin1/2/3: 中等标准的margin值（pm单位）
+        relaxed_margin1/2/3: 宽松标准的margin值（pm单位）
     
     Returns:
         dict: 包含质量评估结果的字典
@@ -310,36 +317,118 @@ def evaluate_quality(molecules, output_dir=None):
     mol_stable = sampling_metrics.mol_stable
     atom_stable = sampling_metrics.atom_stable
     
+    # 统计所有分子
+    print(f"\n📊 统计所有分子（共 {len(molecules)} 个）...")
+    total_valid = sum(1 for mol in tqdm(molecules, desc="检查有效性", leave=False) if mol.rdkit_mol is not None)
+    total_stable = 0
+    total_stable_medium = 0
+    total_stable_relaxed = 0
+    stable_atoms_strict = 0
+    total_atoms_strict = 0
+    stable_atoms_medium = 0
+    total_atoms_medium = 0
+    stable_atoms_relaxed = 0
+    total_atoms_relaxed = 0
+    
+    # 使用不同严格程度的margin值重新构建键并计算稳定性
+    dataset_info = {'name': 'qm9'}
+    atom_decoder = atom_decoder_dict['qm9_with_h']
+    
+    for mol in tqdm(molecules, desc="检查稳定性"):
+        if mol.rdkit_mol is not None:
+            try:
+                # 严格稳定性（使用严格margin值重新构建键）
+                _, _, bond_types_strict = build_xae_molecule(
+                    positions=mol.positions,
+                    atom_types=mol.atom_types,
+                    dataset_info=dataset_info,
+                    atom_decoder=atom_decoder,
+                    margin1_val=strict_margin1,
+                    margin2_val=strict_margin2,
+                    margin3_val=strict_margin3
+                )
+                mol_stable_strict, at_stable_strict, num_atoms_strict = check_stability(
+                    mol, None, atom_decoder=atom_decoder, bond_types=bond_types_strict
+                )
+                if mol_stable_strict.item() > 0.5:
+                    total_stable += 1
+                stable_atoms_strict += at_stable_strict.item()
+                total_atoms_strict += num_atoms_strict
+                
+                # 中等稳定性（使用中等margin值重新构建键）
+                _, _, bond_types_medium = build_xae_molecule(
+                    positions=mol.positions,
+                    atom_types=mol.atom_types,
+                    dataset_info=dataset_info,
+                    atom_decoder=atom_decoder,
+                    margin1_val=medium_margin1,
+                    margin2_val=medium_margin2,
+                    margin3_val=medium_margin3
+                )
+                mol_stable_medium, at_stable_medium, num_atoms_medium = check_stability(
+                    mol, None, atom_decoder=atom_decoder, bond_types=bond_types_medium
+                )
+                if mol_stable_medium.item() > 0.5:
+                    total_stable_medium += 1
+                stable_atoms_medium += at_stable_medium.item()
+                total_atoms_medium += num_atoms_medium
+                
+                # 宽松稳定性（使用宽松margin值重新构建键）
+                _, _, bond_types_relaxed = build_xae_molecule(
+                    positions=mol.positions,
+                    atom_types=mol.atom_types,
+                    dataset_info=dataset_info,
+                    atom_decoder=atom_decoder,
+                    margin1_val=relaxed_margin1,
+                    margin2_val=relaxed_margin2,
+                    margin3_val=relaxed_margin3
+                )
+                mol_stable_relaxed, at_stable_relaxed, num_atoms = check_stability(
+                    mol, None, atom_decoder=atom_decoder, bond_types=bond_types_relaxed
+                )
+                if mol_stable_relaxed.item() > 0.5:
+                    total_stable_relaxed += 1
+                stable_atoms_relaxed += at_stable_relaxed.item()
+                total_atoms_relaxed += num_atoms
+            except Exception:
+                pass
+    
+    # 重新计算严格稳定性（使用严格margin构建的键矩阵）
+    mol_stable = total_stable / len(molecules) if molecules else 0.0
+    atom_stable = stable_atoms_strict / total_atoms_strict if total_atoms_strict > 0 else 0.0
+    
+    mol_stable_medium = total_stable_medium / len(molecules) if molecules else 0.0
+    atom_stable_medium = stable_atoms_medium / total_atoms_medium if total_atoms_medium > 0 else 0.0
+    mol_stable_relaxed = total_stable_relaxed / len(molecules) if molecules else 0.0
+    atom_stable_relaxed = stable_atoms_relaxed / total_atoms_relaxed if total_atoms_relaxed > 0 else 0.0
+    
     print(f"\n📊 总体质量指标:")
     print(f"  有效性 (Validity): {validity*100:.2f}%")
     print(f"  唯一性 (Uniqueness): {uniqueness*100:.2f}%")
     print(f"  新颖性 (Novelty): {novelty*100:.2f}%")
     print(f"  平均连通分量数: {mean_components:.2f}")
     print(f"  最大连通分量数: {max_components:.2f}")
-    print(f"  分子稳定性: {float(mol_stable)*100:.2f}%")
-    print(f"  原子稳定性: {float(atom_stable)*100:.2f}%")
-    
-    # 统计所有分子
-    print(f"\n📊 统计所有分子（共 {len(molecules)} 个）...")
-    total_valid = sum(1 for mol in tqdm(molecules, desc="检查有效性", leave=False) if mol.rdkit_mol is not None)
-    total_stable = 0
-    for mol in tqdm(molecules, desc="检查稳定性"):
-        if mol.rdkit_mol is not None:
-            try:
-                mol_stable, _, _ = check_stability(
-                    mol, None, atom_decoder=atom_decoder_dict['qm9_with_h']
-                )
-                if mol_stable.item() > 0.5:
-                    total_stable += 1
-            except:
-                pass
+    print(f"\n  稳定性指标（基于键矩阵构建的margin值）:")
+    print(f"    严格 (margin1={strict_margin1}pm, margin2={strict_margin2}pm, margin3={strict_margin3}pm):")
+    print(f"      分子稳定性: {float(mol_stable)*100:.2f}%")
+    print(f"      原子稳定性: {float(atom_stable)*100:.2f}%")
+    print(f"    中等 (margin1={medium_margin1}pm, margin2={medium_margin2}pm, margin3={medium_margin3}pm):")
+    print(f"      分子稳定性: {float(mol_stable_medium)*100:.2f}%")
+    print(f"      原子稳定性: {float(atom_stable_medium)*100:.2f}%")
+    print(f"    宽松 (margin1={relaxed_margin1}pm, margin2={relaxed_margin2}pm, margin3={relaxed_margin3}pm):")
+    print(f"      分子稳定性: {float(mol_stable_relaxed)*100:.2f}%")
+    print(f"      原子稳定性: {float(atom_stable_relaxed)*100:.2f}%")
     
     print(f"\n📊 统计摘要:")
     print(f"  总分子数: {len(molecules)}")
     print(f"  有效分子数: {total_valid}")
-    print(f"  稳定分子数: {total_stable}")
+    print(f"  稳定分子数（严格）: {total_stable}")
+    print(f"  稳定分子数（中等）: {total_stable_medium}")
+    print(f"  稳定分子数（宽松）: {total_stable_relaxed}")
     print(f"  有效性: {total_valid/len(molecules)*100:.1f}%")
-    print(f"  稳定性: {total_stable/len(molecules)*100:.1f}%")
+    print(f"  稳定性（严格）: {total_stable/len(molecules)*100:.1f}%")
+    print(f"  稳定性（中等）: {total_stable_medium/len(molecules)*100:.1f}%")
+    print(f"  稳定性（宽松）: {total_stable_relaxed/len(molecules)*100:.1f}%")
     
     # 保存结果到文件（如果指定了输出目录）
     if output_dir:
@@ -352,14 +441,20 @@ def evaluate_quality(molecules, output_dir=None):
             f.write("="*60 + "\n\n")
             f.write(f"总分子数: {len(molecules)}\n")
             f.write(f"有效分子数: {total_valid}\n")
-            f.write(f"稳定分子数: {total_stable}\n")
+            f.write(f"稳定分子数（严格）: {total_stable}\n")
+            f.write(f"稳定分子数（中等）: {total_stable_medium}\n")
+            f.write(f"稳定分子数（宽松）: {total_stable_relaxed}\n")
             f.write(f"有效性: {validity*100:.2f}%\n")
             f.write(f"唯一性: {uniqueness*100:.2f}%\n")
             f.write(f"新颖性: {novelty*100:.2f}%\n")
             f.write(f"平均连通分量数: {mean_components:.2f}\n")
             f.write(f"最大连通分量数: {max_components:.2f}\n")
-            f.write(f"分子稳定性: {float(mol_stable)*100:.2f}%\n")
-            f.write(f"原子稳定性: {float(atom_stable)*100:.2f}%\n")
+            f.write(f"分子稳定性（严格，margin1={strict_margin1}pm, margin2={strict_margin2}pm, margin3={strict_margin3}pm）: {float(mol_stable)*100:.2f}%\n")
+            f.write(f"原子稳定性（严格，margin1={strict_margin1}pm, margin2={strict_margin2}pm, margin3={strict_margin3}pm）: {float(atom_stable)*100:.2f}%\n")
+            f.write(f"分子稳定性（中等，margin1={medium_margin1}pm, margin2={medium_margin2}pm, margin3={medium_margin3}pm）: {float(mol_stable_medium)*100:.2f}%\n")
+            f.write(f"原子稳定性（中等，margin1={medium_margin1}pm, margin2={medium_margin2}pm, margin3={medium_margin3}pm）: {float(atom_stable_medium)*100:.2f}%\n")
+            f.write(f"分子稳定性（宽松，margin1={relaxed_margin1}pm, margin2={relaxed_margin2}pm, margin3={relaxed_margin3}pm）: {float(mol_stable_relaxed)*100:.2f}%\n")
+            f.write(f"原子稳定性（宽松，margin1={relaxed_margin1}pm, margin2={relaxed_margin2}pm, margin3={relaxed_margin3}pm）: {float(atom_stable_relaxed)*100:.2f}%\n")
         
         print(f"\n结果已保存到: {results_file}")
     
@@ -371,8 +466,23 @@ def evaluate_quality(molecules, output_dir=None):
         'max_components': max_components,
         'mol_stable': mol_stable,
         'atom_stable': atom_stable,
+        'mol_stable_medium': mol_stable_medium,
+        'atom_stable_medium': atom_stable_medium,
+        'mol_stable_relaxed': mol_stable_relaxed,
+        'atom_stable_relaxed': atom_stable_relaxed,
         'total_valid': total_valid,
         'total_stable': total_stable,
-        'num_molecules': len(molecules)
+        'total_stable_medium': total_stable_medium,
+        'total_stable_relaxed': total_stable_relaxed,
+        'num_molecules': len(molecules),
+        'strict_margin1': strict_margin1,
+        'strict_margin2': strict_margin2,
+        'strict_margin3': strict_margin3,
+        'medium_margin1': medium_margin1,
+        'medium_margin2': medium_margin2,
+        'medium_margin3': medium_margin3,
+        'relaxed_margin1': relaxed_margin1,
+        'relaxed_margin2': relaxed_margin2,
+        'relaxed_margin3': relaxed_margin3
     }
 

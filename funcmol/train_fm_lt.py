@@ -26,7 +26,7 @@ import hydra
 # Set GPU environment
 # os.environ['CUDA_VISIBLE_DEVICES'] = "1"
 os.environ['CUDA_VISIBLE_DEVICES'] = "1,2,3,4,5,6,7"
-# os.environ['CUDA_VISIBLE_DEVICES'] = "2,3,4,5"
+# os.environ['CUDA_VISIBLE_DEVICES'] = "0,2,3,4,5"
 
 from funcmol.models.funcmol import create_funcmol
 from funcmol.utils.utils_fm import (

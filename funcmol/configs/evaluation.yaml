@@ -1,8 +1,5 @@
-# 分子分析配置文件
-# 用于配置实验目录、文件路径和分析选项
-
 # 实验基础目录
-experiment_dir: "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251222"
+experiment_dir: "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251225"
 
 # CSV文件配置（用于原子统计分析）
 csv:
@@ -11,12 +8,12 @@ csv:
     # - "denoiser_evaluation_results_1.csv"
     # - "denoiser_evaluation_results_2.csv"
     # - "denoiser_evaluation_results_3.csv"
-    - "samples/20251222_version_0_last/denoiser_evaluation_results.csv"
+    - "samples/20251225_version_1_last/denoiser_evaluation_results.csv"
     
 # 分子文件目录配置（用于结构分析和质量评估）
 molecule:
   # molecule目录路径（相对于experiment_dir或绝对路径）
-  dir: "samples/20251222_version_0_last/molecule"
+  dir: "samples/20251225_version_1_last/molecule"
   
   # 分子文件匹配模式（用于查找.npz文件）
   pattern: "generated_*.npz"
@@ -48,3 +45,18 @@ dataset:
   name: "qm9"
   elements: ["C", "H", "O", "N", "F"]
   atom_decoder: "qm9_with_h"
+
+# 键评估配置（可选）
+bond_evaluation:
+  # 严格标准（用于键分析和稳定性评估）
+  strict_margin1: 15  # pm单位
+  strict_margin2: 10  # pm单位
+  strict_margin3: 8   # pm单位
+  # 中等标准（用于稳定性评估）
+  medium_margin1: 30  # pm单位
+  medium_margin2: 15  # pm单位
+  medium_margin3: 12   # pm单位
+  # 宽松标准（用于稳定性评估）
+  relaxed_margin1: 40  # pm单位
+  relaxed_margin2: 20  # pm单位
+  relaxed_margin3: 15  # pm单位

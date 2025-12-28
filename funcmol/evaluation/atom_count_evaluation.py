@@ -7,7 +7,6 @@ import os
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from pathlib import Path
 
 
 def analyze_atom_counts(csv_path):
@@ -179,10 +178,10 @@ def compare_with_qm9(stats, total_atoms_per_mol, output_dir=None):
             # 绘制对比柱状图
             x = np.arange(1)
             width = 0.35
-            ax.bar(x - width/2, gen_counts, width, label='生成结果', color=colors[element], alpha=0.7)
-            ax.bar(x + width/2, qm9_counts, width, label='QM9数据集', color=colors[element], alpha=0.5)
-            ax.set_ylabel('平均原子数', fontsize=12)
-            ax.set_title(f'{element} 原子平均值对比', fontsize=12)
+            ax.bar(x - width/2, gen_counts, width, label='Generated Results', color=colors[element], alpha=0.7)
+            ax.bar(x + width/2, qm9_counts, width, label='QM9 Dataset', color=colors[element], alpha=0.5)
+            ax.set_ylabel('Average Atom Count', fontsize=12)
+            ax.set_title(f'{element} Atom Average Comparison', fontsize=12)
             ax.set_xticks(x)
             ax.set_xticklabels([''])
             ax.legend()
@@ -192,10 +191,10 @@ def compare_with_qm9(stats, total_atoms_per_mol, output_dir=None):
     ax = axes[5]
     x = np.arange(1)
     width = 0.35
-    ax.bar(x - width/2, gen_total_mean, width, label='生成结果', color='purple', alpha=0.7)
-    ax.bar(x + width/2, qm9_total_mean, width, label='QM9数据集', color='purple', alpha=0.5)
-    ax.set_ylabel('平均总原子数', fontsize=12)
-    ax.set_title('总原子数平均值对比', fontsize=12)
+    ax.bar(x - width/2, gen_total_mean, width, label='Generated Results', color='purple', alpha=0.7)
+    ax.bar(x + width/2, qm9_total_mean, width, label='QM9 Dataset', color='purple', alpha=0.5)
+    ax.set_ylabel('Average Total Atom Count', fontsize=12)
+    ax.set_title('Total Atom Count Average Comparison', fontsize=12)
     ax.set_xticks(x)
     ax.set_xticklabels([''])
     ax.legend()
@@ -206,68 +205,36 @@ def compare_with_qm9(stats, total_atoms_per_mol, output_dir=None):
     plt.savefig(comparison_path, dpi=300, bbox_inches='tight')
     print(f"\n已保存QM9对比图: {comparison_path}")
     plt.close()
-
-
-def create_visualizations(stats, all_atom_counts, df, output_dir=None):
-    """
-    创建原子计数可视化图表
     
-    Args:
-        stats: 统计信息字典
-        all_atom_counts: 原子计数字典
-        df: DataFrame
-        output_dir: 输出目录
-    """
-    if output_dir is None:
-        return
-    
-    os.makedirs(output_dir, exist_ok=True)
-    
-    elements = ['C', 'H', 'O', 'N', 'F']
-    colors = {'C': 'black', 'H': 'gray', 'O': 'red', 'N': 'blue', 'F': 'green'}
-    
-    # 1. 原子数量分布直方图
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-    axes = axes.flatten()
-    
-    for idx, element in enumerate(elements):
-        ax = axes[idx]
-        counts = np.array(all_atom_counts[element])
-        ax.hist(counts, bins=20, color=colors[element], alpha=0.7, edgecolor='black')
-        ax.set_xlabel(f'{element} Atom Count', fontsize=12)
-        ax.set_ylabel('Number of Molecules', fontsize=12)
-        ax.set_title(f'{element} Atom Count Distribution\n(Mean: {stats[element]["mean"]:.2f} ± {stats[element]["std"]:.2f})', 
-                    fontsize=12)
-        ax.grid(True, alpha=0.3)
-    
-    # 总原子数分布
-    ax = axes[5]
-    total_atoms = df['size'].values
-    ax.hist(total_atoms, bins=20, color='purple', alpha=0.7, edgecolor='black')
-    ax.set_xlabel('Total Atoms', fontsize=12)
-    ax.set_ylabel('Number of Molecules', fontsize=12)
-    ax.set_title(f'Total Atom Count Distribution\n(Mean: {np.mean(total_atoms):.2f} ± {np.std(total_atoms):.2f})', 
-                fontsize=12)
-    ax.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'atom_count_distributions.png'), dpi=300, bbox_inches='tight')
-    print(f"\n已保存原子数量分布图: {os.path.join(output_dir, 'atom_count_distributions.png')}")
-    plt.close()
-    
-    # 2. 箱线图
+    # 创建所有原子类型的综合对比图
     fig, ax = plt.subplots(figsize=(12, 6))
-    data_for_box = [all_atom_counts[e] for e in elements]
-    bp = ax.boxplot(data_for_box, tick_labels=elements, patch_artist=True)
-    for patch, element in zip(bp['boxes'], elements):
-        patch.set_facecolor(colors[element])
-        patch.set_alpha(0.7)
-    ax.set_ylabel('Atom Count', fontsize=12)
+    x = np.arange(len(elements))
+    width = 0.35
+    
+    gen_means = [stats[element]['mean'] for element in elements]
+    qm9_means = [qm9_stats[element]['mean'] for element in elements]
+    
+    bars1 = ax.bar(x - width/2, gen_means, width, label='Generated Results', color='steelblue', alpha=0.7)
+    bars2 = ax.bar(x + width/2, qm9_means, width, label='QM9 Dataset', color='lightblue', alpha=0.7)
+    
     ax.set_xlabel('Atom Type', fontsize=12)
-    ax.set_title('Atom Count Distribution Boxplot', fontsize=14, fontweight='bold')
-    ax.grid(True, alpha=0.3)
+    ax.set_ylabel('Average Atom Count', fontsize=12)
+    ax.set_title('Atom Type Average Count Comparison: Generated vs QM9', fontsize=14, fontweight='bold')
+    ax.set_xticks(x)
+    ax.set_xticklabels(elements)
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    # 添加数值标签
+    for bars in [bars1, bars2]:
+        for bar in bars:
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height,
+                   f'{height:.2f}',
+                   ha='center', va='bottom', fontsize=9)
+    
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'atom_count_boxplot.png'), dpi=300, bbox_inches='tight')
-    print(f"已保存原子数量箱线图: {os.path.join(output_dir, 'atom_count_boxplot.png')}")
+    comparison_path = os.path.join(output_dir, 'atom_type_comparison.png')
+    plt.savefig(comparison_path, dpi=300, bbox_inches='tight')
+    print(f"已保存原子类型综合对比图: {comparison_path}")
     plt.close()
-

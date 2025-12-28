@@ -5,7 +5,8 @@
 
 import torch
 import numpy as np
-from typing import Tuple, Optional, List, Dict
+from pathlib import Path
+from tqdm import tqdm
 
 from funcmol.evaluation.utils_evaluation import (
     bonds1, bonds2, bonds3,
@@ -118,7 +119,8 @@ def get_expected_bond_order(atom1, atom2, distance,
     return 0, None, None
 
 
-def build_xae_molecule(positions, atom_types, dataset_info, atom_decoder):
+def build_xae_molecule(positions, atom_types, dataset_info, atom_decoder, 
+                       margin1_val=None, margin2_val=None, margin3_val=None):
     """
     构建分子键矩阵
     
@@ -127,6 +129,9 @@ def build_xae_molecule(positions, atom_types, dataset_info, atom_decoder):
         atom_types: [N] 原子类型索引
         dataset_info: 数据集信息字典
         atom_decoder: 原子类型解码器列表
+        margin1_val: margin1值（pm单位），默认使用全局margin1
+        margin2_val: margin2值（pm单位），默认使用全局margin2
+        margin3_val: margin3值（pm单位），默认使用全局margin3
     
     Returns:
         tuple: (X, A, E)
@@ -149,7 +154,10 @@ def build_xae_molecule(positions, atom_types, dataset_info, atom_decoder):
                 order = get_bond_order(
                     atom_decoder[pair[0]], 
                     atom_decoder[pair[1]], 
-                    dists[i, j]
+                    dists[i, j],
+                    margin1_val=margin1_val,
+                    margin2_val=margin2_val,
+                    margin3_val=margin3_val
                 )
             elif dataset_info['name'] == 'geom':
                 # 对于geom数据集，使用limit_bonds_to_one
@@ -157,15 +165,19 @@ def build_xae_molecule(positions, atom_types, dataset_info, atom_decoder):
                     atom_decoder[pair[0]], 
                     atom_decoder[pair[1]], 
                     dists[i, j],
-                    check_exists=True
+                    check_exists=True,
+                    margin1_val=margin1_val,
+                    margin2_val=margin2_val,
+                    margin3_val=margin3_val
                 )
                 if order > 1:
                     order = 1  # 限制为单键
             
             if order > 0:
                 A[i, j] = 1
+                A[j, i] = 1  # 确保邻接矩阵对称
                 E[i, j] = order
-                E[j, i] = order
+                E[j, i] = order  # 确保键类型矩阵对称
     
     return X, A, E
 
@@ -190,7 +202,9 @@ def check_connectivity(bond_types):
     has_edges = (bond_types > 0).any()
     if not has_edges:
         # 没有边，每个原子都是独立的连通分量
-        return n_atoms, False
+        # 如果只有一个原子，它被认为是连通的（单个原子是一个完整的分子）
+        is_connected = (n_atoms == 1)
+        return n_atoms, is_connected
     
     # 使用DFS计算连通分量
     visited = torch.zeros(n_atoms, dtype=torch.bool)
@@ -201,8 +215,9 @@ def check_connectivity(bond_types):
         visited[node] = True
         neighbors = torch.nonzero(bond_types[node] > 0, as_tuple=False).squeeze(-1)
         for neighbor in neighbors:
-            if neighbor.item() != node and not visited[neighbor.item()]:
-                dfs(neighbor.item())
+            neighbor_idx = neighbor.item()
+            if neighbor_idx != node and not visited[neighbor_idx]:
+                dfs(neighbor_idx)
     
     # 遍历所有未访问的节点
     for i in range(n_atoms):
@@ -248,8 +263,9 @@ def check_connectivity_with_labels(bond_types):
         component_ids[node] = comp_id
         neighbors = torch.nonzero(bond_types[node] > 0, as_tuple=False).squeeze(-1)
         for neighbor in neighbors:
-            if neighbor.item() != node and not visited[neighbor.item()]:
-                dfs_label(neighbor.item(), comp_id)
+            neighbor_idx = neighbor.item()
+            if neighbor_idx != node and not visited[neighbor_idx]:
+                dfs_label(neighbor_idx, comp_id)
     
     # 遍历所有未访问的节点
     for i in range(n_atoms):
@@ -262,7 +278,7 @@ def check_connectivity_with_labels(bond_types):
 
 
 def compute_missing_bond_deviations_strict(positions, atom_types, bond_types, atom_decoder, dataset_info, 
-                                            strict_margin1=15, strict_margin2=10, strict_margin3=6):
+                                            strict_margin1, strict_margin2, strict_margin3):
     """
     计算应该形成键但未形成键的原子对的距离偏差（使用严格标准，考虑所有键类型）
     
@@ -275,9 +291,9 @@ def compute_missing_bond_deviations_strict(positions, atom_types, bond_types, at
         bond_types: [N, N] 键类型矩阵
         atom_decoder: 原子类型解码器列表
         dataset_info: 数据集信息字典
-        strict_margin1: 严格margin1值（pm单位），默认15pm
-        strict_margin2: 严格margin2值（pm单位），默认10pm
-        strict_margin3: 严格margin3值（pm单位），默认6pm
+        strict_margin1: 严格margin1值（pm单位）
+        strict_margin2: 严格margin2值（pm单位）
+        strict_margin3: 严格margin3值（pm单位）
     
     Returns:
         missing_bonds: List of dicts with keys: pair, actual_dist, standard_dist, deviation_pct, 
@@ -288,7 +304,7 @@ def compute_missing_bond_deviations_strict(positions, atom_types, bond_types, at
     missing_bonds = []
     
     # 计算连通分量，用于检测跨分量的缺失键
-    num_components, component_ids = check_connectivity_with_labels(bond_types)
+    _, component_ids = check_connectivity_with_labels(bond_types)
     
     for i in range(n):
         for j in range(i):
@@ -503,157 +519,96 @@ def compute_excessive_bond_deviations(positions, atom_types, bond_types, atom_de
     return excessive_bonds
 
 
-def compute_connectivity_continuity_score(positions, atom_types, bond_types, atom_decoder, dataset_info,
-                                          strict_margin1=15, strict_margin2=10, strict_margin3=6):
+def _analyze_bonds_with_standard(positions, atom_types, atom_decoder, dataset_info,
+                                  margin1_val, margin2_val, margin3_val):
     """
-    计算综合连续性连通性分数
-    
-    使用更严格的标准来判断"应该形成键"，考虑所有键类型（单/双/三键），
-    这样可以检测出即使使用宽松margin判断为有键，但距离仍然偏离标准值的情况。
+    使用指定标准分析单个分子的键和连通性
     
     Args:
         positions: [N, 3] 原子坐标
         atom_types: [N] 原子类型索引
-        bond_types: [N, N] 键类型矩阵
-        atom_decoder: 原子类型解码器列表
+        atom_decoder: 原子解码器列表
         dataset_info: 数据集信息字典
-        strict_margin1: 严格margin1值（pm单位），默认15pm
-        strict_margin2: 严格margin2值（pm单位），默认10pm
-        strict_margin3: 严格margin3值（pm单位），默认6pm
+        margin1_val: margin1值（pm单位）
+        margin2_val: margin2值（pm单位）
+        margin3_val: margin3值（pm单位）
     
     Returns:
-        dict: 包含连续性指标的字典
+        tuple: (num_components, is_connected, missing_bond_deviations)
     """
-    n = positions.shape[0]
-    dists = torch.cdist(positions, positions, p=2)
+    # 构建键矩阵
+    _, _, bond_types = build_xae_molecule(
+        positions=positions,
+        atom_types=atom_types,
+        dataset_info=dataset_info,
+        atom_decoder=atom_decoder,
+        margin1_val=margin1_val,
+        margin2_val=margin2_val,
+        margin3_val=margin3_val
+    )
     
-    missing_bonds = []
-    all_potential_bonds = []  # 所有应该形成键的原子对（无论是否已形成键）
-    type_mismatches = []  # 键类型不匹配的情况
+    # 计算连通性
+    num_components, is_connected = check_connectivity(bond_types)
     
-    for i in range(n):
-        for j in range(i):
-            atom1_str = atom_decoder[atom_types[i].item()]
-            atom2_str = atom_decoder[atom_types[j].item()]
-            pair = sorted([atom1_str, atom2_str])
-            atom1_key = pair[0]
-            atom2_key = pair[1]
-            
-            # 使用优化后的函数判断期望的键类型
-            actual_dist = dists[i, j].item()
-            expected_order, standard_dist, threshold = get_expected_bond_order(
-                atom1_key, atom2_key, actual_dist,
-                margin1_val=strict_margin1,
-                margin2_val=strict_margin2,
-                margin3_val=strict_margin3
-            )
-            
-            if expected_order > 0:  # 应该形成某种类型的键
-                deviation_pct = (actual_dist - standard_dist) / standard_dist * 100
-                actual_order = bond_types[i, j].item()
-                
-                all_potential_bonds.append({
-                    'pair': (i, j),
-                    'actual_dist': actual_dist,
-                    'standard_dist': standard_dist,
-                    'deviation_pct': deviation_pct,
-                    'expected_order': expected_order,
-                    'actual_order': actual_order,
-                    'has_bond': actual_order > 0
-                })
-                
-                # 检查缺失键
-                if actual_order == 0:
-                    missing_bonds.append({
-                        'pair': (i, j),
-                        'actual_dist': actual_dist,
-                        'standard_dist': standard_dist,
-                        'deviation_pct': deviation_pct,
-                        'expected_order': expected_order,
-                        'actual_order': 0
-                    })
-                # 检查键类型不匹配
-                elif actual_order != expected_order:
-                    type_mismatches.append({
-                        'pair': (i, j),
-                        'actual_dist': actual_dist,
-                        'standard_dist': standard_dist,
-                        'deviation_pct': deviation_pct,
-                        'expected_order': expected_order,
-                        'actual_order': actual_order
-                    })
+    # 计算缺失键偏差
+    missing_bonds = compute_missing_bond_deviations_strict(
+        positions, atom_types, bond_types, atom_decoder, dataset_info,
+        strict_margin1=margin1_val,
+        strict_margin2=margin2_val,
+        strict_margin3=margin3_val
+    )
     
-    if len(all_potential_bonds) == 0:
-        return {
-            'mean_deviation_pct': 0.0,
-            'max_deviation_pct': 0.0,
-            'missing_bond_count': 0,
-            'missing_bond_ratio': 0.0,
-            'continuity_score': 1.0,
-            'overall_mean_deviation_pct': 0.0,
-            'type_mismatch_count': 0,
-            'type_mismatch_ratio': 0.0
-        }
+    missing_deviations = [bond['deviation_pct'] for bond in missing_bonds] if missing_bonds else []
     
-    # 计算所有应该形成键的原子对的偏差（包括已形成键的）
-    all_deviations = [bond['deviation_pct'] for bond in all_potential_bonds]
-    overall_mean_deviation = np.mean(all_deviations)
-    overall_max_deviation = np.max(all_deviations)
+    return num_components, is_connected, missing_deviations
+
+
+def _print_standard_results(standard_name, margin1, margin2, margin3,
+                           num_components, is_connected, missing_deviations):
+    """
+    打印单个标准的分析结果
     
-    # 计算缺失键的统计信息
-    if len(missing_bonds) > 0:
-        missing_deviations = [bond['deviation_pct'] for bond in missing_bonds]
-        mean_deviation = np.mean(missing_deviations)
-        max_deviation = np.max(missing_deviations)
+    Args:
+        standard_name: 标准名称（如 '严格标准'）
+        margin1/2/3: margin值
+        num_components: 连通分量数数组
+        is_connected: 连通性布尔数组
+        missing_deviations: 缺失键偏差列表
+    """
+    print(f"\n🔗 {standard_name} (margin1={margin1}pm, margin2={margin2}pm, margin3={margin3}pm):")
+    print(f"  连通性:")
+    print(f"    连通分子数: {is_connected.sum()}")
+    print(f"    非连通分子数: {(~is_connected).sum()}")
+    print(f"    连通分子比例: {is_connected.sum() / len(is_connected) * 100:.2f}%")
+    print(f"    平均连通分量数: {num_components.mean():.2f}")
+    print(f"    最大连通分量数: {num_components.max()}")
+    if len(missing_deviations) > 0:
+        print(f"  缺失键偏差:")
+        print(f"    总缺失键数: {len(missing_deviations)}")
+        print(f"    平均偏差: {np.mean(missing_deviations):.4f}%")
+        print(f"    中位数偏差: {np.median(missing_deviations):.4f}%")
     else:
-        mean_deviation = 0.0
-        max_deviation = 0.0
-    
-    missing_bond_ratio = len(missing_bonds) / len(all_potential_bonds) if len(all_potential_bonds) > 0 else 0.0
-    type_mismatch_ratio = len(type_mismatches) / len(all_potential_bonds) if len(all_potential_bonds) > 0 else 0.0
-    
-    # 计算连续性分数（综合考虑所有应该形成键的原子对的偏差、缺失键比例、键类型不匹配比例）
-    # 使用整体平均偏差的归一化版本
-    # 假设最大合理偏差为30%，超过30%认为严重偏离
-    normalized_deviation = min(abs(overall_mean_deviation) / 30.0, 1.0)
-    
-    # 综合考虑偏差、缺失键比例、键类型不匹配比例
-    continuity_score = 1.0 - (0.4 * normalized_deviation + 0.3 * missing_bond_ratio + 0.3 * type_mismatch_ratio)
-    continuity_score = max(0.0, continuity_score)  # 确保分数在[0, 1]范围内
-    
-    return {
-        'mean_deviation_pct': mean_deviation,
-        'max_deviation_pct': max_deviation,
-        'missing_bond_count': len(missing_bonds),
-        'missing_bond_ratio': missing_bond_ratio,
-        'continuity_score': continuity_score,
-        'total_potential_bonds': len(all_potential_bonds),
-        'overall_mean_deviation_pct': overall_mean_deviation,
-        'overall_max_deviation_pct': overall_max_deviation,
-        'type_mismatch_count': len(type_mismatches),
-        'type_mismatch_ratio': type_mismatch_ratio
-    }
+        print(f"  缺失键偏差: 无缺失键")
 
 
-def analyze_bonds(molecule_dir, output_dir=None, strict_margin1=15, strict_margin2=10, strict_margin3=6):
+def analyze_bonds(molecule_dir,
+                 strict_margin1, strict_margin2, strict_margin3,
+                 medium_margin1, medium_margin2, medium_margin3,
+                 relaxed_margin1, relaxed_margin2, relaxed_margin3,
+                 output_dir=None):
     """
-    分析分子的键和连通性
+    分析分子的键和连通性（使用三种标准：strict, medium, relaxed）
     
     Args:
         molecule_dir: 包含 .npz 文件的目录
         output_dir: 输出目录（可选）
-        strict_margin1: 严格margin1值（pm单位），默认15pm
-        strict_margin2: 严格margin2值（pm单位），默认10pm
-        strict_margin3: 严格margin3值（pm单位），默认6pm
+        strict_margin1/2/3: 严格标准的margin值（pm单位）
+        medium_margin1/2/3: 中等标准的margin值（pm单位）
+        relaxed_margin1/2/3: 宽松标准的margin值（pm单位）
     
     Returns:
-        dict: 包含键和连通性分析结果的字典
+        dict: 包含键和连通性分析结果的字典（包含三种标准的结果）
     """
-    from pathlib import Path
-    from tqdm import tqdm
-    from funcmol.evaluation.utils_evaluation import load_molecules_from_npz, atom_decoder_dict, margin1
-    from funcmol.evaluation.structure_evaluation import compute_min_distances
-    
     molecule_dir = Path(molecule_dir)
     npz_files = sorted(molecule_dir.glob("generated_*.npz"))
     
@@ -662,23 +617,23 @@ def analyze_bonds(molecule_dir, output_dir=None, strict_margin1=15, strict_margi
     atom_decoder = atom_decoder_dict['qm9_with_h']
     dataset_info = {'name': 'qm9'}
     
-    # 存储统计数据
-    num_components_list = []
-    is_connected_list = []
+    # 存储键长统计数据（使用relaxed margin构建的键矩阵，用于键长统计）
     bond_lengths = []
     
-    # 连续性指标统计
-    all_missing_bond_deviations = []
-    all_continuity_scores = []
-    all_missing_bond_ratios = []
-    all_mean_deviations = []
-    all_max_deviations = []
-    all_overall_mean_deviations = []
-    all_overall_max_deviations = []
-    all_type_mismatch_counts = []
-    all_type_mismatch_ratios = []
+    # 三种标准的缺失键偏差统计
+    all_missing_bond_deviations_strict = []
+    all_missing_bond_deviations_medium = []
+    all_missing_bond_deviations_relaxed = []
     
-    print("分析分子键和连通性...")
+    # 三种标准的连通性统计
+    num_components_strict = []
+    is_connected_strict = []
+    num_components_medium = []
+    is_connected_medium = []
+    num_components_relaxed = []
+    is_connected_relaxed = []
+    
+    print("分析分子键和连通性（使用三种标准）...")
     for npz_file in tqdm(npz_files, desc="处理分子"):
         try:
             # 加载分子
@@ -698,50 +653,47 @@ def analyze_bonds(molecule_dir, output_dir=None, strict_margin1=15, strict_margi
             positions = positions[valid_mask]
             atom_types = atom_types[valid_mask]
             
-            # 构建键类型矩阵
-            _, _, bond_types = build_xae_molecule(
+            distances = torch.cdist(positions, positions, p=2)
+            
+            # 严格标准：分析键和连通性
+            num_comp_strict, is_conn_strict, missing_devs_strict = _analyze_bonds_with_standard(
+                positions, atom_types, atom_decoder, dataset_info,
+                strict_margin1, strict_margin2, strict_margin3
+            )
+            num_components_strict.append(num_comp_strict)
+            is_connected_strict.append(is_conn_strict)
+            all_missing_bond_deviations_strict.extend(missing_devs_strict)
+            
+            # 中等标准：分析键和连通性
+            num_comp_medium, is_conn_medium, missing_devs_medium = _analyze_bonds_with_standard(
+                positions, atom_types, atom_decoder, dataset_info,
+                medium_margin1, medium_margin2, medium_margin3
+            )
+            num_components_medium.append(num_comp_medium)
+            is_connected_medium.append(is_conn_medium)
+            all_missing_bond_deviations_medium.extend(missing_devs_medium)
+            
+            # 宽松标准：分析键和连通性
+            num_comp_relaxed, is_conn_relaxed, missing_devs_relaxed = _analyze_bonds_with_standard(
+                positions, atom_types, atom_decoder, dataset_info,
+                relaxed_margin1, relaxed_margin2, relaxed_margin3
+            )
+            num_components_relaxed.append(num_comp_relaxed)
+            is_connected_relaxed.append(is_conn_relaxed)
+            all_missing_bond_deviations_relaxed.extend(missing_devs_relaxed)
+            
+            # 计算键长（使用relaxed标准构建的键矩阵，用于键长统计）
+            _, _, bond_types_relaxed = build_xae_molecule(
                 positions=positions,
                 atom_types=atom_types,
                 dataset_info=dataset_info,
-                atom_decoder=atom_decoder
+                atom_decoder=atom_decoder,
+                margin1_val=relaxed_margin1,
+                margin2_val=relaxed_margin2,
+                margin3_val=relaxed_margin3
             )
-            
-            # 检查连通性
-            num_components, is_connected = check_connectivity(bond_types)
-            num_components_list.append(num_components)
-            is_connected_list.append(is_connected)
-            
-            # 计算连续性指标（使用严格标准）
-            continuity_metrics = compute_connectivity_continuity_score(
-                positions, atom_types, bond_types, atom_decoder, dataset_info,
-                strict_margin1=strict_margin1,
-                strict_margin2=strict_margin2,
-                strict_margin3=strict_margin3
-            )
-            all_continuity_scores.append(continuity_metrics['continuity_score'])
-            all_missing_bond_ratios.append(continuity_metrics['missing_bond_ratio'])
-            all_mean_deviations.append(continuity_metrics['mean_deviation_pct'])
-            all_max_deviations.append(continuity_metrics['max_deviation_pct'])
-            all_overall_mean_deviations.append(continuity_metrics['overall_mean_deviation_pct'])
-            all_overall_max_deviations.append(continuity_metrics['overall_max_deviation_pct'])
-            all_type_mismatch_counts.append(continuity_metrics['type_mismatch_count'])
-            all_type_mismatch_ratios.append(continuity_metrics['type_mismatch_ratio'])
-            
-            # 收集缺失键的偏差
-            missing_bonds = compute_missing_bond_deviations_strict(
-                positions, atom_types, bond_types, atom_decoder, dataset_info,
-                strict_margin1=strict_margin1,
-                strict_margin2=strict_margin2,
-                strict_margin3=strict_margin3
-            )
-            if missing_bonds:
-                missing_deviations = [bond['deviation_pct'] for bond in missing_bonds]
-                all_missing_bond_deviations.extend(missing_deviations)
-            
-            # 计算键长（只计算有键的原子对）
-            distances = torch.cdist(positions, positions, p=2)
-            triu_mask = torch.triu(torch.ones_like(bond_types, dtype=torch.bool), diagonal=1)
-            bond_mask = (bond_types > 0) & triu_mask
+            triu_mask = torch.triu(torch.ones_like(bond_types_relaxed, dtype=torch.bool), diagonal=1)
+            bond_mask = (bond_types_relaxed > 0) & triu_mask
             
             if bond_mask.any():
                 bond_distances = distances[bond_mask]
@@ -752,27 +704,35 @@ def analyze_bonds(molecule_dir, output_dir=None, strict_margin1=15, strict_margi
             continue
     
     # 转换为numpy数组
-    num_components_list = np.array(num_components_list)
-    is_connected_list = np.array(is_connected_list)
     bond_lengths = np.array(bond_lengths) if bond_lengths else np.array([])
     
-    # 连续性指标数组
-    all_continuity_scores = np.array(all_continuity_scores) if all_continuity_scores else np.array([])
-    all_missing_bond_ratios = np.array(all_missing_bond_ratios) if all_missing_bond_ratios else np.array([])
-    all_mean_deviations = np.array(all_mean_deviations) if all_mean_deviations else np.array([])
-    all_max_deviations = np.array(all_max_deviations) if all_max_deviations else np.array([])
-    all_missing_bond_deviations = np.array(all_missing_bond_deviations) if all_missing_bond_deviations else np.array([])
-    all_overall_mean_deviations = np.array(all_overall_mean_deviations) if all_overall_mean_deviations else np.array([])
-    all_overall_max_deviations = np.array(all_overall_max_deviations) if all_overall_max_deviations else np.array([])
-    all_type_mismatch_counts = np.array(all_type_mismatch_counts) if all_type_mismatch_counts else np.array([])
-    all_type_mismatch_ratios = np.array(all_type_mismatch_ratios) if all_type_mismatch_ratios else np.array([])
+    num_components_strict = np.array(num_components_strict)
+    is_connected_strict = np.array(is_connected_strict)
+    num_components_medium = np.array(num_components_medium)
+    is_connected_medium = np.array(is_connected_medium)
+    num_components_relaxed = np.array(num_components_relaxed)
+    is_connected_relaxed = np.array(is_connected_relaxed)
+    
+    # 三种标准的缺失键偏差数组
+    all_missing_bond_deviations_strict = np.array(all_missing_bond_deviations_strict) if all_missing_bond_deviations_strict else np.array([])
+    all_missing_bond_deviations_medium = np.array(all_missing_bond_deviations_medium) if all_missing_bond_deviations_medium else np.array([])
+    all_missing_bond_deviations_relaxed = np.array(all_missing_bond_deviations_relaxed) if all_missing_bond_deviations_relaxed else np.array([])
     
     # 打印统计结果
     print("\n" + "="*60)
     print("键和连通性分析结果")
     print("="*60)
     
-    print(f"\n🔗 键长统计:")
+    # 打印三种标准的结果
+    _print_standard_results("严格标准", strict_margin1, strict_margin2, strict_margin3,
+                           num_components_strict, is_connected_strict, all_missing_bond_deviations_strict)
+    _print_standard_results("中等标准", medium_margin1, medium_margin2, medium_margin3,
+                           num_components_medium, is_connected_medium, all_missing_bond_deviations_medium)
+    _print_standard_results("宽松标准", relaxed_margin1, relaxed_margin2, relaxed_margin3,
+                           num_components_relaxed, is_connected_relaxed, all_missing_bond_deviations_relaxed)
+    
+    # 键长统计（使用relaxed标准）
+    print(f"\n🔗 键长统计（使用relaxed标准）:")
     if len(bond_lengths) > 0:
         print(f"  总键数: {len(bond_lengths)}")
         print(f"  平均键长: {bond_lengths.mean():.4f} Å")
@@ -781,53 +741,24 @@ def analyze_bonds(molecule_dir, output_dir=None, strict_margin1=15, strict_margi
     else:
         print("  没有检测到任何键！")
     
-    print(f"\n🌐 分子连通性统计:")
-    print(f"  连通分子数（连通分量=1）: {is_connected_list.sum()}")
-    print(f"  非连通分子数（连通分量>1）: {(~is_connected_list).sum()}")
-    print(f"  连通分子比例: {is_connected_list.sum() / len(is_connected_list) * 100:.2f}%")
-    print(f"  平均连通分量数: {num_components_list.mean():.2f}")
-    print(f"  最大连通分量数: {num_components_list.max()}")
-    
-    print(f"\n🔗 连续性连通性指标 (使用严格标准: margin1={strict_margin1}pm, margin2={strict_margin2}pm, margin3={strict_margin3}pm):")
-    if len(all_continuity_scores) > 0:
-        print(f"  平均连续性分数: {all_continuity_scores.mean():.4f} (1.0=完美连通)")
-        print(f"  中位数连续性分数: {np.median(all_continuity_scores):.4f}")
-        print(f"  连续性分数范围: {all_continuity_scores.min():.4f} - {all_continuity_scores.max():.4f}")
-        print(f"  说明: 分数基于所有应该形成键的原子对的整体偏差、缺失键比例和键类型不匹配比例计算")
-        
-        print(f"\n  整体偏差统计（所有应该形成键的原子对，无论是否已形成键）:")
-        if len(all_overall_mean_deviations) > 0:
-            print(f"    平均整体偏差百分比: {all_overall_mean_deviations.mean():.4f}%")
-            print(f"    中位数整体偏差百分比: {np.median(all_overall_mean_deviations):.4f}%")
-        
-        print(f"\n  缺失键统计（应该形成键但未形成键的原子对）:")
-        if len(all_missing_bond_ratios) > 0:
-            print(f"    平均缺失键比例: {all_missing_bond_ratios.mean():.4f} ({all_missing_bond_ratios.mean()*100:.2f}%)")
-            print(f"    中位数缺失键比例: {np.median(all_missing_bond_ratios):.4f} ({np.median(all_missing_bond_ratios)*100:.2f}%)")
-        
-        if len(all_missing_bond_deviations) > 0:
-            print(f"    所有缺失键的偏差分布:")
-            print(f"      总缺失键数: {len(all_missing_bond_deviations)}")
-            print(f"      平均偏差: {all_missing_bond_deviations.mean():.4f}%")
-            print(f"      中位数偏差: {np.median(all_missing_bond_deviations):.4f}%")
-        
-        print(f"\n  键类型不匹配统计:")
-        if len(all_type_mismatch_counts) > 0:
-            print(f"    平均键类型不匹配数: {all_type_mismatch_counts.mean():.2f}")
-            print(f"    平均键类型不匹配比例: {all_type_mismatch_ratios.mean():.4f} ({all_type_mismatch_ratios.mean()*100:.2f}%)")
+    print(f"\n说明: 缺失键是指根据原子类型和距离判断应该形成键，但实际键矩阵中未识别出的原子对")
     
     return {
         'bond_lengths': bond_lengths,
-        'num_components': num_components_list,
-        'is_connected': is_connected_list,
-        'continuity_scores': all_continuity_scores,
-        'missing_bond_ratios': all_missing_bond_ratios,
-        'mean_deviations': all_mean_deviations,
-        'max_deviations': all_max_deviations,
-        'missing_bond_deviations': all_missing_bond_deviations,
-        'overall_mean_deviations': all_overall_mean_deviations,
-        'overall_max_deviations': all_overall_max_deviations,
-        'type_mismatch_counts': all_type_mismatch_counts,
-        'type_mismatch_ratios': all_type_mismatch_ratios
+        'strict': {
+            'num_components': num_components_strict,
+            'is_connected': is_connected_strict,
+            'missing_bond_deviations': all_missing_bond_deviations_strict
+        },
+        'medium': {
+            'num_components': num_components_medium,
+            'is_connected': is_connected_medium,
+            'missing_bond_deviations': all_missing_bond_deviations_medium
+        },
+        'relaxed': {
+            'num_components': num_components_relaxed,
+            'is_connected': is_connected_relaxed,
+            'missing_bond_deviations': all_missing_bond_deviations_relaxed
+        }
     }
 
