@@ -10,7 +10,7 @@ defaults:
 # fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251029/lightning_logs/version_0/checkpoints/model-epoch=199.ckpt
 # fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251103/lightning_logs/version_0/checkpoints/model-epoch=99.ckpt
 # fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251108/lightning_logs/version_1/checkpoints/model-epoch=364.ckpt
-fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251225/lightning_logs/version_1/checkpoints/last.ckpt
+fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20260105/lightning_logs/version_0/checkpoints/last.ckpt
 dirname: ../exps/funcmol/fm_qm9/20251225
 
 # 生成参数
@@ -22,9 +22,6 @@ diffusion_method: "new_x0" #  方法选择: "old" (WJS) 或 "new" (DDPM) 或 "ne
 # DDPM配置（仅当diffusion_method为"new"时使用）
 ddpm:
   num_timesteps: 1000  # 使用1000步以获得更细粒度的扩散过程
-  hidden_dim: 256 # 128
-  num_layers: 6 # 4
-  time_emb_dim: 128 # 64
 
   # Beta调度配置
   # 根据 num_timesteps 选择对应的 beta 配置：
@@ -47,6 +44,7 @@ smooth_sigma: 0.5
 
 # 模型路径
 nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/model-epoch=999.ckpt
+# nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260103/lightning_logs/version_0/checkpoints/last.ckpt
 
 # set the running dir
 hydra:

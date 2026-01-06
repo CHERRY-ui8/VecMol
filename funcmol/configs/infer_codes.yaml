@@ -25,7 +25,7 @@ dset:
 
 # data augmentation
 use_data_augmentation: True  # 是否启用数据增强（对分子坐标进行增强后再infer codes）
-num_augmentations: 3  # 每个分子生成多少个增强版本（包括原始版本），例如：3表示1个原始版本+2个增强版本
+num_augmentations: 5  # 每个分子生成多少个增强版本（包括原始版本），例如：3表示1个原始版本+2个增强版本
 data_augmentation:
   apply_rotation: True  # 是否应用旋转增强
   apply_translation: False  # 是否应用平移增强（平移距离为1/2个anchor_spacing）
@@ -34,8 +34,8 @@ data_augmentation:
 # 如果启用，会在infer codes时计算并保存position_weights，训练时直接加载，避免每个epoch重新计算
 position_weight:
   enabled: True  # 是否在infer codes时计算并保存position_weights
-  radius: 3.0     # 计算附近原子的半径阈值（单位：埃）
-  alpha: 0.5      # 权重系数：weight = 1 + alpha * num_atoms
+  radius: 2.0     # 计算附近原子的半径阈值（单位：埃）
+  alpha: 1.0      # 权重系数：weight = 0.1 + alpha * num_atoms
 
 hydra:
   run:

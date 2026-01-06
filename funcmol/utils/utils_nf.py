@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import torch
+import torch.nn.functional as F
 from collections import OrderedDict
 from tqdm import tqdm
 from torch import nn
@@ -940,3 +941,109 @@ def load_checkpoint_state_nf(model, checkpoint_path):
     }
     
     return training_state
+
+
+def reshape_target_field(target_field, B, n_points, n_atom_types):
+    """
+    Reshape target_field to [B, n_points, n_atom_types, 3].
+    Reused from train_nf_lt.py _process_batch logic.
+    
+    Args:
+        target_field: Target field tensor with various possible shapes
+        B: Batch size
+        n_points: Number of query points
+        n_atom_types: Number of atom types
+    Returns:
+        Reshaped target_field [B, n_points, n_atom_types, 3]
+    """
+    if target_field.dim() == 2:
+        # [B*n_points*n_atom_types*3] -> [B, n_points, n_atom_types, 3]
+        target_field = target_field.view(B, n_points, n_atom_types, 3)
+    elif target_field.dim() == 3:
+        if target_field.shape[0] == B * n_points:
+            # [B*n_points, n_atom_types, 3] -> [B, n_points, n_atom_types, 3]
+            target_field = target_field.view(B, n_points, n_atom_types, 3)
+        elif target_field.shape[0] == n_points:
+            # [n_points, n_atom_types, 3] -> [B, n_points, n_atom_types, 3]
+            target_field = target_field.unsqueeze(0).expand(B, -1, -1, -1)
+        else:
+            # Assume it's already [B, n_points, n_atom_types, 3] or try to reshape
+            target_field = target_field.view(B, n_points, n_atom_types, 3)
+    elif target_field.dim() == 4:
+        # Already in correct shape [B, n_points, n_atom_types, 3]
+        pass
+    else:
+        raise ValueError(f"Unexpected target_field dimension: {target_field.dim()}, shape: {target_field.shape}")
+    return target_field
+
+
+def compute_decoder_field_loss(
+    pred_field,
+    target_field,
+    use_cosine_loss=True,
+    magnitude_loss_weight=0.1,
+    valid_mask=None
+):
+    """
+    Compute decoder field loss (cosine distance + magnitude or MSE).
+    This is a generic function for computing decoder loss, independent of diffusion models.
+    
+    Args:
+        pred_field: [B, n_points, n_atom_types, 3] predicted field
+        target_field: [B, n_points, n_atom_types, 3] target field
+        use_cosine_loss: Whether to use cosine distance loss (True) or MSE loss (False)
+        magnitude_loss_weight: Weight for magnitude loss when use_cosine_loss=True
+        valid_mask: Optional [B, n_points] boolean mask for valid points (None means all points are valid)
+        
+    Returns:
+        loss: Scalar tensor with decoder field loss
+    """
+    device = pred_field.device
+    B, n_points, n_atom_types, _ = pred_field.shape
+    
+    # Create valid mask if not provided
+    if valid_mask is None:
+        valid_mask = torch.ones(B, n_points, dtype=torch.bool, device=device)
+    
+    # Expand mask to match field dimensions
+    valid_mask_expanded = valid_mask.unsqueeze(-1).unsqueeze(-1)  # [B, n_points, 1, 1]
+    
+    # Apply mask
+    pred_field_masked = pred_field * valid_mask_expanded
+    target_field_masked = target_field * valid_mask_expanded
+    
+    if use_cosine_loss:
+        # Cosine distance + magnitude loss
+        # Compute norms
+        pred_norm = torch.norm(pred_field_masked, dim=-1, keepdim=True)  # [B, n_points, n_atom_types, 1]
+        target_norm = torch.norm(target_field_masked, dim=-1, keepdim=True)  # [B, n_points, n_atom_types, 1]
+        
+        # Compute cosine similarity
+        eps = 1e-8
+        dot_product = (pred_field_masked * target_field_masked).sum(dim=-1, keepdim=True)  # [B, n_points, n_atom_types, 1]
+        cosine_sim = dot_product / (pred_norm * target_norm + eps)  # [B, n_points, n_atom_types, 1]
+        
+        # Cosine loss: 1 - cosine_similarity
+        cosine_loss = (1 - cosine_sim) * valid_mask_expanded
+        cosine_loss = cosine_loss.sum() / (valid_mask_expanded.sum() + eps)
+        
+        # Magnitude loss: MSE of norms
+        magnitude_loss = F.mse_loss(
+            pred_norm * valid_mask_expanded,
+            target_norm * valid_mask_expanded,
+            reduction='sum'
+        )
+        magnitude_loss = magnitude_loss / (valid_mask_expanded.sum() + eps)
+        
+        # Combined loss
+        loss = cosine_loss + magnitude_loss_weight * magnitude_loss
+    else:
+        # Standard MSE loss
+        loss = F.mse_loss(
+            pred_field_masked,
+            target_field_masked,
+            reduction='sum'
+        )
+        loss = loss / (valid_mask_expanded.sum() + eps)
+    
+    return loss

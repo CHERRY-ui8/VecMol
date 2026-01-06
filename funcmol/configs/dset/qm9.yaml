@@ -14,4 +14,4 @@ subsampling_ratio: 2
 num_workers: 4
 batch_size: 32
 lr_enc: 1e-4
-lr_dec: 2e-4 # 非微调模式下是2e-4，微调是3e-5
+lr_dec: 1e-3 # 非微调模式下是2e-4，微调模式提高到1e-3以加快训练（原2e-4导致更新太小）

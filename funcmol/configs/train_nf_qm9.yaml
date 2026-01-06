@@ -32,10 +32,19 @@ lr_decay: False
 
 # Fine-tuning settings: freeze encoder and only train decoder
 finetune_decoder:
-  enabled: False  # 是否启用decoder微调模式（冻结encoder，只训练decoder）
+  enabled: True  # 是否启用decoder微调模式（冻结encoder，只训练decoder）
   freeze_encoder: True  # 是否冻结encoder（在微调模式下自动为True）
+  # 使用denoiser生成codes（替代encoder）
+  use_denoiser_for_codes: True  # 是否使用denoiser生成codes（如果为True，需要指定denoiser_checkpoint_path）
+  denoiser_checkpoint_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251225/lightning_logs/version_1/checkpoints
+  # 微调模式下的特殊精细配置
+  sample_near_atoms_only: True  # 是否只在采样时采样原子附近的点（微调模式下推荐True）
+  atom_distance_threshold: 0.5  # 只采样距离原子多少Å内的query points（单位：Å，可以设置较小值如0.3-0.5）
+  n_points: 300  # query points数量（如果未设置，则使用dset.n_points，默认500）
+  use_cosine_loss: False  # 是否使用余弦距离loss（False表示使用MSE loss）
+  magnitude_loss_weight: 0.1  # magnitude loss的权重（用于余弦距离+magnitude loss），只用余弦距离可能数值不稳定
   code_augmentation:
-    enabled: True  # 微调模式下自动启用codes扰动
+    enabled: False  # 微调模式下自动启用codes扰动
     noise_std: 0.003  # 高斯噪声标准差
 
 # DEPRECATED: code augmentation for training robustness (仅在非微调模式下、重新训练时使用)

@@ -14,7 +14,7 @@ import argparse
 import shutil
 
 
-def convert_codes_to_lmdb(codes_dir, split, lmdb_path, keys_path):
+def convert_codes_to_lmdb(codes_dir, split, lmdb_path, keys_path, num_augmentations):
     """
     将codes文件转换为LMDB数据库
     
@@ -23,37 +23,32 @@ def convert_codes_to_lmdb(codes_dir, split, lmdb_path, keys_path):
         split (str): 数据分割名称 (train/val/test)
         lmdb_path (str): 输出LMDB数据库路径
         keys_path (str): 输出keys文件路径
+        num_augmentations (int): 数据增强数量，用于查找对应格式的文件
+    
+    Returns:
+        num_augmentations (int): 数据增强数量（codes文件的数量）
     """
     split_dir = os.path.join(codes_dir, split)
     
     if not os.path.exists(split_dir):
         raise FileNotFoundError(f"Codes directory not found: {split_dir}")
     
-    # 查找所有codes文件（排除 codes_keys.pt）
+    # 根据数据增强数量查找对应格式的文件：codes_aug{num}_XXX.pt
     list_codes = [
         f for f in os.listdir(split_dir)
         if os.path.isfile(os.path.join(split_dir, f)) and \
-        f.startswith("codes") and f.endswith(".pt") and \
-        f != "codes_keys.pt"
+        f.startswith(f"codes_aug{num_augmentations}_") and f.endswith(".pt")
     ]
     
     if not list_codes:
-        raise FileNotFoundError(f"No codes files found in {split_dir}")
+        raise FileNotFoundError(
+            f"No codes files found in {split_dir} matching pattern 'codes_aug{num_augmentations}_*.pt'.\n"
+            f"Please ensure codes files are generated with num_augmentations={num_augmentations}"
+        )
     
-    # 优先使用 codes.pt（向后兼容）
-    if "codes.pt" in list_codes:
-        list_codes = ["codes.pt"]
-    else:
-        # 查找所有 codes_XXX.pt 文件（新格式）
-        numbered_codes = [f for f in list_codes if f.startswith("codes_") and f.endswith(".pt")]
-        if numbered_codes:
-            # 按编号排序
-            numbered_codes.sort()
-            list_codes = numbered_codes
-        else:
-            # 兼容旧格式：如果有其他codes文件，使用第一个
-            list_codes.sort()
-            list_codes = [list_codes[0]]
+    # 排序确保顺序正确
+    list_codes.sort()
+    print(f"Found {len(list_codes)} codes files matching pattern 'codes_aug{num_augmentations}_*.pt'")
     
     print(f"Found {len(list_codes)} codes files in {split_dir}")
     for code_file in list_codes:
@@ -215,9 +210,12 @@ def convert_codes_to_lmdb(codes_dir, split, lmdb_path, keys_path):
     except Exception as e:
         print(f"❌ LMDB file verification failed: {e}")
     
+    # 返回数据增强数量
+    num_augmentations = len(list_codes)
+    return num_augmentations
 
 
-def convert_position_weights_to_lmdb(codes_dir, split, codes_keys):
+def convert_position_weights_to_lmdb(codes_dir, split, codes_keys, num_augmentations=None):
     """
     将position_weights文件转换为LMDB数据库
     
@@ -225,33 +223,24 @@ def convert_position_weights_to_lmdb(codes_dir, split, codes_keys):
         codes_dir (str): codes文件所在目录
         split (str): 数据分割名称 (train/val/test)
         codes_keys (list): codes的keys列表，用于确保position_weights和codes的索引一致
+        num_augmentations (int): 数据增强数量，用于查找对应格式的文件
     """
     split_dir = os.path.join(codes_dir, split)
     
-    # 查找position_weights文件
+    # 根据数据增强数量查找对应格式的文件：position_weights_aug{num}_XXX.pt
     list_weights = [
         f for f in os.listdir(split_dir)
         if os.path.isfile(os.path.join(split_dir, f)) and \
-        f.startswith("position_weights") and f.endswith(".pt")
+        f.startswith(f"position_weights_aug{num_augmentations}_") and f.endswith(".pt")
     ]
     
     if not list_weights:
-        print(f"No position_weights files found in {split_dir}, skipping...")
+        print(f"No position_weights files found in {split_dir} matching pattern 'position_weights_aug{num_augmentations}_*.pt', skipping...")
         return
     
-    # 查找所有 position_weights_XXX.pt 文件
-    numbered_weights = [f for f in list_weights if f.startswith("position_weights_") and f.endswith(".pt")]
-    if numbered_weights:
-        numbered_weights.sort()  # 按编号排序
-        list_weights = numbered_weights
-    elif len(list_weights) == 1:
-        # 单个文件（向后兼容）
-        list_weights = list_weights
-    else:
-        print(f"Warning: Found {len(list_weights)} position_weights files, expected numbered files or single file. Skipping...")
-        return
-    
-    print(f"\nFound {len(list_weights)} position_weights files in {split_dir}")
+    # 排序确保顺序正确
+    list_weights.sort()
+    print(f"\nFound {len(list_weights)} position_weights files matching pattern 'position_weights_aug{num_augmentations}_*.pt'")
     for weight_file in list_weights:
         print(f"  - {weight_file}")
     
@@ -273,8 +262,9 @@ def convert_position_weights_to_lmdb(codes_dir, split, codes_keys):
         print("  Will still convert, but indices may not match correctly")
     
     # 创建position_weights LMDB数据库
-    weights_lmdb_path = os.path.join(split_dir, "position_weights.lmdb")
-    weights_keys_path = os.path.join(split_dir, "position_weights_keys.pt")
+    # 根据数据增强数量生成文件名，避免覆盖不同版本的文件
+    weights_lmdb_path = os.path.join(split_dir, f"position_weights_aug{num_augmentations}.lmdb")
+    weights_keys_path = os.path.join(split_dir, f"position_weights_aug{num_augmentations}_keys.pt")
     
     # 删除旧的LMDB文件（如果存在）
     if os.path.exists(weights_lmdb_path):
@@ -366,6 +356,8 @@ def main():
     parser = argparse.ArgumentParser(description="Convert codes files to LMDB format")
     parser.add_argument("--codes_dir", type=str, required=True, 
                        help="Codes文件所在目录")
+    parser.add_argument("--num_augmentations", type=int, required=True,
+                       help="数据增强数量（必须与infer_codes时使用的num_augmentations一致）")
     parser.add_argument("--splits", type=str, nargs="+", 
                        default=["train", "val", "test"],
                        help="要转换的数据分割")
@@ -373,6 +365,7 @@ def main():
                        help="跳过position_weights文件的转换")
     
     args = parser.parse_args()
+    num_augmentations = args.num_augmentations
     
     for split in args.splits:
         split_dir = os.path.join(args.codes_dir, split)
@@ -380,22 +373,30 @@ def main():
             print(f"Warning: {split_dir} does not exist, skipping...")
             continue
         
-        lmdb_path = os.path.join(split_dir, "codes.lmdb")
-        keys_path = os.path.join(split_dir, "codes_keys.pt")
-        
         print(f"\n{'='*60}")
-        print(f"Converting {split} split...")
+        print(f"Converting {split} split (num_augmentations={num_augmentations})...")
         print(f"{'='*60}")
         
         try:
+            # 根据数据增强数量生成文件名
+            lmdb_path = os.path.join(split_dir, f"codes_aug{num_augmentations}.lmdb")
+            keys_path = os.path.join(split_dir, f"codes_aug{num_augmentations}_keys.pt")
+            
+            print(f"Looking for codes files matching pattern 'codes_aug{num_augmentations}_*.pt'")
+            print(f"Will generate: {os.path.basename(lmdb_path)}")
+            
             # 转换codes
-            convert_codes_to_lmdb(args.codes_dir, split, lmdb_path, keys_path)
+            returned_num_aug = convert_codes_to_lmdb(args.codes_dir, split, lmdb_path, keys_path, num_augmentations)
+            
+            # 确保返回的数量与预期一致
+            if returned_num_aug != num_augmentations:
+                print(f"Warning: Expected {num_augmentations} augmentations, but got {returned_num_aug}")
             
             # 如果需要转换position_weights，加载keys并转换
             if not args.skip_position_weights:
                 if os.path.exists(keys_path):
                     codes_keys = torch.load(keys_path, weights_only=False)
-                    convert_position_weights_to_lmdb(args.codes_dir, split, codes_keys)
+                    convert_position_weights_to_lmdb(args.codes_dir, split, codes_keys, num_augmentations)
         except Exception as e:
             print(f"Error converting {split}: {e}")
             import traceback

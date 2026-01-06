@@ -443,7 +443,9 @@ def main(config):
             loader_train = create_code_loaders(config, split="train")
             loader_val = create_code_loaders(config, split="val")
             
-            code_stats = compute_code_stats_offline(loader_train, "train", config["normalize_codes"])
+            # 获取数据增强数量（如果使用数据增强的codes）
+            num_augmentations = config.get("num_augmentations", None)
+            code_stats = compute_code_stats_offline(loader_train, "train", config["normalize_codes"], num_augmentations=num_augmentations)
             
             # 为了获取分子信息以计算元素存在性，仍然需要加载field数据
             # 但不需要重新计算codes

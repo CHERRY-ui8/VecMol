@@ -15,10 +15,65 @@ from funcmol.evaluation.utils_evaluation import (
 )
 
 
+def get_all_possible_bond_orders(atom1, atom2, distance, 
+                                 margin1_val=None, margin2_val=None, margin3_val=None):
+    """
+    获取所有在margin内的可能键类型（不按优先级排序）
+    
+    Args:
+        atom1: 原子1类型（字符串）
+        atom2: 原子2类型（字符串）
+        distance: 原子间距离（单位：Å）
+        margin1_val: margin1值（pm单位），默认使用全局margin1
+        margin2_val: margin2值（pm单位），默认使用全局margin2
+        margin3_val: margin3值（pm单位），默认使用全局margin3
+    
+    Returns:
+        list: 所有可能的键类型列表，每个元素为 (bond_order, standard_dist_pm, relative_deviation)
+    """
+    if margin1_val is None:
+        margin1_val = margin1
+    if margin2_val is None:
+        margin2_val = margin2
+    if margin3_val is None:
+        margin3_val = margin3
+    
+    distance_pm = 100 * distance  # 转换为pm单位
+    possible_bonds = []
+    
+    # 检查三键
+    if atom1 in bonds3 and atom2 in bonds3[atom1]:
+        standard_bond3_pm = bonds3[atom1][atom2]
+        threshold3_pm = standard_bond3_pm + margin3_val
+        if distance_pm < threshold3_pm:
+            relative_deviation = abs(distance_pm - standard_bond3_pm) / standard_bond3_pm
+            possible_bonds.append((3, standard_bond3_pm, relative_deviation))
+    
+    # 检查双键
+    if atom1 in bonds2 and atom2 in bonds2[atom1]:
+        standard_bond2_pm = bonds2[atom1][atom2]
+        threshold2_pm = standard_bond2_pm + margin2_val
+        if distance_pm < threshold2_pm:
+            relative_deviation = abs(distance_pm - standard_bond2_pm) / standard_bond2_pm
+            possible_bonds.append((2, standard_bond2_pm, relative_deviation))
+    
+    # 检查单键
+    if atom1 in bonds1 and atom2 in bonds1[atom1]:
+        standard_bond1_pm = bonds1[atom1][atom2]
+        threshold1_pm = standard_bond1_pm + margin1_val
+        if distance_pm < threshold1_pm:
+            relative_deviation = abs(distance_pm - standard_bond1_pm) / standard_bond1_pm
+            possible_bonds.append((1, standard_bond1_pm, relative_deviation))
+    
+    return possible_bonds
+
+
 def get_bond_order(atom1, atom2, distance, check_exists=False, 
                    margin1_val=None, margin2_val=None, margin3_val=None):
     """
     判断键类型（单键/双键/三键）
+    
+    使用"最接近标准键长"原则：选择距离最接近标准键长的键类型
     
     Args:
         atom1: 原子1类型（字符串，如 'C', 'H'）
@@ -48,20 +103,44 @@ def get_bond_order(atom1, atom2, distance, check_exists=False,
         if atom2 not in bonds1[atom1]:
             return 0
     
-    # 首先检查是否在单键范围内
-    if distance_pm < bonds1[atom1][atom2] + margin1_val:
-        # 检查是否在双键范围内
-        if atom1 in bonds2 and atom2 in bonds2[atom1]:
-            thr_bond2 = bonds2[atom1][atom2] + margin2_val
-            if distance_pm < thr_bond2:
-                # 检查是否在三键范围内
-                if atom1 in bonds3 and atom2 in bonds3[atom1]:
-                    thr_bond3 = bonds3[atom1][atom2] + margin3_val
-                    if distance_pm < thr_bond3:
-                        return 3  # 三键
-                return 2  # 双键
-        return 1  # 单键
-    return 0  # 无键
+    # 使用"最接近标准键长"原则（方案1：相对偏差）
+    # 收集所有可能的键类型及其标准键长
+    candidate_bonds = []
+    
+    # 检查三键
+    if atom1 in bonds3 and atom2 in bonds3[atom1]:
+        standard_bond3_pm = bonds3[atom1][atom2]
+        threshold3_pm = standard_bond3_pm + margin3_val
+        if distance_pm < threshold3_pm:
+            # 使用相对偏差而非绝对偏差
+            relative_deviation = abs(distance_pm - standard_bond3_pm) / standard_bond3_pm
+            candidate_bonds.append((3, standard_bond3_pm, relative_deviation))
+    
+    # 检查双键
+    if atom1 in bonds2 and atom2 in bonds2[atom1]:
+        standard_bond2_pm = bonds2[atom1][atom2]
+        threshold2_pm = standard_bond2_pm + margin2_val
+        if distance_pm < threshold2_pm:
+            # 使用相对偏差而非绝对偏差
+            relative_deviation = abs(distance_pm - standard_bond2_pm) / standard_bond2_pm
+            candidate_bonds.append((2, standard_bond2_pm, relative_deviation))
+    
+    # 检查单键
+    if atom1 in bonds1 and atom2 in bonds1[atom1]:
+        standard_bond1_pm = bonds1[atom1][atom2]
+        threshold1_pm = standard_bond1_pm + margin1_val
+        if distance_pm < threshold1_pm:
+            # 使用相对偏差而非绝对偏差
+            relative_deviation = abs(distance_pm - standard_bond1_pm) / standard_bond1_pm
+            candidate_bonds.append((1, standard_bond1_pm, relative_deviation))
+    
+    # 如果没有候选键，返回无键
+    if not candidate_bonds:
+        return 0
+    
+    # 选择相对偏差最小的键类型（最接近标准键长）
+    candidate_bonds.sort(key=lambda x: x[2])  # 按相对偏差排序
+    return candidate_bonds[0][0]  # 返回键类型
 
 
 def get_expected_bond_order(atom1, atom2, distance, 
@@ -69,7 +148,7 @@ def get_expected_bond_order(atom1, atom2, distance,
     """
     根据距离判断期望的键类型（用于检测缺失键和键类型不匹配）
     
-    按照从高到低的优先级检查：三键 -> 双键 -> 单键
+    使用"最接近标准键长"原则：选择距离最接近标准键长的键类型
     
     Args:
         atom1: 原子1类型（字符串）
@@ -94,33 +173,189 @@ def get_expected_bond_order(atom1, atom2, distance,
     
     distance_pm = 100 * distance  # 转换为pm单位
     
-    # 按优先级检查：三键 -> 双键 -> 单键
+    # 使用"最接近标准键长"原则（方案1：相对偏差）
+    # 收集所有可能的键类型及其标准键长
+    candidate_bonds = []
+    
     # 检查三键
     if atom1 in bonds3 and atom2 in bonds3[atom1]:
-        standard_dist_pm = bonds3[atom1][atom2]
-        threshold_pm = standard_dist_pm + margin3_val
-        if distance_pm < threshold_pm:
-            return 3, standard_dist_pm / 100.0, threshold_pm / 100.0
+        standard_bond3_pm = bonds3[atom1][atom2]
+        threshold3_pm = standard_bond3_pm + margin3_val
+        if distance_pm < threshold3_pm:
+            # 使用相对偏差而非绝对偏差
+            relative_deviation = abs(distance_pm - standard_bond3_pm) / standard_bond3_pm
+            candidate_bonds.append((3, standard_bond3_pm, relative_deviation, threshold3_pm))
     
     # 检查双键
     if atom1 in bonds2 and atom2 in bonds2[atom1]:
-        standard_dist_pm = bonds2[atom1][atom2]
-        threshold_pm = standard_dist_pm + margin2_val
-        if distance_pm < threshold_pm:
-            return 2, standard_dist_pm / 100.0, threshold_pm / 100.0
+        standard_bond2_pm = bonds2[atom1][atom2]
+        threshold2_pm = standard_bond2_pm + margin2_val
+        if distance_pm < threshold2_pm:
+            # 使用相对偏差而非绝对偏差
+            relative_deviation = abs(distance_pm - standard_bond2_pm) / standard_bond2_pm
+            candidate_bonds.append((2, standard_bond2_pm, relative_deviation, threshold2_pm))
     
     # 检查单键
     if atom1 in bonds1 and atom2 in bonds1[atom1]:
-        standard_dist_pm = bonds1[atom1][atom2]
-        threshold_pm = standard_dist_pm + margin1_val
-        if distance_pm < threshold_pm:
-            return 1, standard_dist_pm / 100.0, threshold_pm / 100.0
+        standard_bond1_pm = bonds1[atom1][atom2]
+        threshold1_pm = standard_bond1_pm + margin1_val
+        if distance_pm < threshold1_pm:
+            # 使用相对偏差而非绝对偏差
+            relative_deviation = abs(distance_pm - standard_bond1_pm) / standard_bond1_pm
+            candidate_bonds.append((1, standard_bond1_pm, relative_deviation, threshold1_pm))
     
-    return 0, None, None
+    # 如果没有候选键，返回无键
+    if not candidate_bonds:
+        return 0, None, None
+    
+    # 选择相对偏差最小的键类型（最接近标准键长）
+    candidate_bonds.sort(key=lambda x: x[2])  # 按相对偏差排序
+    best_order, best_standard_pm, _, best_threshold_pm = candidate_bonds[0]
+    
+    return best_order, best_standard_pm / 100.0, best_threshold_pm / 100.0
+
+
+def optimize_bonds_for_stability(positions, atom_types, atom_decoder, charges,
+                                 margin1_val=None, margin2_val=None, margin3_val=None,
+                                 max_iterations=10):
+    """
+    全局优化键组合，选择使稳定原子比例最大的组合
+    
+    使用迭代改进算法：
+    1. 初始：使用"最接近标准键长"原则选择键
+    2. 迭代改进：对于每个可能的键，尝试改变它的类型，看是否能提高稳定性
+    3. 重复直到收敛或达到最大迭代次数
+    
+    Args:
+        positions: [N, 3] 原子坐标
+        atom_types: [N] 原子类型索引
+        atom_decoder: 原子类型解码器列表
+        charges: [N] 原子电荷
+        margin1_val: margin1值（pm单位）
+        margin2_val: margin2值（pm单位）
+        margin3_val: margin3值（pm单位）
+        max_iterations: 最大迭代次数
+    
+    Returns:
+        torch.Tensor: 优化后的键类型矩阵 [N, N]
+    """
+    from funcmol.analysis.rdkit_functions import allowed_bonds
+    
+    if margin1_val is None:
+        margin1_val = margin1
+    if margin2_val is None:
+        margin2_val = margin2
+    if margin3_val is None:
+        margin3_val = margin3
+    
+    n = positions.shape[0]
+    device = positions.device
+    
+    # 计算所有原子对的距离
+    pos = positions.unsqueeze(0)
+    dists = torch.cdist(pos, pos, p=2).squeeze(0)
+    
+    # 找出所有可能的键类型（在margin内的）
+    possible_bonds = {}  # {(i, j): [(order, std_dist, rel_dev), ...]}
+    for i in range(n):
+        for j in range(i):
+            atom1 = atom_decoder[atom_types[i].item()]
+            atom2 = atom_decoder[atom_types[j].item()]
+            distance = dists[i, j].item()
+            bonds = get_all_possible_bond_orders(
+                atom1, atom2, distance, margin1_val, margin2_val, margin3_val
+            )
+            if bonds:
+                possible_bonds[(i, j)] = bonds
+                possible_bonds[(j, i)] = bonds  # 对称
+    
+    # 初始化：使用"最接近标准键长"原则
+    bond_types = torch.zeros((n, n), dtype=torch.int, device=device)
+    for (i, j), bonds in possible_bonds.items():
+        if i < j:  # 只处理上三角
+            # 选择相对偏差最小的
+            bonds_sorted = sorted(bonds, key=lambda x: x[2])
+            best_order = bonds_sorted[0][0]
+            bond_types[i, j] = best_order
+            bond_types[j, i] = best_order
+    
+    def calculate_stability_score(bond_matrix):
+        """计算稳定性分数（稳定原子的比例）"""
+        edge_types = bond_matrix.clone()
+        edge_types[edge_types == 4] = 1.5
+        edge_types[edge_types < 0] = 0
+        valencies = torch.sum(edge_types, dim=-1).long()
+        
+        stable_count = 0
+        for i, (atom_type, valency, charge) in enumerate(zip(atom_types, valencies, charges)):
+            atom_type = atom_type.item()
+            valency = valency.item()
+            charge = charge.item()
+            possible_bonds_list = allowed_bonds[atom_decoder[atom_type]]
+            
+            if type(possible_bonds_list) == int:
+                is_stable = possible_bonds_list == valency
+            elif type(possible_bonds_list) == dict:
+                expected_bonds = possible_bonds_list.get(charge, possible_bonds_list.get(0))
+                if type(expected_bonds) == int:
+                    is_stable = expected_bonds == valency
+                else:
+                    is_stable = valency in expected_bonds
+            else:
+                is_stable = valency in possible_bonds_list
+            
+            if is_stable:
+                stable_count += 1
+        
+        return stable_count / n if n > 0 else 0.0
+    
+    # 迭代改进
+    current_score = calculate_stability_score(bond_types)
+    
+    for _ in range(max_iterations):
+        improved = False
+        
+        # 尝试改进每个可能的键
+        for (i, j), bonds in possible_bonds.items():
+            if i >= j:  # 只处理上三角
+                continue
+            
+            if len(bonds) <= 1:
+                continue  # 只有一个选择，无法改进
+            
+            # 尝试每个可能的键类型
+            best_order = bond_types[i, j].item()
+            best_score = current_score
+            
+            for order, _, _ in bonds:
+                if order == best_order:
+                    continue
+                
+                # 尝试这个键类型
+                bond_types[i, j] = order
+                bond_types[j, i] = order
+                new_score = calculate_stability_score(bond_types)
+                
+                if new_score > best_score:
+                    best_score = new_score
+                    best_order = order
+                    improved = True
+            
+            # 恢复最佳选择
+            bond_types[i, j] = best_order
+            bond_types[j, i] = best_order
+            current_score = best_score
+        
+        if not improved:
+            break  # 没有改进，收敛
+    
+    return bond_types
 
 
 def build_xae_molecule(positions, atom_types, dataset_info, atom_decoder, 
-                       margin1_val=None, margin2_val=None, margin3_val=None):
+                       margin1_val=None, margin2_val=None, margin3_val=None,
+                       use_global_optimization=True, charges=None, 
+                       use_iterative_improvement=True, max_iterations=10):
     """
     构建分子键矩阵
     
@@ -132,6 +367,14 @@ def build_xae_molecule(positions, atom_types, dataset_info, atom_decoder,
         margin1_val: margin1值（pm单位），默认使用全局margin1
         margin2_val: margin2值（pm单位），默认使用全局margin2
         margin3_val: margin3值（pm单位），默认使用全局margin3
+        use_global_optimization: 是否使用全局优化
+            - True: 小分子(n<=12)使用回溯穷尽搜索，大分子使用迭代改进或贪心
+            - False: 使用简单的"最接近标准键长"方法（贪心）
+        charges: [N] 原子电荷
+        use_iterative_improvement: 对于大分子(n>12)，是否使用迭代改进（默认True）
+            - True: 使用迭代改进（从贪心解开始，逐步改进）
+            - False: 使用纯贪心算法
+        max_iterations: 迭代改进的最大迭代次数（默认10）
     
     Returns:
         tuple: (X, A, E)
@@ -141,19 +384,74 @@ def build_xae_molecule(positions, atom_types, dataset_info, atom_decoder,
     """
     n = positions.shape[0]
     X = atom_types
-    A = torch.zeros((n, n), dtype=torch.bool)
-    E = torch.zeros((n, n), dtype=torch.int)
+    device = positions.device
+    
+    # 默认使用全局优化（穷尽所有可能的键组合，找到稳定原子数最多的组合）
+    # 如果use_global_optimization=False，则使用简单的"最接近标准键长"方法
+    if use_global_optimization is False:
+        # 使用简单的"最接近标准键长"方法（不进行全局优化）
+        A = torch.zeros((n, n), dtype=torch.bool, device=device)
+        E = torch.zeros((n, n), dtype=torch.int, device=device)
+        
+        pos = positions.unsqueeze(0)
+        dists = torch.cdist(pos, pos, p=2).squeeze(0)
+        
+        for i in range(n):
+            for j in range(i):
+                atom1_str = atom_decoder[atom_types[i].item()]
+                atom2_str = atom_decoder[atom_types[j].item()]
+                if dataset_info['name'] == 'qm9':
+                    order = get_bond_order(
+                        atom1_str, 
+                        atom2_str, 
+                        dists[i, j],
+                        margin1_val=margin1_val,
+                        margin2_val=margin2_val,
+                        margin3_val=margin3_val
+                    )
+                elif dataset_info['name'] == 'geom':
+                    order = get_bond_order(
+                        atom1_str, 
+                        atom2_str, 
+                        dists[i, j],
+                        check_exists=True,
+                        margin1_val=margin1_val,
+                        margin2_val=margin2_val,
+                        margin3_val=margin3_val
+                    )
+                    if order > 1:
+                        order = 1
+                
+                if order > 0:
+                    A[i, j] = 1
+                    A[j, i] = 1
+                    E[i, j] = order
+                    E[j, i] = order
+        
+        return X, A, E
+    
+    # 使用全局优化（默认行为）
+    A = torch.zeros((n, n), dtype=torch.bool, device=device)
+    E = torch.zeros((n, n), dtype=torch.int, device=device)
     
     pos = positions.unsqueeze(0)
     dists = torch.cdist(pos, pos, p=2).squeeze(0)
     
+    # 使用全局优化：穷尽所有可能的键组合，找到稳定原子数最多的组合
+    from funcmol.analysis.rdkit_functions import allowed_bonds
+    
+    # 第一步：找出所有可能的键（距离在margin内的所有键类型）
+    # possible_bonds_dict: {(i, j): [(order, std, dev), ...]}
+    possible_bonds_dict = {}
     for i in range(n):
         for j in range(i):
-            pair = sorted([atom_types[i], atom_types[j]])
+            # 获取原子类型字符串
+            atom1_str = atom_decoder[atom_types[i].item()]
+            atom2_str = atom_decoder[atom_types[j].item()]
             if dataset_info['name'] == 'qm9':
-                order = get_bond_order(
-                    atom_decoder[pair[0]], 
-                    atom_decoder[pair[1]], 
+                possible_bonds = get_all_possible_bond_orders(
+                    atom1_str, 
+                    atom2_str, 
                     dists[i, j],
                     margin1_val=margin1_val,
                     margin2_val=margin2_val,
@@ -161,23 +459,323 @@ def build_xae_molecule(positions, atom_types, dataset_info, atom_decoder,
                 )
             elif dataset_info['name'] == 'geom':
                 # 对于geom数据集，使用limit_bonds_to_one
-                order = get_bond_order(
-                    atom_decoder[pair[0]], 
-                    atom_decoder[pair[1]], 
+                possible_bonds = get_all_possible_bond_orders(
+                    atom1_str, 
+                    atom2_str, 
                     dists[i, j],
-                    check_exists=True,
                     margin1_val=margin1_val,
                     margin2_val=margin2_val,
                     margin3_val=margin3_val
                 )
-                if order > 1:
-                    order = 1  # 限制为单键
+                # 限制为单键
+                possible_bonds = [(1, std, dev) for order, std, dev in possible_bonds if order == 1]
             
-            if order > 0:
-                A[i, j] = 1
-                A[j, i] = 1  # 确保邻接矩阵对称
-                E[i, j] = order
-                E[j, i] = order  # 确保键类型矩阵对称
+            if possible_bonds:
+                # 存储所有可能的键类型（包括0=无键）
+                possible_bonds_dict[(i, j)] = possible_bonds
+    
+    # 第二步：全局优化，穷尽所有可能的键组合，找到稳定原子数最多的组合
+    # 使用递归回溯或动态规划来搜索所有可能的组合
+    def calculate_stability_score(bond_matrix):
+        """计算稳定性分数（稳定原子数）"""
+        edge_types = bond_matrix.clone()
+        edge_types[edge_types == 4] = 1.5
+        edge_types[edge_types < 0] = 0
+        valencies = torch.sum(edge_types, dim=-1).long()
+        
+        stable_count = 0
+        for i, (atom_type, valency, charge) in enumerate(zip(atom_types, valencies, charges if charges is not None else torch.zeros(n, dtype=torch.long))):
+            atom_type = atom_type.item()
+            valency = valency.item()
+            charge = charge.item()
+            possible_bonds_list = allowed_bonds[atom_decoder[atom_type]]
+            
+            if type(possible_bonds_list) == int:
+                is_stable = possible_bonds_list == valency
+            elif type(possible_bonds_list) == dict:
+                expected_bonds = possible_bonds_list.get(charge, possible_bonds_list.get(0))
+                if type(expected_bonds) == int:
+                    is_stable = expected_bonds == valency
+                else:
+                    is_stable = valency in expected_bonds
+            else:
+                is_stable = valency in possible_bonds_list
+            
+            if is_stable:
+                stable_count += 1
+        
+        return stable_count
+    
+    # 使用回溯算法搜索所有可能的键组合，找到稳定原子数最多的组合
+    # 为了效率，只对原子数较少的分子进行穷尽搜索，对于大分子使用改进的贪心算法
+    if n <= 12:  # 对于小分子，使用穷尽搜索（降低阈值以提高效率）
+        best_bond_matrix = None
+        best_stable_count = -1
+        
+        # 获取每个原子的最大价（用于剪枝）
+        max_valencies = []
+        for i in range(n):
+            atom_str = atom_decoder[atom_types[i].item()]
+            charge = charges[i].item() if charges is not None else 0
+            possible_bonds_list = allowed_bonds[atom_str]
+            if type(possible_bonds_list) == int:
+                max_val = possible_bonds_list
+            elif type(possible_bonds_list) == dict:
+                expected_bonds = possible_bonds_list.get(charge, possible_bonds_list.get(0))
+                if type(expected_bonds) == int:
+                    max_val = expected_bonds
+                else:
+                    max_val = max(expected_bonds) if expected_bonds else 4
+            else:
+                max_val = max(possible_bonds_list) if possible_bonds_list else 4
+            max_valencies.append(max_val)
+        
+        def backtrack(bond_matrix, pair_idx, pairs_list, used_valencies):
+            nonlocal best_bond_matrix, best_stable_count
+            
+            if pair_idx == len(pairs_list):
+                # 所有原子对都已处理，计算稳定性
+                stable_count = calculate_stability_score(bond_matrix)
+                if stable_count > best_stable_count:
+                    best_stable_count = stable_count
+                    best_bond_matrix = bond_matrix.clone()
+                return
+            
+            i, j = pairs_list[pair_idx]
+            possible_bonds = possible_bonds_dict.get((i, j), [])
+            
+            # 尝试无键
+            bond_matrix[i, j] = 0
+            bond_matrix[j, i] = 0
+            backtrack(bond_matrix, pair_idx + 1, pairs_list, used_valencies)
+            
+            # 尝试所有可能的键类型
+            for order, _, _ in possible_bonds:
+                # 剪枝：如果添加这个键会导致原子价超出范围，跳过
+                if used_valencies[i] + order > max_valencies[i] or used_valencies[j] + order > max_valencies[j]:
+                    continue
+                
+                bond_matrix[i, j] = order
+                bond_matrix[j, i] = order
+                used_valencies[i] += order
+                used_valencies[j] += order
+                backtrack(bond_matrix, pair_idx + 1, pairs_list, used_valencies)
+                # 回溯
+                used_valencies[i] -= order
+                used_valencies[j] -= order
+        
+        pairs_list = list(possible_bonds_dict.keys())
+        temp_bond_matrix = torch.zeros((n, n), dtype=torch.int, device=device)
+        used_valencies = [0] * n
+        backtrack(temp_bond_matrix, 0, pairs_list, used_valencies)
+        
+        if best_bond_matrix is not None:
+            E = best_bond_matrix
+            A = (E > 0)
+        else:
+            # 如果没有找到，使用贪心算法作为后备
+            E = temp_bond_matrix
+            A = (E > 0)
+    else:
+        # 对于大分子，使用迭代改进或贪心算法
+        if use_iterative_improvement:
+            # 使用迭代改进：从贪心解开始，逐步改进
+            # 第一步：使用贪心算法获得初始解
+            candidate_bonds = []
+            for (i, j), possible_bonds in possible_bonds_dict.items():
+                if possible_bonds:
+                    possible_bonds.sort(key=lambda x: x[2])  # 按相对偏差排序
+                    best_order, _, _ = possible_bonds[0]
+                    candidate_bonds.append((i, j, best_order))
+            
+            # 获取每个原子的最大价
+            max_valencies = []
+            for i in range(n):
+                atom_str = atom_decoder[atom_types[i].item()]
+                charge = charges[i].item() if charges is not None else 0
+                possible_bonds_list = allowed_bonds[atom_str]
+                if type(possible_bonds_list) == int:
+                    max_val = possible_bonds_list
+                elif type(possible_bonds_list) == dict:
+                    expected_bonds = possible_bonds_list.get(charge, possible_bonds_list.get(0))
+                    if type(expected_bonds) == int:
+                        max_val = expected_bonds
+                    else:
+                        max_val = max(expected_bonds) if expected_bonds else 4
+                else:
+                    max_val = max(possible_bonds_list) if possible_bonds_list else 4
+                max_valencies.append(max_val)
+            
+            # 按相对偏差排序候选键
+            candidate_bonds_with_dev = []
+            for i, j, order in candidate_bonds:
+                possible_bonds = possible_bonds_dict[(i, j)]
+                dev = next((d for o, _, d in possible_bonds if o == order), 1.0)
+                candidate_bonds_with_dev.append((i, j, order, dev))
+            candidate_bonds_with_dev.sort(key=lambda x: x[3])
+            
+            # 为每个原子跟踪已使用的价
+            used_valencies = [0] * n
+            
+            # 初始解：选择键，确保每个原子的总价不超过最大价
+            for i, j, order, _ in candidate_bonds_with_dev:
+                if used_valencies[i] + order <= max_valencies[i] and used_valencies[j] + order <= max_valencies[j]:
+                    E[i, j] = order
+                    E[j, i] = order
+                    A[i, j] = 1
+                    A[j, i] = 1
+                    used_valencies[i] += order
+                    used_valencies[j] += order
+            
+            # 第二步：迭代改进
+            # 计算稳定性分数的函数（返回稳定原子数）
+            def calculate_stability_score(bond_matrix):
+                edge_types = bond_matrix.clone()
+                edge_types[edge_types == 4] = 1.5
+                edge_types[edge_types < 0] = 0
+                valencies = torch.sum(edge_types, dim=-1).long()
+                
+                stable_count = 0
+                for i, (atom_type, valency, charge) in enumerate(zip(atom_types, valencies, charges if charges is not None else torch.zeros(n, dtype=torch.long))):
+                    atom_type = atom_type.item()
+                    valency = valency.item()
+                    charge = charge.item()
+                    possible_bonds_list = allowed_bonds[atom_decoder[atom_type]]
+                    
+                    if type(possible_bonds_list) == int:
+                        is_stable = possible_bonds_list == valency
+                    elif type(possible_bonds_list) == dict:
+                        expected_bonds = possible_bonds_list.get(charge, possible_bonds_list.get(0))
+                        if type(expected_bonds) == int:
+                            is_stable = expected_bonds == valency
+                        else:
+                            is_stable = valency in expected_bonds
+                    else:
+                        is_stable = valency in possible_bonds_list
+                    
+                    if is_stable:
+                        stable_count += 1
+                
+                return stable_count
+            
+            # 迭代改进循环
+            current_score = calculate_stability_score(E)
+            initial_score = current_score
+            
+            for iteration in range(max_iterations):
+                improved = False
+                
+                # 尝试改进每个可能的键
+                for (i, j), bonds in possible_bonds_dict.items():
+                    if i >= j:  # 只处理上三角
+                        continue
+                    
+                    if len(bonds) <= 1:
+                        continue  # 只有一个选择，无法改进
+                    
+                    # 尝试每个可能的键类型
+                    current_order = E[i, j].item()
+                    best_order = current_order
+                    best_score = current_score
+                    
+                    for order, _, _ in bonds:
+                        if order == current_order:
+                            continue
+                        
+                        # 检查原子价约束
+                        # 计算当前原子价（考虑所有键，包括当前键）
+                        edge_types = E.clone()
+                        edge_types[edge_types == 4] = 1.5
+                        edge_types[edge_types < 0] = 0
+                        current_val_i = torch.sum(edge_types[i]).long().item()
+                        current_val_j = torch.sum(edge_types[j]).long().item()
+                        
+                        # 计算改变键类型后的原子价
+                        # 注意：需要先减去当前键的贡献，再加上新键的贡献
+                        new_val_i = current_val_i - current_order + order
+                        new_val_j = current_val_j - current_order + order
+                        
+                        # 检查是否超出最大价
+                        if new_val_i > max_valencies[i] or new_val_j > max_valencies[j]:
+                            continue
+                        
+                        # 尝试这个键类型
+                        E[i, j] = order
+                        E[j, i] = order
+                        new_score = calculate_stability_score(E)
+                        
+                        if new_score > best_score:
+                            best_score = new_score
+                            best_order = order
+                            improved = True
+                        else:
+                            # 恢复原来的键类型
+                            E[i, j] = current_order
+                            E[j, i] = current_order
+                    
+                    # 应用最佳选择（如果改进了）
+                    if best_order != current_order:
+                        E[i, j] = best_order
+                        E[j, i] = best_order
+                        A[i, j] = (best_order > 0)
+                        A[j, i] = (best_order > 0)
+                        current_score = best_score
+                
+                if not improved:
+                    break  # 没有改进，收敛
+            
+            # 最终更新邻接矩阵
+            A = (E > 0)
+            
+            # 更新邻接矩阵
+            A = (E > 0)
+        else:
+            # 使用纯贪心算法（按相对偏差排序，选择最接近标准键长的键）
+            candidate_bonds = []
+            for (i, j), possible_bonds in possible_bonds_dict.items():
+                if possible_bonds:
+                    possible_bonds.sort(key=lambda x: x[2])  # 按相对偏差排序
+                    best_order, _, _ = possible_bonds[0]
+                    candidate_bonds.append((i, j, best_order))
+            
+            # 获取每个原子的最大价
+            max_valencies = []
+            for i in range(n):
+                atom_str = atom_decoder[atom_types[i].item()]
+                charge = charges[i].item() if charges is not None else 0
+                possible_bonds_list = allowed_bonds[atom_str]
+                if type(possible_bonds_list) == int:
+                    max_val = possible_bonds_list
+                elif type(possible_bonds_list) == dict:
+                    expected_bonds = possible_bonds_list.get(charge, possible_bonds_list.get(0))
+                    if type(expected_bonds) == int:
+                        max_val = expected_bonds
+                    else:
+                        max_val = max(expected_bonds) if expected_bonds else 4
+                else:
+                    max_val = max(possible_bonds_list) if possible_bonds_list else 4
+                max_valencies.append(max_val)
+            
+            # 按相对偏差排序候选键
+            candidate_bonds_with_dev = []
+            for i, j, order in candidate_bonds:
+                possible_bonds = possible_bonds_dict[(i, j)]
+                dev = next((d for o, _, d in possible_bonds if o == order), 1.0)
+                candidate_bonds_with_dev.append((i, j, order, dev))
+            candidate_bonds_with_dev.sort(key=lambda x: x[3])
+            
+            # 为每个原子跟踪已使用的价
+            used_valencies = [0] * n
+            
+            # 选择键，确保每个原子的总价不超过最大价
+            for i, j, order, _ in candidate_bonds_with_dev:
+                if used_valencies[i] + order <= max_valencies[i] and used_valencies[j] + order <= max_valencies[j]:
+                    E[i, j] = order
+                    E[j, i] = order
+                    A[i, j] = 1
+                    A[j, i] = 1
+                    used_valencies[i] += order
+                    used_valencies[j] += order
     
     return X, A, E
 
@@ -761,4 +1359,3 @@ def analyze_bonds(molecule_dir,
             'missing_bond_deviations': all_missing_bond_deviations_relaxed
         }
     }
-

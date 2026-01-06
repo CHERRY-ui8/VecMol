@@ -7,6 +7,10 @@ import torch
 from lightning.fabric.strategies import DDPStrategy
 # import tensorboard
 from torch.utils.tensorboard import SummaryWriter
+import subprocess
+import tempfile
+import shutil
+import numpy as np
 
 from funcmol.utils.constants import PADDING_INDEX
 
@@ -171,3 +175,163 @@ def convert_xyzs_to_sdf(path_xyzs: str, fname: str = None, delete: bool = True, 
     os.system(cmd)
     if delete:
         os.system(f"rm {path_xyzs}/*.xyz")
+
+
+def _check_obabel_available():
+    """
+    Check if obabel command is available in the system.
+    
+    Returns:
+        bool: True if obabel is available, False otherwise.
+    """
+    try:
+        result = subprocess.run(
+            ['which', 'obabel'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
+def _coords_types_to_xyz_string(coords, atom_types, ele_list):
+    """
+    Convert atomic coordinates and types to XYZ format string.
+    
+    Args:
+        coords: [N, 3] numpy array of atomic coordinates
+        atom_types: [N,] numpy array of atom type indices
+        ele_list: list of element symbols
+        
+    Returns:
+        str: XYZ format string
+    """
+    # Filter out padding atoms
+    valid_mask = (atom_types >= 0) & (atom_types < len(ele_list))
+    if not valid_mask.any():
+        return None
+    
+    coords = coords[valid_mask]
+    types = atom_types[valid_mask].astype(int)
+    
+    n_atoms = coords.shape[0]
+    xyz_lines = [str(n_atoms), ""]  # XYZ format: first line is atom count, second is blank
+    
+    for (x, y, z), t in zip(coords, types):
+        symbol = ele_list[int(t)]
+        xyz_lines.append(f"{symbol:>2s} {x:>15.10f} {y:>15.10f} {z:>15.10f}")
+    
+    return "\n".join(xyz_lines) + "\n"
+
+
+def add_bonds_with_openbabel(coords, atom_type, ele_list, fallback_to_xyz_to_sdf=None):
+    """
+    Use OpenBabel to add bonds to discrete atoms and generate SDF format string.
+    
+    This function takes atomic coordinates and types, creates a temporary XYZ file,
+    uses obabel command-line tool to convert XYZ to SDF (which automatically infers bonds),
+    and returns the SDF content as a string.
+    
+    Args:
+        coords: [N, 3] numpy array of atomic coordinates
+        atom_type: [N,] numpy array of atom type indices
+        ele_list: list of element symbols, e.g., ["C", "H", "O", "N", "F"]
+        fallback_to_xyz_to_sdf: Optional function to use as fallback if obabel is not available.
+                                Should have signature: (coords, atom_type, ele_list) -> str
+        
+    Returns:
+        str: SDF format string with bond information, or empty string if conversion fails.
+             If obabel is not available and fallback is provided, returns fallback result.
+    """
+    # Ensure numpy arrays
+    coords = np.asarray(coords)
+    types = np.asarray(atom_type)
+    
+    # Basic validation
+    if coords.ndim != 2 or coords.shape[1] != 3:
+        raise ValueError("coords must be a [N,3] array")
+    if types.ndim != 1 or types.shape[0] != coords.shape[0]:
+        raise ValueError("atom_type must be a 1-D array with same length as coords")
+    
+    # Check if obabel is available
+    if not _check_obabel_available():
+        if fallback_to_xyz_to_sdf is not None:
+            print("Warning: obabel not found, falling back to xyz_to_sdf (no bonds)")
+            return fallback_to_xyz_to_sdf(coords, types, ele_list)
+        else:
+            print("Warning: obabel not found and no fallback provided, returning empty string")
+            return ""
+    
+    # Create temporary directory for files
+    temp_dir = None
+    temp_xyz_path = None
+    temp_sdf_path = None
+    
+    try:
+        # Create temporary directory
+        temp_dir = tempfile.mkdtemp(prefix="obabel_")
+        temp_xyz_path = os.path.join(temp_dir, "temp_molecule.xyz")
+        temp_sdf_path = os.path.join(temp_dir, "temp_molecule.sdf")
+        
+        # Convert to XYZ format string
+        xyz_content = _coords_types_to_xyz_string(coords, types, ele_list)
+        if xyz_content is None:
+            if fallback_to_xyz_to_sdf is not None:
+                return fallback_to_xyz_to_sdf(coords, types, ele_list)
+            return ""
+        
+        # Write temporary XYZ file
+        with open(temp_xyz_path, 'w') as f:
+            f.write(xyz_content)
+        
+        # Call obabel to convert XYZ to SDF
+        cmd = ['obabel', '-ixyz', temp_xyz_path, '-osdf', '-O', temp_sdf_path]
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        if result.returncode != 0:
+            print(f"Warning: obabel conversion failed: {result.stderr}")
+            if fallback_to_xyz_to_sdf is not None:
+                return fallback_to_xyz_to_sdf(coords, types, ele_list)
+            return ""
+        
+        # Check if SDF file was created
+        if not os.path.exists(temp_sdf_path):
+            print("Warning: obabel did not create output SDF file")
+            if fallback_to_xyz_to_sdf is not None:
+                return fallback_to_xyz_to_sdf(coords, types, ele_list)
+            return ""
+        
+        # Read SDF content
+        with open(temp_sdf_path, 'r') as f:
+            sdf_content = f.read()
+        
+        # Ensure SDF ends with $$$$ terminator
+        if not sdf_content.strip().endswith("$$$$"):
+            sdf_content = sdf_content.rstrip() + "\n$$$$\n"
+        
+        return sdf_content
+        
+    except subprocess.TimeoutExpired:
+        print("Warning: obabel conversion timed out")
+        if fallback_to_xyz_to_sdf is not None:
+            return fallback_to_xyz_to_sdf(coords, types, ele_list)
+        return ""
+    except Exception as e:
+        print(f"Warning: Error in add_bonds_with_openbabel: {e}")
+        if fallback_to_xyz_to_sdf is not None:
+            return fallback_to_xyz_to_sdf(coords, types, ele_list)
+        return ""
+    finally:
+        # Clean up temporary files
+        if temp_dir and os.path.exists(temp_dir):
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception as e:
+                print(f"Warning: Failed to clean up temporary directory {temp_dir}: {e}")

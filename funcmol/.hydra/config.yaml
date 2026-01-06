@@ -19,13 +19,14 @@ dset:
   num_workers: 4
   batch_size: 32
   lr_enc: 0.0001
-  lr_dec: 0.0002
+  lr_dec: 0.001
 converter:
   sigma: 1
-  n_iter: 600
+  n_iter: 1000
   enable_early_stopping: false
   convergence_threshold: 1.0e-06
   min_iterations: 50
+  gradient_batch_size: 2000
   sigma_ratios:
     C: 0.9
     H: 1.3
@@ -38,13 +39,16 @@ converter:
   inverse_square_strength: 1.0
   gradient_clip_threshold: 0.3
   gradient_sampling_candidate_multiplier: 3
-  gradient_sampling_temperature: 0.1
+  field_variance_k_neighbors: 10
+  field_variance_weight: 0.01
+  sampling_range_min: -4.0
+  sampling_range_max: 4.0
   n_query_points_per_type:
-    C: 5000
-    H: 3000
-    O: 1200
-    'N': 1000
-    F: 800
+    C: 1500
+    H: 1500
+    O: 150
+    'N': 100
+    F: 100
   method_configs:
     gaussian_mag:
       n_query_points: 1000
@@ -55,11 +59,11 @@ converter:
       min_samples: 5
     tanh:
       n_query_points: 2000
-      step_size: 0.04
+      step_size: 0.05
       sig_sf: 0.1
       sig_mag: 2
       eps: 0.05
-      min_samples: 20
+      min_samples: 5
   default_config:
     n_query_points: 600
     step_size: 0.02
@@ -67,6 +71,20 @@ converter:
     sig_mag: 0.45
     eps: 0.15
     min_samples: 20
+  autoregressive_clustering:
+    enable: false
+    max_clustering_iterations: 10
+    initial_min_samples: 80
+    min_samples_decay_factor: 0.2
+    min_min_samples: 5
+    bond_length_tolerance: 2
+    bond_length_lower_tolerance: 0.5
+    n_initial_atoms_no_bond_check: 2
+    debug_bond_validation: true
+    enable_clustering_history: true
+    save_gradient_ascent_sdf: true
+    gradient_ascent_sdf_interval: 100
+    enable_timing: true
 encoder:
   _target_: funcmol.models.encoder.CrossGraphEncoder
   n_atom_types: 5
@@ -104,15 +122,21 @@ eval_every: 5
 use_ema: false
 lr_decay: false
 finetune_decoder:
-  enabled: false
+  enabled: true
   freeze_encoder: true
+  use_denoiser_for_codes: true
+  denoiser_checkpoint_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251225/lightning_logs/version_1/checkpoints
+  sample_near_atoms_only: true
+  atom_distance_threshold: 0.5
+  n_points: 300
+  use_cosine_loss: false
+  magnitude_loss_weight: 0.1
   code_augmentation:
-    enabled: true
+    enabled: false
     noise_std: 0.003
 code_augmentation:
   enabled: false
   noise_std: 0.01
 loss_weighting:
   enabled: true
-  atom_distance_weight: 1.0
   atom_distance_scale: 1.0

@@ -4,9 +4,14 @@ sys.path.append("..")
 # Standard libraries
 import os
 
+# Set GPU environment BEFORE importing torch (must be before any CUDA initialization)
+# TODO: set gpus based on server id
+os.environ['CUDA_VISIBLE_DEVICES'] = "2,3,4,5,6,7"
+# os.environ['CUDA_VISIBLE_DEVICES'] = "0,2,3,4,5"
+# os.environ['CUDA_VISIBLE_DEVICES'] = "0"
+
 # Data visualization and processing
 import matplotlib.pyplot as plt
-import numpy as np
     
 # PyTorch and related libraries
 import torch
@@ -22,13 +27,14 @@ from pytorch_lightning.strategies import DDPStrategy
 from omegaconf import OmegaConf
 import hydra
 
-from funcmol.utils.utils_nf import create_neural_field, load_checkpoint_state_nf
+from funcmol.utils.utils_nf import (
+    create_neural_field, 
+    load_checkpoint_state_nf,
+    compute_decoder_field_loss
+)
+from funcmol.utils.utils_fm import find_checkpoint_path
 from funcmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
-
-# TODO: set gpus based on server id
-os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3,4,5,6,7"
-# os.environ['CUDA_VISIBLE_DEVICES'] = "0,2,3,4,5"
-# os.environ['CUDA_VISIBLE_DEVICES'] = "0"
+from funcmol.models.funcmol import create_funcmol
 
 
 def plot_loss_curve(train_losses, val_losses, save_path, title_suffix=""):
@@ -84,6 +90,76 @@ class NeuralFieldLightningModule(pl.LightningModule):
         finetune_config = config.get("finetune_decoder", {})
         self.finetune_enabled = finetune_config.get("enabled", False)
         
+        # Option to use denoiser for generating codes instead of encoder
+        self.use_denoiser_for_codes = finetune_config.get("use_denoiser_for_codes", False)
+        self.denoiser = None
+        
+        # Configuration for use_denoiser_for_codes mode
+        if self.use_denoiser_for_codes:
+            self.sample_near_atoms_only = finetune_config.get("sample_near_atoms_only", True)
+            self.atom_distance_threshold = finetune_config.get("atom_distance_threshold", 0.5)
+            self.use_cosine_loss = finetune_config.get("use_cosine_loss", False)  # 默认使用MSE loss
+            self.magnitude_loss_weight = finetune_config.get("magnitude_loss_weight", 0.1)
+            self.n_points = finetune_config.get("n_points", None)  # If None, use dset.n_points
+            
+            print(f"use_denoiser_for_codes mode enabled:")
+            print(f"  - sample_near_atoms_only: {self.sample_near_atoms_only}")
+            print(f"  - atom_distance_threshold: {self.atom_distance_threshold}Å")
+            print(f"  - use_cosine_loss: {self.use_cosine_loss}")
+            if self.use_cosine_loss:
+                print(f"  - magnitude_loss_weight: {self.magnitude_loss_weight}")
+            if self.n_points is not None:
+                print(f"  - n_points: {self.n_points}")
+        
+        if self.use_denoiser_for_codes:
+            # Load denoiser model for code generation
+            denoiser_path = finetune_config.get("denoiser_checkpoint_path", None)
+            if denoiser_path is None:
+                raise ValueError("use_denoiser_for_codes=True requires denoiser_checkpoint_path to be specified")
+            
+            # Find checkpoint file if directory is provided
+            checkpoint_path = find_checkpoint_path(denoiser_path)
+            print(f">> Loading denoiser from: {checkpoint_path}")
+            checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+            
+            # Extract config from checkpoint (Lightning saves in hyper_parameters, may be nested under 'config')
+            hyper_params = checkpoint.get("hyper_parameters", {})
+            denoiser_config = hyper_params.get("config", hyper_params)
+            
+            # Convert OmegaConf to dict if needed
+            try:
+                if isinstance(denoiser_config, DictConfig):
+                    denoiser_config = OmegaConf.to_container(denoiser_config, resolve=True)
+            except:
+                pass
+            
+            # Ensure required keys exist (use current config as fallback, then defaults)
+            denoiser_config.setdefault("smooth_sigma", config.get("smooth_sigma", 0.0))
+            denoiser_config.setdefault("diffusion_method", config.get("diffusion_method", "new_x0"))
+            denoiser_config.setdefault("denoiser", config.get("denoiser", {}))
+            denoiser_config.setdefault("ddpm", config.get("ddpm", {"num_timesteps": 1000, "use_time_weight": True}))
+            denoiser_config.setdefault("decoder", config.get("decoder", {}))
+            denoiser_config.setdefault("dset", config.get("dset", {}))
+            
+            # Create denoiser model
+            self.denoiser = create_funcmol(denoiser_config)
+            
+            # Load denoiser state dict
+            if "funcmol_state_dict" in checkpoint:
+                state_dict = checkpoint["funcmol_state_dict"]
+            elif "state_dict" in checkpoint:
+                state_dict = {k[8:]: v for k, v in checkpoint["state_dict"].items() if k.startswith("funcmol.")}
+            else:
+                raise ValueError(f"Could not find funcmol_state_dict in checkpoint: {checkpoint_path}")
+            
+            # Handle _orig_mod. prefix if present (from torch.compile)
+            new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+            self.denoiser.load_state_dict(new_state_dict, strict=False)
+            self.denoiser.eval()
+            for param in self.denoiser.parameters():
+                param.requires_grad = False
+            print(f">> Denoiser loaded successfully. Will use final timestep denoised codes for decoder training.")
+        
         if self.finetune_enabled:
             # Freeze encoder parameters
             freeze_encoder = finetune_config.get("freeze_encoder", True)
@@ -127,6 +203,43 @@ class NeuralFieldLightningModule(pl.LightningModule):
             raise RuntimeError(error_msg)
     
     
+    def _get_denoised_code(self, x_0):
+        """
+        Get denoised code from the final timestep using denoiser.
+        
+        Args:
+            x_0: Ground truth codes [B, n_grid, code_dim]
+            
+        Returns:
+            denoised_code: [B, n_grid, code_dim] tensor containing denoised code from final timestep
+        """
+        from funcmol.models.ddpm import q_sample, p_sample_x0
+        
+        device = x_0.device
+        B = x_0.shape[0]
+        num_timesteps = self.denoiser.num_timesteps
+        diffusion_consts = self.denoiser.diffusion_consts
+        
+        # Use the final timestep (t = num_timesteps - 1)
+        t_val = num_timesteps - 1
+        t = torch.full((B,), t_val, device=device, dtype=torch.long)
+        
+        # Add noise to x_0 to get x_t
+        noise = torch.randn_like(x_0)
+        x_t = q_sample(x_0, t, diffusion_consts, noise)
+        
+        # Denoise using the model (predict x0)
+        if self.denoiser.diffusion_method == "new_x0":
+            # Model predicts x0 directly
+            with torch.no_grad():
+                predicted_x0 = self.denoiser.net(x_t, t)
+        else:
+            # For "new" method, we need to use p_sample_x0 to get denoised codes
+            with torch.no_grad():
+                predicted_x0 = p_sample_x0(self.denoiser.net, x_t, t, diffusion_consts, clip_denoised=False)
+        
+        return predicted_x0  # [B, n_grid, code_dim]
+    
     def forward(self, batch):
         """
         Forward pass through the neural field model
@@ -140,13 +253,23 @@ class NeuralFieldLightningModule(pl.LightningModule):
         # Get query points from batch and ensure they're on the correct device
         query_points = batch.xs
         
-        # Get codes from encoder
-        # In fine-tuning mode, encoder is in eval mode, so use torch.no_grad() for efficiency
-        if self.finetune_enabled:
+        # Get codes from encoder or denoiser
+        if self.use_denoiser_for_codes:
+            # Use denoiser to generate codes from ground truth codes (via encoder)
+            # First, get ground truth codes from encoder
             with torch.no_grad():
-                codes = self.enc(batch)
+                x_0 = self.enc(batch)  # [B, n_grid, code_dim]
+            
+            # Get denoised code from final timestep using denoiser
+            codes = self._get_denoised_code(x_0)  # [B, n_grid, code_dim]
         else:
-            codes = self.enc(batch)
+            # Get codes from encoder
+            # In fine-tuning mode, encoder is in eval mode, so use torch.no_grad() for efficiency
+            if self.finetune_enabled:
+                with torch.no_grad():
+                    codes = self.enc(batch)
+            else:
+                codes = self.enc(batch)
         
         # Apply code augmentation (Gaussian noise) during training only
         if self.training and self.code_aug_enabled:
@@ -156,9 +279,13 @@ class NeuralFieldLightningModule(pl.LightningModule):
         # Check and reshape query points if needed
         if query_points.dim() == 2:
             B = len(batch)
-            n_points = self.config["dset"]["n_points"]
+            # Use n_points from finetune config if available, otherwise use dset.n_points
+            if self.use_denoiser_for_codes and self.n_points is not None:
+                n_points = self.n_points
+            else:
+                n_points = self.config["dset"]["n_points"]
             query_points = query_points.view(B, n_points, 3)
-            
+        
         # Get predicted field from decoder
         pred_field = self.dec(query_points, codes)
         
@@ -205,14 +332,14 @@ class NeuralFieldLightningModule(pl.LightningModule):
             
             # Convert distance to weight: closer atoms = higher weight
             # Use exponential decay: weight = exp(-distance / scale)
-            weights = torch.exp(-min_distances / self.atom_distance_scale)
+            sample_weights = torch.exp(-min_distances / self.atom_distance_scale)
             
             # Normalize weights to have mean=1 (preserve overall loss scale)
-            weight_mean = weights.mean()
+            weight_mean = sample_weights.mean()
             if weight_mean > 0:
-                weights = weights / weight_mean
+                sample_weights = sample_weights / weight_mean
             
-            weights[b] = weights
+            weights[b] = sample_weights
         
         return weights
     
@@ -234,7 +361,11 @@ class NeuralFieldLightningModule(pl.LightningModule):
         
         # Get batch size and number of points
         B = len(batch)
-        n_points = self.config["dset"]["n_points"]
+        # Use n_points from finetune config if available, otherwise use dset.n_points
+        if self.use_denoiser_for_codes and self.n_points is not None:
+            n_points = self.n_points
+        else:
+            n_points = self.config["dset"]["n_points"]
         n_atom_types = self.config["dset"]["n_channels"]
         
         # Reshape target_field to [B, n_points, n_atom_types, 3]
@@ -263,17 +394,30 @@ class NeuralFieldLightningModule(pl.LightningModule):
         
         return pred_field, target_field
     
+    
     def training_step(self, batch, batch_idx):
         """Training step logic"""
         # Get predictions and targets
         pred_field, target_field = self._process_batch(batch)
         
-        # Calculate loss with optional weighting
-        if self.loss_weighting_enabled:
+        # Calculate loss
+        if self.use_denoiser_for_codes and self.use_cosine_loss:
+            # Use cosine distance + magnitude loss for denoiser-based training
+            loss = compute_decoder_field_loss(
+                pred_field,
+                target_field,
+                use_cosine_loss=True,
+                magnitude_loss_weight=self.magnitude_loss_weight
+            )
+        elif self.loss_weighting_enabled:
             # Get query points
             query_points = batch.xs
             B = len(batch)
-            n_points = self.config["dset"]["n_points"]
+            # Use n_points from finetune config if available, otherwise use dset.n_points
+            if self.use_denoiser_for_codes and self.n_points is not None:
+                n_points = self.n_points
+            else:
+                n_points = self.config["dset"]["n_points"]
             if query_points.dim() == 2:
                 query_points = query_points.view(B, n_points, 3)
             
@@ -320,12 +464,24 @@ class NeuralFieldLightningModule(pl.LightningModule):
         # Get predictions and targets
         pred_field, target_field = self._process_batch(batch)
         
-        # Calculate loss with optional weighting
-        if self.loss_weighting_enabled:
+        # Calculate loss
+        if self.use_denoiser_for_codes and self.use_cosine_loss:
+            # Use cosine distance + magnitude loss for denoiser-based training
+            loss = compute_decoder_field_loss(
+                pred_field,
+                target_field,
+                use_cosine_loss=True,
+                magnitude_loss_weight=self.magnitude_loss_weight
+            )
+        elif self.loss_weighting_enabled:
             # Get query points
             query_points = batch.xs
             B = len(batch)
-            n_points = self.config["dset"]["n_points"]
+            # Use n_points from finetune config if available, otherwise use dset.n_points
+            if self.use_denoiser_for_codes and self.n_points is not None:
+                n_points = self.n_points
+            else:
+                n_points = self.config["dset"]["n_points"]
             if query_points.dim() == 2:
                 query_points = query_points.view(B, n_points, 3)
             
@@ -363,6 +519,10 @@ class NeuralFieldLightningModule(pl.LightningModule):
             self.enc.train()
         self.dec.train()
         
+        # Keep denoiser in eval mode if used
+        if self.use_denoiser_for_codes and self.denoiser is not None:
+            self.denoiser.eval()
+        
         # Clean up GPU memory
         # if torch.cuda.is_available():
         #     torch.cuda.empty_cache()
@@ -375,6 +535,10 @@ class NeuralFieldLightningModule(pl.LightningModule):
         # Set models to evaluation mode
         self.enc.eval()
         self.dec.eval()
+        
+        # Keep denoiser in eval mode if used
+        if self.use_denoiser_for_codes and self.denoiser is not None:
+            self.denoiser.eval()
     
     def configure_optimizers(self):
         """Configure optimizers and learning rate schedulers"""
@@ -435,8 +599,26 @@ def main(config):
     num_gpus = torch.cuda.device_count()
     print(f"Available GPUs: {num_gpus}")
     
+    # Resolve config variables and convert to container for modification
+    config = OmegaConf.to_container(config, resolve=True)
+    
     # Setup GNF Converter for data processing
     data_gnf_converter = create_gnf_converter(config)
+    
+    # Check if use_denoiser_for_codes mode is enabled and update config for field loaders
+    finetune_config = config.get("finetune_decoder", {})
+    use_denoiser_for_codes = finetune_config.get("use_denoiser_for_codes", False)
+    
+    if use_denoiser_for_codes:
+        # Add sampling configuration to config for create_field_loaders
+        # This will be used by dataset_field.py to enable sample_near_atoms_only
+        if "joint_finetune" not in config:
+            config["joint_finetune"] = {}
+        config["joint_finetune"]["enabled"] = True  # Enable joint_finetune mode for sampling
+        config["joint_finetune"]["sample_near_atoms_only"] = finetune_config.get("sample_near_atoms_only", True)
+        config["joint_finetune"]["atom_distance_threshold"] = finetune_config.get("atom_distance_threshold", 0.5)
+        if "n_points" in finetune_config and finetune_config["n_points"] is not None:
+            config["joint_finetune"]["n_points"] = finetune_config["n_points"]
     
     # Create data loaders
     try:

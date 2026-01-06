@@ -31,65 +31,101 @@ class CodeDataset(Dataset):
         dset_name: str = "qm9",
         split: str = "train",
         codes_dir: str = None,
-        num_augmentations = None,  # 保留参数以兼容现有代码，但不再使用
+        num_augmentations = None,  # 数据增强数量，用于查找对应的LMDB文件
     ):
         self.dset_name = dset_name
         self.split = split
         self.codes_dir = os.path.join(codes_dir, self.split)
+        self.num_augmentations = num_augmentations
         
         # 检查是否存在position_weights文件
         self.position_weights = None
         self.use_position_weights = False
 
         # 检查是否存在LMDB数据库
-        lmdb_path = os.path.join(self.codes_dir, "codes.lmdb")
-        keys_path = os.path.join(self.codes_dir, "codes_keys.pt")
+        # 只有 train split 使用数据增强格式（codes_aug{num}.lmdb）
+        # val/test split 始终使用默认格式（codes.lmdb），不需要数据增强
+        if num_augmentations is not None and self.split == "train":
+            lmdb_path = os.path.join(self.codes_dir, f"codes_aug{num_augmentations}.lmdb")
+            keys_path = os.path.join(self.codes_dir, f"codes_aug{num_augmentations}_keys.pt")
+        else:
+            # val/test split 或未指定 num_augmentations 时，使用默认格式
+            lmdb_path = os.path.join(self.codes_dir, "codes.lmdb")
+            keys_path = os.path.join(self.codes_dir, "codes_keys.pt")
         
         if os.path.exists(lmdb_path) and os.path.exists(keys_path):
             # 使用LMDB数据库
             self._use_lmdb_database(lmdb_path, keys_path)
         else:
             # 检查是否有多个 codes 文件
+            # 查找 codes_aug{num}_XXX.pt 格式的文件
             list_codes = [
                 f for f in os.listdir(self.codes_dir)
                 if os.path.isfile(os.path.join(self.codes_dir, f)) and \
                 f.startswith("codes") and f.endswith(".pt")
             ]
             
+            # 如果提供了num_augmentations 且是 train split，查找对应格式的文件
+            if num_augmentations is not None and self.split == "train":
+                numbered_codes = [f for f in list_codes if f.startswith(f"codes_aug{num_augmentations}_") and f.endswith(".pt")]
+            else:
+                # 向后兼容：查找所有格式的codes文件
+                numbered_codes_aug = [f for f in list_codes if f.startswith("codes_aug") and f.endswith(".pt")]
+                numbered_codes_old = [f for f in list_codes if f.startswith("codes_") and f.endswith(".pt") and not f.startswith("codes_aug")]
+                single_code_old = ["codes.pt"] if "codes.pt" in list_codes else []
+                
+                if numbered_codes_aug:
+                    numbered_codes = numbered_codes_aug
+                elif numbered_codes_old:
+                    numbered_codes = numbered_codes_old
+                elif single_code_old:
+                    numbered_codes = single_code_old
+                else:
+                    numbered_codes = []
+            
             # 如果有多个文件，要求使用 LMDB 格式
-            if "codes.pt" in list_codes:
-                # 单个 codes.pt 文件，向后兼容
-                self.list_codes = ["codes.pt"]
+            if numbered_codes and len(numbered_codes) > 1:
+                # 多个文件，要求转换为 LMDB
+                # 尝试从文件名推断数据增强数量
+                inferred_num_aug = None
+                if numbered_codes[0].startswith("codes_aug"):
+                    # 从文件名中提取数据增强数量：codes_aug{num}_{idx}.pt
+                    try:
+                        prefix = numbered_codes[0].split("_")[1]  # 获取 "aug{num}" 部分
+                        inferred_num_aug = int(prefix.replace("aug", ""))
+                    except:
+                        pass
+                
+                if inferred_num_aug is not None:
+                    raise RuntimeError(
+                        f"Found {len(numbered_codes)} codes files. Multiple codes files require LMDB format.\n"
+                        f"Please convert to LMDB format first:\n"
+                        f"  python funcmol/dataset/convert_codes_to_lmdb.py --codes_dir {os.path.dirname(self.codes_dir)} --num_augmentations {inferred_num_aug} --splits {self.split}\n"
+                        f"Or ensure codes_aug{inferred_num_aug}.lmdb and codes_aug{inferred_num_aug}_keys.pt exist in: {self.codes_dir}"
+                    )
+                else:
+                    raise RuntimeError(
+                        f"Found {len(numbered_codes)} codes files. Multiple codes files require LMDB format.\n"
+                        f"Please convert to LMDB format first:\n"
+                        f"  python funcmol/dataset/convert_codes_to_lmdb.py --codes_dir {os.path.dirname(self.codes_dir)} --num_augmentations <num> --splits {self.split}\n"
+                        f"Or ensure codes_aug{{num}}.lmdb and codes_aug{{num}}_keys.pt exist in: {self.codes_dir}"
+                    )
+            elif numbered_codes and len(numbered_codes) == 1:
+                # 单个 codes 文件，向后兼容
+                self.list_codes = numbered_codes
                 self.num_augmentations = 0
                 self.use_lmdb = False
                 self.load_codes()
                 self._load_position_weights_files()
             else:
-                # 查找所有 codes_XXX.pt 文件
-                numbered_codes = [f for f in list_codes if f.startswith("codes_") and f.endswith(".pt")]
-                if numbered_codes and len(numbered_codes) > 1:
-                    # 多个文件，要求转换为 LMDB
-                    raise RuntimeError(
-                        f"Found {len(numbered_codes)} codes files. Multiple codes files require LMDB format.\n"
-                        f"Please convert to LMDB format first:\n"
-                        f"  python funcmol/dataset/convert_codes_to_lmdb.py --codes_dir {os.path.dirname(self.codes_dir)} --splits {self.split}\n"
-                        f"Or ensure codes.lmdb and codes_keys.pt exist in: {self.codes_dir}"
-                    )
-                elif numbered_codes and len(numbered_codes) == 1:
-                    # 单个 codes_XXX.pt 文件，向后兼容
-                    self.list_codes = numbered_codes
-                    self.num_augmentations = 0
-                    self.use_lmdb = False
-                    self.load_codes()
-                    self._load_position_weights_files()
-                else:
-                    # 没有找到 codes 文件
-                    raise FileNotFoundError(
-                        f"No codes files found in {self.codes_dir}.\n"
-                        f"Expected either:\n"
-                        f"  - codes.lmdb and codes_keys.pt (LMDB format), or\n"
-                        f"  - codes.pt or codes_XXX.pt (single file format)"
-                    )
+                # 没有找到 codes 文件
+                raise FileNotFoundError(
+                    f"No codes files found in {self.codes_dir}.\n"
+                    f"Expected either:\n"
+                    f"  - codes_aug{{num}}.lmdb and codes_aug{{num}}_keys.pt (LMDB format with augmentation), or\n"
+                    f"  - codes.lmdb and codes_keys.pt (LMDB format without augmentation, backward compatible), or\n"
+                    f"  - codes.pt, codes_XXX.pt, or codes_aug{{num}}_XXX.pt (single file format)"
+                )
 
     def _use_lmdb_database(self, lmdb_path, keys_path):
         """使用LMDB数据库加载数据"""
@@ -102,19 +138,55 @@ class CodeDataset(Dataset):
         print(f"  | Database contains {len(self.keys)} codes")
         
         # 检查是否存在position_weights文件（LMDB格式）
-        weights_lmdb_path = os.path.join(os.path.dirname(lmdb_path), "position_weights.lmdb")
-        weights_keys_path = os.path.join(os.path.dirname(lmdb_path), "position_weights_keys.pt")
-        if os.path.exists(weights_lmdb_path) and os.path.exists(weights_keys_path):
-            self.position_weights_lmdb_path = weights_lmdb_path
-            self.position_weights_keys_path = weights_keys_path
-            self.position_weights_keys = torch.load(weights_keys_path, weights_only=False)
-            self.position_weights_db = None
-            self.use_position_weights = True
-            print(f"  | Found position_weights LMDB database: {weights_lmdb_path}")
-            print(f"  | Position weights database contains {len(self.position_weights_keys)} entries")
+        # 只有 train split 使用数据增强格式（position_weights_aug{num}.lmdb）
+        # val/test split 使用默认格式（position_weights.lmdb 或 position_weights_v2.lmdb）
+        dirname = os.path.dirname(lmdb_path)
+        
+        # 如果提供了num_augmentations 且是 train split，使用新格式：position_weights_aug{num}.lmdb
+        if self.num_augmentations is not None and self.split == "train":
+            weights_lmdb_path = os.path.join(dirname, f"position_weights_aug{self.num_augmentations}.lmdb")
+            weights_keys_path = os.path.join(dirname, f"position_weights_aug{self.num_augmentations}_keys.pt")
+            
+            if os.path.exists(weights_lmdb_path) and os.path.exists(weights_keys_path):
+                self.position_weights_lmdb_path = weights_lmdb_path
+                self.position_weights_keys_path = weights_keys_path
+                self.position_weights_keys = torch.load(weights_keys_path, weights_only=False)
+                self.position_weights_db = None
+                self.use_position_weights = True
+                print(f"  | Found position_weights_aug{self.num_augmentations} LMDB database: {weights_lmdb_path}")
+                print(f"  | Position weights database contains {len(self.position_weights_keys)} entries")
+            else:
+                # 如果找不到对应版本，检查是否存在position_weights文件（文件格式）
+                print(f"  | Position weights LMDB not found for aug{self.num_augmentations}, trying file format...")
+                self._load_position_weights_files()
         else:
-            # 检查是否存在position_weights文件（文件格式）
-            self._load_position_weights_files()
+            # 向后兼容：尝试旧格式（position_weights_v2.lmdb 和 position_weights.lmdb）
+            weights_lmdb_path_v2 = os.path.join(dirname, "position_weights_v2.lmdb")
+            weights_keys_path_v2 = os.path.join(dirname, "position_weights_v2_keys.pt")
+            weights_lmdb_path_old = os.path.join(dirname, "position_weights.lmdb")
+            weights_keys_path_old = os.path.join(dirname, "position_weights_keys.pt")
+            
+            # 优先检查新格式
+            if os.path.exists(weights_lmdb_path_v2) and os.path.exists(weights_keys_path_v2):
+                self.position_weights_lmdb_path = weights_lmdb_path_v2
+                self.position_weights_keys_path = weights_keys_path_v2
+                self.position_weights_keys = torch.load(weights_keys_path_v2, weights_only=False)
+                self.position_weights_db = None
+                self.use_position_weights = True
+                print(f"  | Found position_weights_v2 LMDB database: {weights_lmdb_path_v2}")
+                print(f"  | Position weights database contains {len(self.position_weights_keys)} entries")
+            elif os.path.exists(weights_lmdb_path_old) and os.path.exists(weights_keys_path_old):
+                # 回退到旧格式
+                self.position_weights_lmdb_path = weights_lmdb_path_old
+                self.position_weights_keys_path = weights_keys_path_old
+                self.position_weights_keys = torch.load(weights_keys_path_old, weights_only=False)
+                self.position_weights_db = None
+                self.use_position_weights = True
+                print(f"  | Found position_weights LMDB database: {weights_lmdb_path_old}")
+                print(f"  | Position weights database contains {len(self.position_weights_keys)} entries")
+            else:
+                # 检查是否存在position_weights文件（文件格式）
+                self._load_position_weights_files()
     
     def _connect_db(self):
         """建立只读数据库连接 - 进程安全版本"""
@@ -217,8 +289,14 @@ class CodeDataset(Dataset):
         
         if list_weights:
             # 如果有多个position_weights文件（对应多个augmentation版本），需要合并
-            # 按照augmentation顺序合并：position_weights_000.pt, position_weights_001.pt, ...
-            numbered_weights = [f for f in list_weights if f.startswith("position_weights_") and f.endswith(".pt")]
+            # NOTE：现在使用新格式：position_weights_v2_000.pt, position_weights_v2_001.pt, ...
+            # 如果没有新格式，则使用旧格式：position_weights_000.pt, position_weights_001.pt, ...
+            numbered_weights_v2 = [f for f in list_weights if f.startswith("position_weights_v2_") and f.endswith(".pt")]
+            numbered_weights_old = [f for f in list_weights if f.startswith("position_weights_") and f.endswith(".pt") and not f.startswith("position_weights_v2_")]
+            
+            # 优先使用新格式（v2），如果没有则使用旧格式
+            numbered_weights = numbered_weights_v2 if numbered_weights_v2 else numbered_weights_old
+            
             if numbered_weights:
                 numbered_weights.sort()  # 按编号排序
                 print(f"  | Found {len(numbered_weights)} position_weights files (augmentation versions)")
@@ -353,11 +431,63 @@ def create_code_loaders(
     Returns:
         DataLoader: A PyTorch DataLoader object for the specified dataset split.
     """
+    # 获取数据增强数量
+    # 只有 train split 使用数据增强，val/test split 不使用数据增强
+    # 因此 val/test split 的 num_augmentations 始终为 None，使用默认的 codes.lmdb 格式
+    if split == "train":
+        # train split：优先使用配置中明确指定的 num_augmentations
+        num_augmentations = config.get("num_augmentations", None)
+        
+        # 如果未提供num_augmentations，尝试从codes目录的文件名推断
+        if num_augmentations is None and config.get("codes_dir") is not None:
+            split_dir = os.path.join(config["codes_dir"], split)
+            if os.path.exists(split_dir):
+                # 首先尝试查找 LMDB 文件：codes_aug{num}.lmdb
+                list_lmdb = [
+                    f for f in os.listdir(split_dir)
+                    if os.path.isfile(os.path.join(split_dir, f)) and \
+                    f.startswith("codes_aug") and f.endswith(".lmdb")
+                ]
+                if list_lmdb:
+                    # 从LMDB文件名中提取数据增强数量：codes_aug{num}.lmdb
+                    try:
+                        first_lmdb = sorted(list_lmdb)[0]
+                        # 提取 "aug{num}" 部分
+                        parts = first_lmdb.replace(".lmdb", "").split("_")
+                        if len(parts) >= 2 and parts[1].startswith("aug"):
+                            num_augmentations = int(parts[1].replace("aug", ""))
+                            print(f">> Inferred num_augmentations={num_augmentations} from LMDB file: {first_lmdb}")
+                    except Exception:
+                        pass
+                
+                # 如果还没找到，尝试查找 codes_aug{num}_*.pt 格式的文件
+                if num_augmentations is None:
+                    list_codes = [
+                        f for f in os.listdir(split_dir)
+                        if os.path.isfile(os.path.join(split_dir, f)) and \
+                        f.startswith("codes_aug") and f.endswith(".pt")
+                    ]
+                    if list_codes:
+                        # 从第一个文件名中提取数据增强数量：codes_aug{num}_{idx}.pt
+                        try:
+                            first_file = sorted(list_codes)[0]
+                            # 提取 "aug{num}" 部分
+                            parts = first_file.split("_")
+                            if len(parts) >= 2 and parts[1].startswith("aug"):
+                                num_augmentations = int(parts[1].replace("aug", ""))
+                                print(f">> Inferred num_augmentations={num_augmentations} from codes files in {split_dir}")
+                        except Exception:
+                            pass
+    else:
+        # val/test split：不使用数据增强，num_augmentations 为 None
+        num_augmentations = None
+        print(f">> {split} split: using default codes.lmdb format (no augmentation)")
+    
     dset = CodeDataset(
         dset_name=config["dset"]["dset_name"],
         codes_dir=config["codes_dir"],
         split=split,
-        num_augmentations=config.get("num_augmentations", None),
+        num_augmentations=num_augmentations,
     )
 
     # reduce the dataset size for debugging

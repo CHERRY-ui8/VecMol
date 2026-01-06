@@ -59,6 +59,8 @@ class FieldDataset(Dataset):
         cubes_around: int = 3,
         debug_one_mol: bool = False,
         debug_subset: bool = False,
+        sample_near_atoms_only: bool = False,  # 是否只采样原子附近的点（用于joint fine-tuning）
+        atom_distance_threshold: float = 0.5,  # 只采样距离原子多少Å内的点（单位：Å）
     ):
         if elements is None:
             elements = ELEMENTS_HASH
@@ -88,6 +90,8 @@ class FieldDataset(Dataset):
         ) * self.resolution  # Scale by resolution to get real distances
         
         self.targeted_sampling_ratio = targeted_sampling_ratio if split == "train" else 0
+        self.sample_near_atoms_only = sample_near_atoms_only
+        self.atom_distance_threshold = atom_distance_threshold
         
         # 根据数据加载方式设置field_idxs
         if hasattr(self, 'use_lmdb') and self.use_lmdb:
@@ -346,38 +350,57 @@ class FieldDataset(Dataset):
         grid_size = len(self.full_grid_high_res) # grid_dim**3
 
         if self.targeted_sampling_ratio >= 1:
-            # 1. 目标采样：原子周围的点
-            # 注意：coords 现在保持原始坐标，不再进行缩放
-            # coords 的范围是真实的埃单位
-            rand_points = coords
-            # 添加小的噪声，噪声大小应该与网格分辨率相关
-            noise = torch.randn_like(rand_points, device=device) * self.resolution / 4  # Scale noise by resolution
-            rand_points = (rand_points + noise)  # .floor().long() NOTE：如果这里floor()再long()，会全部变成-1,0,1
-            
-            # 计算每个原子周围需要采样的点数
-            points_per_atom = max(1, (self.n_points // coords.size(0)) // self.targeted_sampling_ratio)
-            random_indices = torch.randperm(self.increments.size(0), device=device)[:points_per_atom]
-            
-            # 在原子周围采样
-            rand_points = (rand_points.unsqueeze(1) + self.increments[random_indices].to(device)).view(-1, 3)
-            # Calculate bounds based on real-world distances
-            total_span = (self.grid_dim - 1) * self.resolution
-            half_span = total_span / 2
-            min_bound = -half_span
-            max_bound = half_span
-            rand_points = torch.clamp(rand_points, min_bound, max_bound).float()
-            
-            # 2. 随机采样网格点
-            grid_indices = torch.randperm(grid_size, device=device)[:self.n_points]
-            grid_points = self.full_grid_high_res[grid_indices].to(device)
-            
-            # 3. 合并并去重
-            all_points = torch.cat([rand_points, grid_points], dim=0)
-            unique_points = torch.unique(all_points, dim=0)
-            
-            # 4. 随机选择所需数量的点
-            indices = torch.randperm(unique_points.size(0), device=device)[:self.n_points]
-            return unique_points[indices]
+            if self.sample_near_atoms_only:
+                # 只采样原子附近的点：在阈值范围内，使用向量化球体均匀采样
+                n_points = self.n_points
+                num_atoms = coords.size(0)
+                
+                # 1. 随机选择基准原子索引（一次性生成所有索引）
+                atom_indices = torch.randint(0, num_atoms, (n_points,), device=device)
+                atom_centers = coords[atom_indices]  # [n_points, 3]
+                
+                # 2. 生成均匀分布的球内随机偏移
+                vec = torch.randn(n_points, 3, device=device)
+                direction = vec / (torch.norm(vec, dim=-1, keepdim=True) + 1e-8)  # [n_points, 3]
+                r = torch.rand(n_points, 1, device=device).pow(1.0/3.0) * self.atom_distance_threshold
+                offsets = direction * r  # [n_points, 3]
+                
+                # 3. 相加得到最终坐标
+                return atom_centers + offsets  # [n_points, 3]
+            else:
+                # 原有的采样逻辑：使用increments在原子周围采样，然后合并网格点
+                # 1. 目标采样：原子周围的点
+                # 注意：coords 现在保持原始坐标，不再进行缩放
+                # coords 的范围是真实的埃单位
+                rand_points = coords
+                # 添加小的噪声，噪声大小应该与网格分辨率相关
+                noise = torch.randn_like(rand_points, device=device) * self.resolution / 4  # Scale noise by resolution
+                rand_points = (rand_points + noise)  # .floor().long() NOTE：如果这里floor()再long()，会全部变成-1,0,1
+                
+                # 计算每个原子周围需要采样的点数
+                points_per_atom = max(1, (self.n_points // coords.size(0)) // self.targeted_sampling_ratio)
+                random_indices = torch.randperm(self.increments.size(0), device=device)[:points_per_atom]
+                
+                # 在原子周围采样
+                rand_points = (rand_points.unsqueeze(1) + self.increments[random_indices].to(device)).view(-1, 3)
+                # Calculate bounds based on real-world distances
+                total_span = (self.grid_dim - 1) * self.resolution
+                half_span = total_span / 2
+                min_bound = -half_span
+                max_bound = half_span
+                rand_points = torch.clamp(rand_points, min_bound, max_bound).float()
+                
+                # 2. 随机采样网格点
+                grid_indices = torch.randperm(grid_size, device=device)[:self.n_points]
+                grid_points = self.full_grid_high_res[grid_indices].to(device)
+                
+                # 3. 合并并去重
+                all_points = torch.cat([rand_points, grid_points], dim=0)
+                unique_points = torch.unique(all_points, dim=0)
+                
+                # 4. 随机选择所需数量的点
+                indices = torch.randperm(unique_points.size(0), device=device)[:self.n_points]
+                return unique_points[indices]
         
         else:
             # raise NotImplementedError("Targeted sampling ratio < 1 is not implemented") 
@@ -538,13 +561,23 @@ def create_field_loaders(
         DataLoader: Configured DataLoader for the specified dataset split.
     """
 
+    # 检查是否启用joint fine-tuning的"只采样原子附近"模式
+    joint_finetune_config = config.get("joint_finetune", {})
+    sample_near_atoms_only = joint_finetune_config.get("enabled", False) and joint_finetune_config.get("sample_near_atoms_only", False)
+    atom_distance_threshold = joint_finetune_config.get("atom_distance_threshold", 0.5)
+    
+    # 如果joint fine-tuning启用且指定了n_points，则使用指定的值，否则使用默认的dset.n_points
+    n_points = config["dset"]["n_points"]
+    if joint_finetune_config.get("enabled", False) and "n_points" in joint_finetune_config:
+        n_points = joint_finetune_config["n_points"]
+    
     dset = FieldDataset(
         gnf_converter=gnf_converter,  # 传入GNFConverter实例
         dset_name=config["dset"]["dset_name"],
         data_dir=config["dset"]["data_dir"],
         elements=config["dset"]["elements"],
         split=split,
-        n_points=config["dset"]["n_points"],
+        n_points=n_points,  # 使用计算后的n_points
         rotate=config["dset"]["data_aug"] if split == "train" else False,
         resolution=config["dset"]["resolution"],
         grid_dim=config["dset"]["grid_dim"],
@@ -552,6 +585,8 @@ def create_field_loaders(
         sample_full_grid=sample_full_grid,
         debug_one_mol=config.get("debug_one_mol", False),
         debug_subset=config.get("debug_subset", False),
+        sample_near_atoms_only=sample_near_atoms_only,
+        atom_distance_threshold=atom_distance_threshold,
     )
 
     if config.get("debug_one_mol", False):

@@ -109,6 +109,9 @@ def check_stability(molecule, dataset_info, debug=False, atom_decoder=None, smil
 
     n_stable_bonds = 0
     mol_stable = True
+    # #region agent log
+    import json; log_data = {"sessionId": "debug-session", "runId": "run1", "hypothesisId": "A", "location": "rdkit_functions.py:111", "message": "check_stability entry", "data": {"num_atoms": len(atom_types), "mol_stable_initial": mol_stable}, "timestamp": int(__import__("time").time() * 1000)}; open("/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+    # #endregion
     for i, (atom_type, valency, charge) in enumerate(zip(atom_types, valencies, molecule.charges)):
         atom_type = atom_type.item()
         valency = valency.item()
@@ -121,16 +124,28 @@ def check_stability(molecule, dataset_info, debug=False, atom_decoder=None, smil
             is_stable = expected_bonds == valency if type(expected_bonds) == int else valency in expected_bonds
         else:
             is_stable = valency in possible_bonds
+        # #region agent log
+        log_data = {"sessionId": "debug-session", "runId": "run1", "hypothesisId": "B", "location": "rdkit_functions.py:124", "message": "atom stability check", "data": {"atom_idx": i, "atom_type": atom_decoder[atom_type], "valency": valency, "charge": charge, "is_stable": is_stable, "mol_stable_before": mol_stable}, "timestamp": int(__import__("time").time() * 1000)}; open("/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
         if not is_stable:
             mol_stable = False
+            # #region agent log
+            log_data = {"sessionId": "debug-session", "runId": "run1", "hypothesisId": "B", "location": "rdkit_functions.py:126", "message": "mol_stable set to False", "data": {"atom_idx": i, "mol_stable_after": mol_stable}, "timestamp": int(__import__("time").time() * 1000)}; open("/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+            # #endregion
         if not is_stable and debug:
             if smiles is not None:
                 print(smiles)
             print(f"Invalid atom {atom_decoder[atom_type]}: valency={valency}, charge={charge}")
             print()
         n_stable_bonds += int(is_stable)
-
-    return torch.tensor([mol_stable], dtype=torch.float, device=device),\
+    # #region agent log
+    log_data = {"sessionId": "debug-session", "runId": "run1", "hypothesisId": "A", "location": "rdkit_functions.py:133", "message": "check_stability before return", "data": {"mol_stable": mol_stable, "mol_stable_type": str(type(mol_stable)), "n_stable_bonds": n_stable_bonds}, "timestamp": int(__import__("time").time() * 1000)}; open("/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+    # #endregion
+    result_tensor = torch.tensor([mol_stable], dtype=torch.float, device=device)
+    # #region agent log
+    log_data = {"sessionId": "debug-session", "runId": "run1", "hypothesisId": "E", "location": "rdkit_functions.py:136", "message": "tensor created", "data": {"mol_stable_bool": mol_stable, "tensor_value": result_tensor.item(), "tensor_dtype": str(result_tensor.dtype)}, "timestamp": int(__import__("time").time() * 1000)}; open("/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+    # #endregion
+    return result_tensor,\
            torch.tensor([n_stable_bonds], dtype=torch.float, device=device),\
            len(atom_types)
 

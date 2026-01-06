@@ -276,31 +276,11 @@ def main(config):
     weight_alpha = position_weight_config.get("alpha", 0.5)
     grid_size = config.get("dset", {}).get("grid_size", 9)
 
-    # check if codes already exist (检查所有增强版本的文件)
-    all_codes_exist = True
-    all_weights_exist = True
-    for aug_idx in range(num_augmentations):
-        codes_file_path = os.path.join(config["dirname"], f"codes_{aug_idx:03d}.pt")
-        if not os.path.exists(codes_file_path):
-            all_codes_exist = False
-            break
-        
-        # 如果启用了position_weight计算，也检查weights文件
-        if compute_position_weights_flag:
-            weights_file_path = os.path.join(config["dirname"], f"position_weights_{aug_idx:03d}.pt")
-            if not os.path.exists(weights_file_path):
-                all_weights_exist = False
-    
-    if all_codes_exist:
-        if compute_position_weights_flag and not all_weights_exist:
-            print(f">> codes files exist but position_weights files are missing")
-            print(f">> will recompute codes to generate position_weights")
-        else:
-            print(f">> all codes files already exist in {config['dirname']}")
-            if compute_position_weights_flag:
-                print(f">> all position_weights files also exist")
-            print(">> skipping code inference")
-            return
+    # 每次运行都重新生成所有 codes 文件
+    # 使用根据数据增强数量命名的文件名（codes_aug{num}_XXX.pt），避免覆盖不同版本的文件
+    print(f">> Using augmentation-based naming for codes files (codes_aug{num_augmentations}_XXX.pt)")
+    print(f">> Will generate all {num_augmentations} codes files (regenerating all files)")
+    indices_to_generate = list(range(num_augmentations))
     
     if use_data_augmentation:
         print(">> Data augmentation enabled:")
@@ -336,8 +316,8 @@ def main(config):
         for batch in tqdm(loader):
             batch = batch.to(device)
             
-            # 对每个batch，生成多个增强版本并infer codes
-            for aug_idx in range(num_augmentations):
+            # 对每个batch，生成所有增强版本并infer codes
+            for aug_idx in indices_to_generate:
                 if aug_idx == 0:
                     # 第一个版本：原始版本（不增强）
                     augmented_batch = batch
@@ -381,7 +361,7 @@ def main(config):
                 
                 # 保存position_weights（如果计算了）
                 if position_weights_batch is not None:
-                    temp_weights_file = os.path.join(temp_dir, f"position_weights_{aug_idx:03d}_batch_{batch_idx:06d}.pt")
+                    temp_weights_file = os.path.join(temp_dir, f"position_weights_aug{num_augmentations}_{aug_idx:03d}_batch_{batch_idx:06d}.pt")
                     torch.save(position_weights_batch, temp_weights_file)
                     del position_weights_batch  # 立即释放内存
             
@@ -392,10 +372,11 @@ def main(config):
                 torch.cuda.empty_cache()
         
         # 合并所有batch的codes文件（使用增量合并避免内存溢出）
+        # 只合并缺失的文件
         print(f">> merging batch files to final codes files...")
         merge_batch_size = 10  # 每次合并的batch数量，避免一次性加载太多
         
-        for aug_idx in range(num_augmentations):
+        for aug_idx in indices_to_generate:
             # 获取该增强版本的所有batch文件
             batch_files = sorted([
                 os.path.join(temp_dir, f)
@@ -406,7 +387,7 @@ def main(config):
             if not batch_files:
                 continue
             
-            codes_file_path = os.path.join(config["dirname"], f"codes_{aug_idx:03d}.pt")
+            codes_file_path = os.path.join(config["dirname"], f"codes_aug{num_augmentations}_{aug_idx:03d}.pt")
             
             # 分块合并：每次合并merge_batch_size个batch
             merged_codes_list = []
@@ -435,7 +416,7 @@ def main(config):
             if merged_codes_list:
                 final_codes = torch.cat(merged_codes_list, dim=0)
                 torch.save(final_codes, codes_file_path)
-                print(f"   - saved codes_{aug_idx:03d}.pt: shape {final_codes.shape}")
+                print(f"   - saved codes_aug{num_augmentations}_{aug_idx:03d}.pt: shape {final_codes.shape}")
                 del final_codes, merged_codes_list
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -445,11 +426,11 @@ def main(config):
                 weights_batch_files = sorted([
                     os.path.join(temp_dir, f)
                     for f in os.listdir(temp_dir)
-                    if f.startswith(f"position_weights_{aug_idx:03d}_batch_") and f.endswith(".pt")
+                    if f.startswith(f"position_weights_aug{num_augmentations}_{aug_idx:03d}_batch_") and f.endswith(".pt")
                 ])
                 
                 if weights_batch_files:
-                    weights_file_path = os.path.join(config["dirname"], f"position_weights_{aug_idx:03d}.pt")
+                    weights_file_path = os.path.join(config["dirname"], f"position_weights_aug{num_augmentations}_{aug_idx:03d}.pt")
                     
                     # 分块合并position_weights
                     merged_weights_list = []
@@ -475,7 +456,7 @@ def main(config):
                     if merged_weights_list:
                         final_weights = torch.cat(merged_weights_list, dim=0)
                         torch.save(final_weights, weights_file_path)
-                        print(f"   - saved position_weights_{aug_idx:03d}.pt: shape {final_weights.shape}")
+                        print(f"   - saved position_weights_aug{num_augmentations}_{aug_idx:03d}.pt: shape {final_weights.shape}")
                         del final_weights, merged_weights_list
                         if torch.cuda.is_available():
                             torch.cuda.empty_cache()

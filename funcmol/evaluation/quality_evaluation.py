@@ -15,6 +15,7 @@ from rdkit import Chem
 from funcmol.analysis.rdkit_functions import Molecule, check_stability
 from funcmol.evaluation.utils_evaluation import atom_decoder_dict
 from funcmol.evaluation.bond_evaluation import build_xae_molecule
+import re
 
 
 class SimpleSamplingMetrics:
@@ -173,12 +174,68 @@ class SimpleSamplingMetrics:
                 print(f'All smiles saved on rank {local_rank}')
 
 
-def load_molecules_from_npz(molecule_dir):
+def _extract_bonds_from_sdf(sdf_string, n_atoms):
+    """
+    从 SDF 字符串中提取键信息并转换为键类型矩阵
+    
+    Args:
+        sdf_string: SDF 格式字符串
+        n_atoms: 原子数量
+        
+    Returns:
+        torch.Tensor: 键类型矩阵 [N, N]，0=无键，1=单键，2=双键，3=三键
+    """
+    
+    if not sdf_string or not sdf_string.strip():
+        return torch.zeros((n_atoms, n_atoms), dtype=torch.long)
+    
+    try:
+        # 从 SDF 字符串创建 RDKit 分子
+        mol = Chem.MolFromMolBlock(sdf_string, sanitize=False)
+        if mol is None:
+            return torch.zeros((n_atoms, n_atoms), dtype=torch.long)
+        
+        # 创建键类型矩阵
+        bond_types = torch.zeros((n_atoms, n_atoms), dtype=torch.long)
+        
+        # 遍历所有键
+        for bond in mol.GetBonds():
+            i = bond.GetBeginAtomIdx()
+            j = bond.GetEndAtomIdx()
+            bond_type = bond.GetBondType()
+            
+            # 转换 RDKit 键类型到我们的编码
+            if bond_type == Chem.rdchem.BondType.SINGLE:
+                order = 1
+            elif bond_type == Chem.rdchem.BondType.DOUBLE:
+                order = 2
+            elif bond_type == Chem.rdchem.BondType.TRIPLE:
+                order = 3
+            elif bond_type == Chem.rdchem.BondType.AROMATIC:
+                order = 1  # 芳香键通常视为单键
+            else:
+                order = 1  # 默认单键
+            
+            # 确保索引在范围内
+            if i < n_atoms and j < n_atoms:
+                bond_types[i, j] = order
+                bond_types[j, i] = order
+        
+        return bond_types
+    except Exception as e:
+        print(f"Warning: Failed to extract bonds from SDF: {e}")
+        return torch.zeros((n_atoms, n_atoms), dtype=torch.long)
+
+
+def load_molecules_from_npz(molecule_dir, use_sdf_bonds=True):
     """
     从 .npz 文件加载分子对象
     
     Args:
         molecule_dir: 包含 .npz 文件的目录路径
+        use_sdf_bonds: 是否优先使用 SDF 文件中的键信息（默认 True）
+                      - True: 如果存在对应的 SDF 文件，直接使用其中的键信息
+                      - False: 使用自定义的距离方法推断键
         
     Returns:
         list: Molecule 对象列表
@@ -190,6 +247,8 @@ def load_molecules_from_npz(molecule_dir):
     
     atom_decoder = atom_decoder_dict['qm9_with_h']
     molecules = []
+    sdf_count = 0
+    fallback_count = 0
     
     for npz_file in tqdm(npz_files, desc="加载分子文件"):
         try:
@@ -210,17 +269,51 @@ def load_molecules_from_npz(molecule_dir):
             positions = positions[valid_mask]
             atom_types = atom_types[valid_mask]
             
-            # 构建键类型矩阵
-            dataset_info = {'name': 'qm9'}
-            _, _, bond_types = build_xae_molecule(
-                positions=positions,
-                atom_types=atom_types,
-                dataset_info=dataset_info,
-                atom_decoder=atom_decoder
-            )
-            
             # 创建零电荷
             charges = torch.zeros_like(atom_types)
+            
+            # 构建键类型矩阵
+            bond_types = None
+            
+            # 优先尝试从 SDF 文件读取键信息
+            if use_sdf_bonds:
+                # 从 NPZ 文件名提取索引，找到对应的 SDF 文件
+                # generated_XXXX_tanh.npz -> genmol_XXXX.sdf
+                npz_stem = npz_file.stem  # generated_XXXX_tanh
+                # 提取数字部分
+                match = re.search(r'generated_(\d+)_tanh', npz_stem)
+                if match:
+                    index = match.group(1)
+                    sdf_file = molecule_dir / f"genmol_{index}.sdf"
+                    
+                    if sdf_file.exists():
+                        try:
+                            # 读取 SDF 文件
+                            with open(sdf_file, 'r', encoding='utf-8') as f:
+                                sdf_string = f.read()
+                            
+                            # 从 SDF 提取键信息
+                            bond_types = _extract_bonds_from_sdf(sdf_string, len(atom_types))
+                            bond_types = bond_types.to(positions.device)
+                            sdf_count += 1
+                        except Exception as e:
+                            print(f"Warning: Failed to read bonds from {sdf_file.name}: {e}")
+                            bond_types = None
+            
+            # 如果 SDF 方法失败或未启用，使用距离方法
+            if bond_types is None:
+                dataset_info = {'name': 'qm9'}
+                _, _, bond_types = build_xae_molecule(
+                    positions=positions,
+                    atom_types=atom_types,
+                    dataset_info=dataset_info,
+                    atom_decoder=atom_decoder,
+                    use_global_optimization=True,
+                    use_iterative_improvement=True,
+                    max_iterations=10,
+                    charges=charges
+                )
+                fallback_count += 1
             
             # 创建 Molecule 对象
             molecule = Molecule(
@@ -238,6 +331,9 @@ def load_molecules_from_npz(molecule_dir):
             continue
     
     print(f"成功加载 {len(molecules)} 个分子")
+    if use_sdf_bonds:
+        print(f"  - 从 SDF 文件读取键信息: {sdf_count} 个")
+        print(f"  - 使用距离方法推断键: {fallback_count} 个")
     return molecules
 
 
@@ -245,7 +341,8 @@ def evaluate_quality(molecules,
                       strict_margin1, strict_margin2, strict_margin3,
                       medium_margin1, medium_margin2, medium_margin3,
                       relaxed_margin1, relaxed_margin2, relaxed_margin3,
-                      output_dir=None):
+                      output_dir=None,
+                      use_sdf_bonds=True):
     """
     评估分子质量指标
     
@@ -255,6 +352,9 @@ def evaluate_quality(molecules,
         strict_margin1/2/3: 严格标准的margin值（pm单位）
         medium_margin1/2/3: 中等标准的margin值（pm单位）
         relaxed_margin1/2/3: 宽松标准的margin值（pm单位）
+        use_sdf_bonds: 是否使用分子对象中已有的键信息（默认 True）
+                      - True: 直接使用分子对象中的键矩阵（通常来自 SDF 文件）
+                      - False: 使用 margin 值重新构建键矩阵
     
     Returns:
         dict: 包含质量评估结果的字典
@@ -307,6 +407,10 @@ def evaluate_quality(molecules,
     # 打印结果
     print("\n" + "="*60)
     print("分子质量评估结果")
+    if use_sdf_bonds:
+        print("✅ 使用 SDF 文件中的键信息（来自 OpenBabel）")
+    else:
+        print("⚠️  使用 margin 值重新构建键矩阵")
     print("="*60)
     
     validity = sampling_metrics.validity_metric
@@ -330,66 +434,104 @@ def evaluate_quality(molecules,
     stable_atoms_relaxed = 0
     total_atoms_relaxed = 0
     
-    # 使用不同严格程度的margin值重新构建键并计算稳定性
+    # 计算稳定性
     dataset_info = {'name': 'qm9'}
     atom_decoder = atom_decoder_dict['qm9_with_h']
     
     for mol in tqdm(molecules, desc="检查稳定性"):
         if mol.rdkit_mol is not None:
             try:
-                # 严格稳定性（使用严格margin值重新构建键）
-                _, _, bond_types_strict = build_xae_molecule(
-                    positions=mol.positions,
-                    atom_types=mol.atom_types,
-                    dataset_info=dataset_info,
-                    atom_decoder=atom_decoder,
-                    margin1_val=strict_margin1,
-                    margin2_val=strict_margin2,
-                    margin3_val=strict_margin3
-                )
-                mol_stable_strict, at_stable_strict, num_atoms_strict = check_stability(
-                    mol, None, atom_decoder=atom_decoder, bond_types=bond_types_strict
-                )
-                if mol_stable_strict.item() > 0.5:
-                    total_stable += 1
-                stable_atoms_strict += at_stable_strict.item()
-                total_atoms_strict += num_atoms_strict
+                # 获取电荷（如果存在）
+                charges = mol.charges if hasattr(mol, 'charges') and mol.charges is not None else torch.zeros_like(mol.atom_types)
                 
-                # 中等稳定性（使用中等margin值重新构建键）
-                _, _, bond_types_medium = build_xae_molecule(
-                    positions=mol.positions,
-                    atom_types=mol.atom_types,
-                    dataset_info=dataset_info,
-                    atom_decoder=atom_decoder,
-                    margin1_val=medium_margin1,
-                    margin2_val=medium_margin2,
-                    margin3_val=medium_margin3
-                )
-                mol_stable_medium, at_stable_medium, num_atoms_medium = check_stability(
-                    mol, None, atom_decoder=atom_decoder, bond_types=bond_types_medium
-                )
-                if mol_stable_medium.item() > 0.5:
-                    total_stable_medium += 1
-                stable_atoms_medium += at_stable_medium.item()
-                total_atoms_medium += num_atoms_medium
-                
-                # 宽松稳定性（使用宽松margin值重新构建键）
-                _, _, bond_types_relaxed = build_xae_molecule(
-                    positions=mol.positions,
-                    atom_types=mol.atom_types,
-                    dataset_info=dataset_info,
-                    atom_decoder=atom_decoder,
-                    margin1_val=relaxed_margin1,
-                    margin2_val=relaxed_margin2,
-                    margin3_val=relaxed_margin3
-                )
-                mol_stable_relaxed, at_stable_relaxed, num_atoms = check_stability(
-                    mol, None, atom_decoder=atom_decoder, bond_types=bond_types_relaxed
-                )
-                if mol_stable_relaxed.item() > 0.5:
-                    total_stable_relaxed += 1
-                stable_atoms_relaxed += at_stable_relaxed.item()
-                total_atoms_relaxed += num_atoms
+                if use_sdf_bonds:
+                    # 直接使用 SDF 文件中的键（来自 OpenBabel）
+                    # 所有三种标准都使用相同的键
+                    bond_types_sdf = mol.bond_types
+                    
+                    # 使用 SDF 键检查稳定性（三种标准都相同）
+                    mol_stable_sdf, at_stable_sdf, num_atoms_sdf = check_stability(
+                        mol, None, atom_decoder=atom_decoder, bond_types=bond_types_sdf
+                    )
+                    
+                    # 三种标准都使用相同的结果
+                    if mol_stable_sdf.item() > 0.5:
+                        total_stable += 1
+                        total_stable_medium += 1
+                        total_stable_relaxed += 1
+                    stable_atoms_strict += at_stable_sdf.item()
+                    stable_atoms_medium += at_stable_sdf.item()
+                    stable_atoms_relaxed += at_stable_sdf.item()
+                    total_atoms_strict += num_atoms_sdf
+                    total_atoms_medium += num_atoms_sdf
+                    total_atoms_relaxed += num_atoms_sdf
+                else:
+                    # 使用不同的 margin 值重新构建键并计算稳定性
+                    # 严格稳定性
+                    _, _, bond_types_strict = build_xae_molecule(
+                        positions=mol.positions,
+                        atom_types=mol.atom_types,
+                        dataset_info=dataset_info,
+                        atom_decoder=atom_decoder,
+                        margin1_val=strict_margin1,
+                        margin2_val=strict_margin2,
+                        margin3_val=strict_margin3,
+                        use_global_optimization=True,
+                        use_iterative_improvement=True,
+                        max_iterations=10,
+                        charges=charges
+                    )
+                    mol_stable_strict, at_stable_strict, num_atoms_strict = check_stability(
+                        mol, None, atom_decoder=atom_decoder, bond_types=bond_types_strict
+                    )
+                    if mol_stable_strict.item() > 0.5:
+                        total_stable += 1
+                    stable_atoms_strict += at_stable_strict.item()
+                    total_atoms_strict += num_atoms_strict
+                    
+                    # 中等稳定性
+                    _, _, bond_types_medium = build_xae_molecule(
+                        positions=mol.positions,
+                        atom_types=mol.atom_types,
+                        dataset_info=dataset_info,
+                        atom_decoder=atom_decoder,
+                        margin1_val=medium_margin1,
+                        margin2_val=medium_margin2,
+                        margin3_val=medium_margin3,
+                        use_global_optimization=True,
+                        use_iterative_improvement=True,
+                        max_iterations=10,
+                        charges=charges
+                    )
+                    mol_stable_medium, at_stable_medium, num_atoms_medium = check_stability(
+                        mol, None, atom_decoder=atom_decoder, bond_types=bond_types_medium
+                    )
+                    if mol_stable_medium.item() > 0.5:
+                        total_stable_medium += 1
+                    stable_atoms_medium += at_stable_medium.item()
+                    total_atoms_medium += num_atoms_medium
+                    
+                    # 宽松稳定性
+                    _, _, bond_types_relaxed = build_xae_molecule(
+                        positions=mol.positions,
+                        atom_types=mol.atom_types,
+                        dataset_info=dataset_info,
+                        atom_decoder=atom_decoder,
+                        margin1_val=relaxed_margin1,
+                        margin2_val=relaxed_margin2,
+                        margin3_val=relaxed_margin3,
+                        use_global_optimization=True,
+                        use_iterative_improvement=True,
+                        max_iterations=10,
+                        charges=charges
+                    )
+                    mol_stable_relaxed, at_stable_relaxed, num_atoms = check_stability(
+                        mol, None, atom_decoder=atom_decoder, bond_types=bond_types_relaxed
+                    )
+                    if mol_stable_relaxed.item() > 0.5:
+                        total_stable_relaxed += 1
+                    stable_atoms_relaxed += at_stable_relaxed.item()
+                    total_atoms_relaxed += num_atoms
             except Exception:
                 pass
     
@@ -408,16 +550,21 @@ def evaluate_quality(molecules,
     print(f"  新颖性 (Novelty): {novelty*100:.2f}%")
     print(f"  平均连通分量数: {mean_components:.2f}")
     print(f"  最大连通分量数: {max_components:.2f}")
-    print(f"\n  稳定性指标（基于键矩阵构建的margin值）:")
-    print(f"    严格 (margin1={strict_margin1}pm, margin2={strict_margin2}pm, margin3={strict_margin3}pm):")
-    print(f"      分子稳定性: {float(mol_stable)*100:.2f}%")
-    print(f"      原子稳定性: {float(atom_stable)*100:.2f}%")
-    print(f"    中等 (margin1={medium_margin1}pm, margin2={medium_margin2}pm, margin3={medium_margin3}pm):")
-    print(f"      分子稳定性: {float(mol_stable_medium)*100:.2f}%")
-    print(f"      原子稳定性: {float(atom_stable_medium)*100:.2f}%")
-    print(f"    宽松 (margin1={relaxed_margin1}pm, margin2={relaxed_margin2}pm, margin3={relaxed_margin3}pm):")
-    print(f"      分子稳定性: {float(mol_stable_relaxed)*100:.2f}%")
-    print(f"      原子稳定性: {float(atom_stable_relaxed)*100:.2f}%")
+    if use_sdf_bonds:
+        print(f"\n  稳定性指标（基于 SDF 文件中的键，来自 OpenBabel）:")
+        print(f"      分子稳定性: {float(mol_stable)*100:.2f}%")
+        print(f"      原子稳定性: {float(atom_stable)*100:.2f}%")
+    else:
+        print(f"\n  稳定性指标（基于键矩阵构建的margin值）:")
+        print(f"    严格 (margin1={strict_margin1}pm, margin2={strict_margin2}pm, margin3={strict_margin3}pm):")
+        print(f"      分子稳定性: {float(mol_stable)*100:.2f}%")
+        print(f"      原子稳定性: {float(atom_stable)*100:.2f}%")
+        print(f"    中等 (margin1={medium_margin1}pm, margin2={medium_margin2}pm, margin3={medium_margin3}pm):")
+        print(f"      分子稳定性: {float(mol_stable_medium)*100:.2f}%")
+        print(f"      原子稳定性: {float(atom_stable_medium)*100:.2f}%")
+        print(f"    宽松 (margin1={relaxed_margin1}pm, margin2={relaxed_margin2}pm, margin3={relaxed_margin3}pm):")
+        print(f"      分子稳定性: {float(mol_stable_relaxed)*100:.2f}%")
+        print(f"      原子稳定性: {float(atom_stable_relaxed)*100:.2f}%")
     
     print(f"\n📊 统计摘要:")
     print(f"  总分子数: {len(molecules)}")

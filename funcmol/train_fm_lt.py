@@ -4,6 +4,11 @@ sys.path.append("..")
 # Standard libraries
 import os
 
+# Set GPU environment
+# os.environ['CUDA_VISIBLE_DEVICES'] = "1"
+os.environ['CUDA_VISIBLE_DEVICES'] = "1,2,3,4,5,6,7"
+# os.environ['CUDA_VISIBLE_DEVICES'] = "0,3,5,6,7"
+
 # Data visualization and processing
 import matplotlib.pyplot as plt
 import numpy as np
@@ -11,6 +16,7 @@ import numpy as np
 # PyTorch and related libraries
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 torch.set_float32_matmul_precision('medium')
 
 # PyTorch Lightning
@@ -23,11 +29,6 @@ from pytorch_lightning.strategies import DDPStrategy
 from omegaconf import OmegaConf
 import hydra
 
-# Set GPU environment
-# os.environ['CUDA_VISIBLE_DEVICES'] = "1"
-os.environ['CUDA_VISIBLE_DEVICES'] = "1,2,3,4,5,6,7"
-# os.environ['CUDA_VISIBLE_DEVICES'] = "0,2,3,4,5"
-
 from funcmol.models.funcmol import create_funcmol
 from funcmol.utils.utils_fm import (
     add_noise_to_code,
@@ -37,7 +38,13 @@ from funcmol.utils.utils_fm import (
 )
 from funcmol.models.adamw import AdamW
 from funcmol.models.ema import ModelEma
-from funcmol.utils.utils_nf import infer_codes_occs_batch, load_neural_field, normalize_code
+from funcmol.utils.utils_nf import (
+    infer_codes_occs_batch, 
+    load_neural_field, 
+    normalize_code,
+    reshape_target_field,
+    compute_decoder_field_loss
+)
 from funcmol.dataset.dataset_code import create_code_loaders
 from funcmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
 from funcmol.models.encoder import create_grid_coords
@@ -94,6 +101,34 @@ class FuncmolLightningModule(pl.LightningModule):
         with torch.no_grad():
             self.funcmol_ema = ModelEma(self.funcmol, decay=config["ema_decay"])
 
+        # Joint fine-tuning configuration
+        joint_finetune_config = config.get("joint_finetune", {})
+        self.joint_finetune_enabled = joint_finetune_config.get("enabled", False)
+        self.decoder_loss_weight = joint_finetune_config.get("decoder_loss_weight", 1.0)
+        self.decoder_lr = joint_finetune_config.get("decoder_lr", None)
+        
+        # New configuration for enhanced joint fine-tuning
+        self.num_timesteps_for_decoder = joint_finetune_config.get("num_timesteps_for_decoder", 50)
+        self.atom_distance_threshold = joint_finetune_config.get("atom_distance_threshold", 0.5)
+        self.magnitude_loss_weight = joint_finetune_config.get("magnitude_loss_weight", 0.1)
+        self.use_cosine_loss = joint_finetune_config.get("use_cosine_loss", False)  # 默认使用MSE loss
+        
+        # Set up decoder loss function for joint fine-tuning
+        if self.joint_finetune_enabled:
+            # Keep MSE loss for magnitude loss component
+            self.decoder_criterion = nn.MSELoss(reduction="mean")
+            print(f"Joint fine-tuning enabled: decoder_loss_weight={self.decoder_loss_weight}")
+            if self.decoder_lr is not None:
+                print(f"Decoder learning rate: {self.decoder_lr}")
+            else:
+                print(f"Decoder will use denoiser learning rate: {config['lr']}")
+            if self.use_cosine_loss:
+                print(f"Using cosine distance + magnitude loss (magnitude_weight={self.magnitude_loss_weight})")
+            else:
+                print(f"Using MSE loss for decoder training")
+            print(f"Multi-timestep decoder training: using last {self.num_timesteps_for_decoder} timesteps")
+            print(f"Query points filtering: keeping points within {self.atom_distance_threshold}Å of atoms")
+
         self._freeze_nf()
         
         # Position weight configuration
@@ -117,9 +152,21 @@ class FuncmolLightningModule(pl.LightningModule):
         if self.enc is not None:
             for param in self.enc.parameters():
                 param.requires_grad = False
+            self.enc.eval()
+            print("Encoder frozen (always frozen)")
+        
+        # Freeze or unfreeze decoder based on joint fine-tuning configuration
         if self.dec_module is not None:
-            for param in self.dec_module.parameters():
-                param.requires_grad = False
+            if self.joint_finetune_enabled:
+                # Unfreeze decoder for joint fine-tuning
+                for param in self.dec_module.parameters():
+                    param.requires_grad = True
+                print("Decoder unfrozen for joint fine-tuning")
+            else:
+                # Freeze decoder (default behavior)
+                for param in self.dec_module.parameters():
+                    param.requires_grad = False
+                print("Decoder frozen")
         
     def _process_batch(self, batch):
         """
@@ -353,6 +400,375 @@ class FuncmolLightningModule(pl.LightningModule):
         
         return position_weights
     
+    def _get_multi_timestep_codes(self, x_0):
+        """
+        Get denoised codes for the last N timesteps.
+        
+        Args:
+            x_0: Ground truth codes [B, n_grid, code_dim]
+            
+        Returns:
+            multi_timestep_codes: [B, n_timesteps, n_grid, code_dim] tensor containing denoised codes for each timestep
+        """
+        from funcmol.models.ddpm import q_sample, p_sample_x0
+        
+        device = x_0.device
+        B = x_0.shape[0]
+        num_timesteps = self.funcmol.num_timesteps
+        diffusion_consts = self.funcmol.diffusion_consts
+        
+        # Get the last N timesteps (e.g., last 50 timesteps: [950, 951, ..., 999] for 1000 total timesteps)
+        start_timestep = max(0, num_timesteps - self.num_timesteps_for_decoder)
+        timesteps_list = list(range(start_timestep, num_timesteps))
+        
+        # Collect denoised codes for each timestep
+        all_denoised_codes = []
+        
+        for t_val in timesteps_list:
+            # Create timestep tensor for this value
+            t = torch.full((B,), t_val, device=device, dtype=torch.long)
+            
+            # Add noise to x_0 to get x_t
+            noise = torch.randn_like(x_0)
+            x_t = q_sample(x_0, t, diffusion_consts, noise)
+            
+            # Denoise using the model (predict x0)
+            if self.funcmol.diffusion_method == "new_x0":
+                # Model predicts x0 directly
+                with torch.no_grad():
+                    predicted_x0 = self.funcmol.net(x_t, t)
+            else:
+                # For "new" method, we need to use p_sample_x0 to get denoised codes
+                with torch.no_grad():
+                    predicted_x0 = p_sample_x0(self.funcmol.net, x_t, t, diffusion_consts, clip_denoised=False)
+            
+            all_denoised_codes.append(predicted_x0)
+        
+        # Stack all timesteps: [B, n_timesteps, n_grid, code_dim]
+        multi_timestep_codes = torch.stack(all_denoised_codes, dim=1)
+        
+        return multi_timestep_codes
+    
+    def _filter_query_points_near_atoms(self, query_points, atom_coords, target_field):
+        """
+        Filter query points to keep only those within atom_distance_threshold of atoms.
+        
+        Args:
+            query_points: [B, n_points, 3] query points
+            atom_coords: [B, n_atoms, 3] atom coordinates (or [N_total_atoms, 3] with batch_idx)
+            target_field: [B, n_points, n_atom_types, 3] target field
+            batch_idx: Optional [N_total_atoms] batch indices for atoms (if atom_coords is flattened)
+            
+        Returns:
+            filtered_query_points: [B, n_filtered_points, 3] (may have different n_filtered_points per batch)
+            filtered_target_field: [B, n_filtered_points, n_atom_types, 3]
+            valid_mask: [B, n_points] boolean mask indicating which points were kept
+        """
+        device = query_points.device
+        B = query_points.shape[0]
+        n_points = query_points.shape[1]
+        
+        # Handle atom_coords shape: could be [B, n_atoms, 3] or [N_total_atoms, 3] with batch_idx
+        if atom_coords.dim() == 2:
+            # Flattened format: need batch_idx to separate
+            # This case should be handled by caller, but we'll handle it here for robustness
+            raise ValueError("atom_coords should be [B, n_atoms, 3], not flattened. Please reshape before calling this function.")
+        
+        # atom_coords is [B, n_atoms, 3]
+        valid_masks = []
+        filtered_query_points_list = []
+        filtered_target_field_list = []
+        
+        for b in range(B):
+            # Get query points and atoms for this batch
+            batch_query_points = query_points[b]  # [n_points, 3]
+            batch_atoms = atom_coords[b]  # [n_atoms, 3]
+            
+            if batch_atoms.shape[0] == 0:
+                # No atoms in this batch, skip all points
+                valid_masks.append(torch.zeros(n_points, dtype=torch.bool, device=device))
+                filtered_query_points_list.append(torch.empty((0, 3), device=device))
+                filtered_target_field_list.append(torch.empty((0, target_field.shape[2], 3), device=device))
+                continue
+            
+            # Compute distances from each query point to all atoms
+            # batch_query_points: [n_points, 3], batch_atoms: [n_atoms, 3]
+            distances = torch.cdist(batch_query_points, batch_atoms)  # [n_points, n_atoms]
+            
+            # Find minimum distance for each query point
+            min_distances = distances.min(dim=-1)[0]  # [n_points]
+            
+            # Keep only points within threshold
+            valid_mask = min_distances < self.atom_distance_threshold  # [n_points]
+            
+            if valid_mask.sum() == 0:
+                # No points within threshold, use a fallback: keep at least the closest point to each atom
+                # This ensures we don't lose all points
+                for atom_idx in range(batch_atoms.shape[0]):
+                    atom_distances = distances[:, atom_idx]  # [n_points]
+                    closest_point_idx = atom_distances.argmin()
+                    valid_mask[closest_point_idx] = True
+            
+            valid_masks.append(valid_mask)
+            
+            # Filter query points and target field
+            filtered_query_points_list.append(batch_query_points[valid_mask])  # [n_filtered, 3]
+            filtered_target_field_list.append(target_field[b][valid_mask])  # [n_filtered, n_atom_types, 3]
+        
+        # Note: Different batches may have different numbers of filtered points
+        # We'll pad to the maximum length for batching, or handle variable lengths
+        max_filtered = max([fp.shape[0] for fp in filtered_query_points_list] + [1])  # At least 1
+        
+        # Pad filtered results to same length
+        padded_query_points = []
+        padded_target_field = []
+        for b in range(B):
+            n_filtered = filtered_query_points_list[b].shape[0]
+            if n_filtered < max_filtered:
+                # Pad with zeros (these will be masked out in loss calculation)
+                padding_size = max_filtered - n_filtered
+                query_padding = torch.zeros((padding_size, 3), device=device)
+                field_padding = torch.zeros((padding_size, target_field.shape[2], 3), device=device)
+                padded_query_points.append(torch.cat([filtered_query_points_list[b], query_padding], dim=0))
+                padded_target_field.append(torch.cat([filtered_target_field_list[b], field_padding], dim=0))
+            else:
+                padded_query_points.append(filtered_query_points_list[b])
+                padded_target_field.append(filtered_target_field_list[b])
+        
+        filtered_query_points = torch.stack(padded_query_points, dim=0)  # [B, max_filtered, 3]
+        filtered_target_field = torch.stack(padded_target_field, dim=0)  # [B, max_filtered, n_atom_types, 3]
+        
+        # Also create a mask for the padded points (to ignore them in loss)
+        n_filtered_per_batch = torch.tensor([fp.shape[0] for fp in filtered_query_points_list], device=device)
+        padded_valid_mask = torch.arange(max_filtered, device=device).unsqueeze(0) < n_filtered_per_batch.unsqueeze(1)  # [B, max_filtered]
+        
+        return filtered_query_points, filtered_target_field, padded_valid_mask
+    
+    
+    def _compute_decoder_loss(self, codes, batch, batch_idx, is_training=True):
+        """
+        Compute decoder reconstruction loss for joint fine-tuning.
+        Supports multi-timestep codes, query point filtering, and cosine+magnitude loss.
+        
+        Args:
+            codes: Codes tensor [B, n_grid, code_dim] or [B, n_timesteps, n_grid, code_dim] (multi-timestep codes)
+            batch: Data batch (PyTorch Geometric Batch if on_the_fly=True, or codes tensor if False)
+            batch_idx: Batch index in DataLoader
+            is_training: Whether this is training step (True) or validation step (False)
+            
+        Returns:
+            decoder_loss: Scalar tensor with decoder reconstruction loss
+        """
+        if not self.joint_finetune_enabled:
+            return None
+        
+        device = codes.device
+        # Handle multi-timestep codes: [B, n_timesteps, n_grid, code_dim] or single timestep: [B, n_grid, code_dim]
+        if codes.dim() == 4:
+            # Multi-timestep codes
+            B, n_timesteps, _, _ = codes.shape
+            use_multi_timestep = True
+        else:
+            # Single timestep codes
+            B = codes.shape[0]
+            n_timesteps = 1
+            use_multi_timestep = False
+        
+        n_points = self.config["dset"]["n_points"]
+        n_atom_types = self.config["dset"]["n_channels"]
+        
+        # Get query points and target field
+        if self.config["on_the_fly"]:
+            # on_the_fly=True: batch contains molecule data with target_field
+            if not hasattr(batch, 'xs') or not hasattr(batch, 'target_field'):
+                print("[WARNING] Batch does not contain xs or target_field, skipping decoder loss")
+                return None
+            
+            query_points = batch.xs  # [N_total_points, 3] or [B, n_points, 3]
+            target_field = batch.target_field
+            
+            # Get atom coordinates for filtering
+            atom_coords = batch.pos  # [N_total_atoms, 3]
+            batch_idx_atoms = batch.batch  # [N_total_atoms]
+            
+            # Reshape query_points to [B, n_points, 3]
+            if query_points.dim() == 2:
+                # [N_total_points, 3] -> [B, n_points, 3]
+                query_points = query_points.view(B, n_points, 3)
+            elif query_points.dim() == 3:
+                # Already [B, n_points, 3]
+                if query_points.shape[0] != B:
+                    query_points = query_points.view(B, n_points, 3)
+            else:
+                print(f"[WARNING] Unexpected query_points shape: {query_points.shape}")
+                return None
+            
+            # Reshape target_field using utility function
+            try:
+                target_field = reshape_target_field(target_field, B, n_points, n_atom_types)
+            except Exception as e:
+                print(f"[WARNING] Failed to reshape target_field: {e}")
+                return None
+            
+            # Reshape atom_coords to [B, n_atoms, 3]
+            atom_coords_list = []
+            for b in range(B):
+                mask = batch_idx_atoms == b
+                batch_atoms = atom_coords[mask]  # [n_atoms_b, 3]
+                atom_coords_list.append(batch_atoms)
+            # Pad to same length
+            max_atoms = max([a.shape[0] for a in atom_coords_list] + [1])
+            padded_atom_coords = []
+            for b in range(B):
+                n_atoms_b = atom_coords_list[b].shape[0]
+                if n_atoms_b < max_atoms:
+                    padding = torch.zeros((max_atoms - n_atoms_b, 3), device=device)
+                    padded_atom_coords.append(torch.cat([atom_coords_list[b], padding], dim=0))
+                else:
+                    padded_atom_coords.append(atom_coords_list[b])
+            atom_coords = torch.stack(padded_atom_coords, dim=0)  # [B, max_atoms, 3]
+            
+        else:
+            # on_the_fly=False: need to get molecule data from field loader
+            field_dataset = self._field_dataset_train if is_training else self._field_dataset_val
+            
+            if field_dataset is None:
+                print("[WARNING] Field dataset not available for decoder loss computation")
+                return None
+            
+            if batch_idx is None:
+                print("[WARNING] batch_idx is required for decoder loss in on_the_fly=False mode")
+                return None
+            
+            try:
+                # Calculate dataset indices for this batch
+                batch_size = self.config["dset"]["batch_size"]
+                start_idx = batch_idx * batch_size
+                end_idx = start_idx + B
+                
+                # Get augmentation info for modulo mapping
+                num_augmentations = self.num_augmentations_train if is_training else self.num_augmentations_val
+                field_dataset_size = self.field_dataset_size_train if is_training else self.field_dataset_size_val
+                
+                # Collect query points, target fields, and atom coordinates from field dataset
+                all_query_points = []
+                all_target_fields = []
+                all_atom_coords = []
+                
+                for code_idx in range(start_idx, end_idx):
+                    # Map codes index to field dataset index using modulo
+                    if num_augmentations is not None and num_augmentations > 1 and field_dataset_size is not None:
+                        field_idx = code_idx % field_dataset_size
+                    else:
+                        field_idx = code_idx
+                    
+                    if field_idx >= len(field_dataset):
+                        print(f"[WARNING] Field index {field_idx} out of range (dataset size: {len(field_dataset)})")
+                        return None
+                    
+                    try:
+                        mol_data = field_dataset[field_idx]
+                        
+                        if hasattr(mol_data, 'xs') and hasattr(mol_data, 'target_field'):
+                            all_query_points.append(mol_data.xs)  # [n_points, 3]
+                            all_target_fields.append(mol_data.target_field)  # [n_points, n_atom_types, 3]
+                            
+                            # Get atom coordinates
+                            if hasattr(mol_data, 'pos'):
+                                all_atom_coords.append(mol_data.pos)  # [n_atoms, 3]
+                            else:
+                                print(f"[WARNING] Molecule at index {field_idx} missing pos (atom coordinates)")
+                                return None
+                        else:
+                            print(f"[WARNING] Molecule at index {field_idx} missing xs or target_field")
+                            return None
+                    except Exception as e:
+                        print(f"[WARNING] Failed to get molecule at field index {field_idx}: {e}")
+                        return None
+                
+                if len(all_query_points) != B:
+                    print(f"[WARNING] Expected {B} molecules, got {len(all_query_points)}")
+                    return None
+                
+                # Stack query points and target fields
+                query_points = torch.stack(all_query_points).to(device)  # [B, n_points, 3]
+                target_field = torch.stack(all_target_fields).to(device)  # [B, n_points, n_atom_types, 3]
+                
+                # Pad atom coordinates to same length
+                max_atoms = max([a.shape[0] for a in all_atom_coords] + [1])
+                padded_atom_coords = []
+                for b in range(B):
+                    n_atoms_b = all_atom_coords[b].shape[0]
+                    if n_atoms_b < max_atoms:
+                        padding = torch.zeros((max_atoms - n_atoms_b, 3), device=device)
+                        padded_atom_coords.append(torch.cat([all_atom_coords[b].to(device), padding], dim=0))
+                    else:
+                        padded_atom_coords.append(all_atom_coords[b].to(device))
+                atom_coords = torch.stack(padded_atom_coords, dim=0)  # [B, max_atoms, 3]
+                
+            except Exception as e:
+                print(f"[WARNING] Failed to compute decoder loss: {e}")
+                import traceback
+                traceback.print_exc()
+                return None
+        
+        # Use query points directly (already filtered during dataset sampling if sample_near_atoms_only=True)
+        # No need to filter again
+        filtered_query_points = query_points
+        filtered_target_field = target_field
+        n_filtered = filtered_query_points.shape[1]  # n_points
+        # Create a mask of all True (all points are valid since they're already filtered during sampling)
+        padded_valid_mask = torch.ones(B, n_filtered, dtype=torch.bool, device=device)
+        
+        # Compute loss for each timestep (if multi-timestep) and average
+        all_timestep_losses = []
+        
+        for t_idx in range(n_timesteps):
+            # Get codes for this timestep
+            if use_multi_timestep:
+                timestep_codes = codes[:, t_idx, :, :]  # [B, n_grid, code_dim]
+            else:
+                timestep_codes = codes  # [B, n_grid, code_dim]
+            
+            # Generate predicted field using decoder
+            try:
+                pred_field = self.dec_module(filtered_query_points, timestep_codes)  # [B, n_filtered, n_atom_types, 3]
+            except Exception as e:
+                print(f"[WARNING] Failed to generate field from decoder for timestep {t_idx}: {e}")
+                continue
+            
+            # Ensure shapes match
+            if pred_field.shape != filtered_target_field.shape:
+                pred_field = pred_field.view(B, n_filtered, n_atom_types, 3)
+                if pred_field.shape != filtered_target_field.shape:
+                    print(f"[WARNING] Shape mismatch after reshape: pred_field {pred_field.shape} vs target_field {filtered_target_field.shape}")
+                    continue
+            
+            # Apply mask to ignore padded points
+            padded_valid_mask_expanded = padded_valid_mask.unsqueeze(-1).unsqueeze(-1)  # [B, n_filtered, 1, 1]
+            pred_field = pred_field * padded_valid_mask_expanded
+            filtered_target_field_masked = filtered_target_field * padded_valid_mask_expanded
+            
+            # Compute loss using utility function
+            timestep_loss = compute_decoder_field_loss(
+                pred_field,
+                filtered_target_field,
+                use_cosine_loss=self.use_cosine_loss,
+                magnitude_loss_weight=self.magnitude_loss_weight,
+                valid_mask=padded_valid_mask
+            )
+            
+            all_timestep_losses.append(timestep_loss)
+        
+        if len(all_timestep_losses) == 0:
+            print("[WARNING] No valid timestep losses computed")
+            return None
+        
+        # Average over all timesteps
+        decoder_loss = torch.stack(all_timestep_losses).mean()
+        
+        return decoder_loss
+    
     def training_step(self, batch, batch_idx):
         """Training step logic"""
         # 添加调试信息
@@ -400,19 +816,41 @@ class FuncmolLightningModule(pl.LightningModule):
         #     print(f"[DEBUG] Using diffusion constants: {list(self.funcmol.diffusion_consts.keys())}")
         
         # DDPM训练步骤 - 直接使用3维输入 [B, N*N*N, code_dim]
-        loss = self.funcmol.train_ddpm_step(codes, position_weights=position_weights)
+        denoiser_loss = self.funcmol.train_ddpm_step(codes, position_weights=position_weights)
+        
+        # Compute decoder loss if joint fine-tuning is enabled
+        if self.joint_finetune_enabled:
+            # Get multi-timestep codes for decoder training
+            multi_timestep_codes = self._get_multi_timestep_codes(codes)  # [B, n_timesteps, n_grid, code_dim]
+            
+            # Compute decoder loss using multi-timestep codes
+            decoder_loss = self._compute_decoder_loss(multi_timestep_codes, batch, batch_idx, is_training=True)
+            if decoder_loss is not None:
+                total_loss = denoiser_loss + self.decoder_loss_weight * decoder_loss
+                # Log decoder loss separately
+                self.log('train_decoder_loss', decoder_loss, batch_size=len(batch),
+                         on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
+            else:
+                # If decoder loss computation failed, use only denoiser loss
+                print("[WARNING] Decoder loss computation failed, using only denoiser loss")
+                total_loss = denoiser_loss
+        else:
+            # Standard training: only denoiser loss
+            total_loss = denoiser_loss
         
         # Update EMA model
         self.funcmol_ema.update(self.funcmol)
         
         # Log metrics
-        self.log('train_loss', loss, batch_size=len(batch),
+        self.log('train_loss', total_loss, batch_size=len(batch),
                  on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log('train_denoiser_loss', denoiser_loss, batch_size=len(batch),
+                 on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
         
         # Store loss for plotting
-        self.train_losses.append(loss.item())
+        self.train_losses.append(total_loss.item())
         
-        return loss
+        return total_loss
 
     def _training_step_original(self, batch, batch_idx):
         """原有训练方法"""
@@ -433,25 +871,44 @@ class FuncmolLightningModule(pl.LightningModule):
                 squared_diff = (pred_codes - codes) ** 2  # [B, n_grid, code_dim]
                 squared_diff_per_pos = squared_diff.mean(dim=-1)  # [B, n_grid]
                 weighted_loss_per_pos = position_weights * squared_diff_per_pos  # [B, n_grid]
-                loss = weighted_loss_per_pos.mean()
+                denoiser_loss = weighted_loss_per_pos.mean()
             else:
                 # Fallback to regular loss if weights cannot be computed
-                loss = self.criterion(pred_codes, codes)
+                denoiser_loss = self.criterion(pred_codes, codes)
         else:
             # Calculate loss without position weights
-            loss = self.criterion(pred_codes, codes)
+            denoiser_loss = self.criterion(pred_codes, codes)
+        
+        # Compute decoder loss if joint fine-tuning is enabled
+        if self.joint_finetune_enabled:
+            decoder_loss = self._compute_decoder_loss(codes, batch, batch_idx, is_training=True)
+            if decoder_loss is not None:
+                # Both denoiser and decoder are trained, combine losses
+                total_loss = denoiser_loss + self.decoder_loss_weight * decoder_loss
+                # Log decoder loss separately
+                self.log('train_decoder_loss', decoder_loss, batch_size=len(batch),
+                         on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
+            else:
+                # If decoder loss computation failed, use only denoiser loss
+                print("[WARNING] Decoder loss computation failed, using only denoiser loss")
+                total_loss = denoiser_loss
+        else:
+            # Standard training: only denoiser loss
+            total_loss = denoiser_loss
         
         # Update EMA model
         self.funcmol_ema.update(self.funcmol)
         
         # Log metrics
-        self.log('train_loss', loss, batch_size=len(batch),
+        self.log('train_loss', total_loss, batch_size=len(batch),
                  on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log('train_denoiser_loss', denoiser_loss, batch_size=len(batch),
+                 on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
         
         # Store loss for plotting
-        self.train_losses.append(loss.item())
+        self.train_losses.append(total_loss.item())
         
-        return loss
+        return total_loss
     
     def validation_step(self, batch, batch_idx):
         """Validation step logic"""
@@ -474,13 +931,35 @@ class FuncmolLightningModule(pl.LightningModule):
         )
         
         # DDPM验证步骤 - 直接使用3维输入 [B, N*N*N, code_dim]
-        loss = self.funcmol.train_ddpm_step(codes, position_weights=position_weights)
+        denoiser_loss = self.funcmol.train_ddpm_step(codes, position_weights=position_weights)
+        
+        # Compute decoder loss if joint fine-tuning is enabled
+        if self.joint_finetune_enabled:
+            # Get multi-timestep codes for decoder training
+            multi_timestep_codes = self._get_multi_timestep_codes(codes)  # [B, n_timesteps, n_grid, code_dim]
+            
+            # Compute decoder loss using multi-timestep codes
+            decoder_loss = self._compute_decoder_loss(multi_timestep_codes, batch, batch_idx, is_training=False)
+            if decoder_loss is not None:
+                # Both denoiser and decoder are trained, combine losses
+                total_loss = denoiser_loss + self.decoder_loss_weight * decoder_loss
+                # Log decoder loss separately
+                self.log('val_decoder_loss', decoder_loss, batch_size=len(batch),
+                         on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
+            else:
+                # If decoder loss computation failed, use only denoiser loss
+                total_loss = denoiser_loss
+        else:
+            # Standard validation: only denoiser loss
+            total_loss = denoiser_loss
         
         # Log metrics
-        self.log('val_loss', loss, batch_size=len(batch),
+        self.log('val_loss', total_loss, batch_size=len(batch),
                  on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log('val_denoiser_loss', denoiser_loss, batch_size=len(batch),
+                 on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
         
-        return loss
+        return total_loss
 
     def _validation_step_original(self, batch, batch_idx):
         """原有验证方法"""
@@ -501,19 +980,41 @@ class FuncmolLightningModule(pl.LightningModule):
                 squared_diff = (pred_codes - codes) ** 2  # [B, n_grid, code_dim]
                 squared_diff_per_pos = squared_diff.mean(dim=-1)  # [B, n_grid]
                 weighted_loss_per_pos = position_weights * squared_diff_per_pos  # [B, n_grid]
-                loss = weighted_loss_per_pos.mean()
+                denoiser_loss = weighted_loss_per_pos.mean()
             else:
                 # Fallback to regular loss if weights cannot be computed
-                loss = self.criterion(pred_codes, codes)
+                denoiser_loss = self.criterion(pred_codes, codes)
         else:
             # Calculate loss without position weights
-            loss = self.criterion(pred_codes, codes)
+            denoiser_loss = self.criterion(pred_codes, codes)
+        
+        # Compute decoder loss if joint fine-tuning is enabled
+        if self.joint_finetune_enabled:
+            # Get multi-timestep codes for decoder training
+            multi_timestep_codes = self._get_multi_timestep_codes(codes)  # [B, n_timesteps, n_grid, code_dim]
+            
+            # Compute decoder loss using multi-timestep codes
+            decoder_loss = self._compute_decoder_loss(multi_timestep_codes, batch, batch_idx, is_training=False)
+            if decoder_loss is not None:
+                # Both denoiser and decoder are trained, combine losses
+                total_loss = denoiser_loss + self.decoder_loss_weight * decoder_loss
+                # Log decoder loss separately
+                self.log('val_decoder_loss', decoder_loss, batch_size=len(batch),
+                         on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
+            else:
+                # If decoder loss computation failed, use only denoiser loss
+                total_loss = denoiser_loss
+        else:
+            # Standard validation: only denoiser loss
+            total_loss = denoiser_loss
         
         # Log metrics
-        self.log('val_loss', loss, batch_size=len(batch),
+        self.log('val_loss', total_loss, batch_size=len(batch),
                  on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log('val_denoiser_loss', denoiser_loss, batch_size=len(batch),
+                 on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
         
-        return loss
+        return total_loss
     
     # ############# function for debug ##############
     # def on_before_optimizer_step(self, optimizer):
@@ -548,6 +1049,10 @@ class FuncmolLightningModule(pl.LightningModule):
         # Set model to training mode
         self.funcmol.train()
         
+        # Set decoder to training mode if joint fine-tuning is enabled
+        if self.joint_finetune_enabled and self.dec_module is not None:
+            self.dec_module.train()
+        
         # Clean up GPU memory
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -556,6 +1061,10 @@ class FuncmolLightningModule(pl.LightningModule):
         """Called at the beginning of validation epoch"""
         # Set model to evaluation mode
         self.funcmol.eval()
+        
+        # Set decoder to evaluation mode
+        if self.dec_module is not None:
+            self.dec_module.eval()
     
     def on_validation_epoch_end(self):
         """Called at the end of validation epoch"""
@@ -574,10 +1083,27 @@ class FuncmolLightningModule(pl.LightningModule):
     
     def configure_optimizers(self):
         """Configure optimizers and learning rate schedulers"""
-        # Create optimizer
-        optimizer = AdamW(self.funcmol.parameters(), 
-                         lr=self.config["lr"], 
-                         weight_decay=self.config["wd"])
+        # Create optimizer with different parameter groups for joint fine-tuning
+        if self.joint_finetune_enabled:
+            param_groups = [
+                {"params": self.funcmol.parameters(), "lr": self.config["lr"], "weight_decay": self.config["wd"]}
+            ]
+            
+            # Add decoder parameters with optional separate learning rate
+            decoder_lr = self.decoder_lr if self.decoder_lr is not None else self.config["lr"]
+            param_groups.append(
+                {"params": self.dec_module.parameters(), "lr": decoder_lr, "weight_decay": self.config["wd"]}
+            )
+            
+            optimizer = AdamW(param_groups)
+            print(f"Optimizer configured for joint fine-tuning:")
+            print(f"  - Denoiser LR: {self.config['lr']}")
+            print(f"  - Decoder LR: {decoder_lr}")
+        else:
+            # Standard training: only optimize denoiser
+            optimizer = AdamW(self.funcmol.parameters(), 
+                             lr=self.config["lr"], 
+                             weight_decay=self.config["wd"])
         
         # Create learning rate scheduler if needed
         if self.config.get("use_lr_schedule", 0) > 0:
@@ -628,6 +1154,13 @@ class FuncmolLightningModule(pl.LightningModule):
         
         checkpoint["funcmol_state_dict"] = funcmol_state_dict
         checkpoint["funcmol_ema_state_dict"] = funcmol_ema_state_dict
+        
+        # Save decoder state if joint fine-tuning is enabled
+        if self.joint_finetune_enabled and self.dec_module is not None:
+            decoder_state_dict = self.dec_module.module.state_dict() if hasattr(self.dec_module, "module") else self.dec_module.state_dict()
+            checkpoint["decoder_state_dict"] = decoder_state_dict
+            print("Saved decoder state in checkpoint (joint fine-tuning mode)")
+        
         checkpoint["code_stats"] = self.code_stats
         checkpoint["train_losses"] = self.train_losses
         checkpoint["val_losses"] = self.val_losses
@@ -635,6 +1168,22 @@ class FuncmolLightningModule(pl.LightningModule):
     
     def on_load_checkpoint(self, checkpoint):
         """Custom checkpoint loading logic"""
+        # Load decoder state if available and joint fine-tuning is enabled
+        if self.joint_finetune_enabled and self.dec_module is not None:
+            if "decoder_state_dict" in checkpoint:
+                decoder_state_dict = checkpoint["decoder_state_dict"]
+                # Handle _orig_mod. prefix if present
+                new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in decoder_state_dict.items()}
+                try:
+                    self.dec_module.load_state_dict(new_state_dict, strict=True)
+                    print("Loaded decoder state from checkpoint (joint fine-tuning mode)")
+                except Exception as e:
+                    print(f"Warning: Failed to load decoder state: {e}")
+                    print("Continuing with decoder initialized from neural field checkpoint")
+            else:
+                print("Warning: Joint fine-tuning enabled but no decoder_state_dict found in checkpoint")
+                print("Decoder will use weights from neural field checkpoint")
+        
         if "train_losses" in checkpoint:
             self.train_losses = checkpoint["train_losses"]
         if "val_losses" in checkpoint:
@@ -695,6 +1244,9 @@ def main(config):
     enc, dec = load_neural_field(nf_checkpoint, None)  # Pass None for Lightning compatibility
     
     dec_module = dec.module if hasattr(dec, "module") else dec
+    
+    # Note: decoder 默认使用 neural field checkpoint 中的 decoder
+    # 如果从 reload_model_path 加载的 checkpoint 中包含 decoder_state_dict，则会在 on_load_checkpoint 中自动加载
     
     ##############################
     # Code loaders
@@ -847,7 +1399,19 @@ def main(config):
             # if isinstance(loader_val, list) and len(loader_val) > 0:
             #     loader_val = loader_val[0]
             
-            code_stats = compute_code_stats_offline(loader_train, "train", config["normalize_codes"])
+            # 获取数据增强数量（如果使用数据增强的codes）
+            # 优先使用配置中明确指定的 num_augmentations
+            # 如果没有指定，会由 create_code_loaders 自动推断
+            num_augmentations = config.get("num_augmentations", None)
+            
+            # 如果配置中指定了 num_augmentations，打印信息
+            if num_augmentations is not None:
+                print(f">> Using specified num_augmentations={num_augmentations} for codes loading")
+                print(f">> Will load: codes_aug{num_augmentations}.lmdb and position_weights_aug{num_augmentations}.lmdb")
+            else:
+                print(f">> num_augmentations not specified in config, will auto-infer from codes directory")
+            
+            code_stats = compute_code_stats_offline(loader_train, "train", config["normalize_codes"], num_augmentations=num_augmentations)
         
         # Check if loaders are empty
         if not loader_train or len(loader_train) == 0:
@@ -871,8 +1435,7 @@ def main(config):
     # Load checkpoint if specified
     if config["reload_model_path"] is not None:
         try:
-            checkpoint_path = os.path.join(config["reload_model_path"], "checkpoint_latest.pth.tar")
-            training_state = load_checkpoint_state_fm(model, checkpoint_path)
+            training_state = load_checkpoint_state_fm(model, config["reload_model_path"])
             
             # Apply training state
             if training_state["epoch"] is not None:
@@ -885,6 +1448,9 @@ def main(config):
             print(f"Successfully loaded checkpoint from: {config['reload_model_path']}")
         except Exception as e:
             print(f"Error loading checkpoint: {e}")
+            import traceback
+            traceback.print_exc()
+            print(f"\nNote: If you want to start training from scratch, set reload_model_path: null")
     
     # Configure callbacks
     callbacks = [

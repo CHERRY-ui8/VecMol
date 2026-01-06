@@ -10,6 +10,7 @@ import traceback
 from funcmol.utils.utils_fm import load_checkpoint_fm
 from funcmol.dataset.dataset_field import create_gnf_converter
 from funcmol.utils.utils_nf import load_neural_field
+from funcmol.utils.utils_base import add_bonds_with_openbabel
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -173,17 +174,20 @@ def main(config: DictConfig) -> None:
     base_output_dir.mkdir(parents=True, exist_ok=True)
     
     # 提取checkpoint标识并创建独立的子目录
-    checkpoint_identifier = extract_checkpoint_identifier(fm_path)
+    # checkpoint_identifier = extract_checkpoint_identifier(fm_path)
+    checkpoint_identifier = "20260105_version_0_last_withbonds_finetune"  # 临时硬编码
     output_dir = base_output_dir / "samples" / checkpoint_identifier
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # 获取生成参数
     max_samples = config.get('max_samples', 10)  # 默认生成10个分子
     field_methods = config.get('field_methods', ['tanh'])  # 默认使用tanh方法
+    use_openbabel_bonds = config.get('use_openbabel_bonds', True)  # 默认使用OpenBabel添加连边
     
     print(f"Checkpoint identifier: {checkpoint_identifier}")
     print(f"Generating {max_samples} molecules with field_methods: {field_methods}")
     print(f"Output directory: {output_dir}")
+    print(f"Use OpenBabel for bonds: {use_openbabel_bonds}")
     print("fm_pretrained_path: ", config["fm_pretrained_path"])
     print("nf_pretrained_path: ", config["nf_pretrained_path"])
 
@@ -279,11 +283,23 @@ def main(config: DictConfig) -> None:
                 code_path = mol_save_dir / f"code_{generated_idx:04d}_{field_method}.pt"
                 torch.save(denoised_codes[0].cpu(), code_path)
 
-                sdf_string = xyz_to_sdf(recon_coords_device.numpy(),
-                                        recon_types[0].cpu().numpy(),
-                                        elements)
+                # Generate SDF with or without OpenBabel bonds
+                if use_openbabel_bonds:
+                    sdf_string = add_bonds_with_openbabel(
+                        recon_coords_device.numpy(),
+                        recon_types[0].cpu().numpy(),
+                        elements,
+                        fallback_to_xyz_to_sdf=xyz_to_sdf
+                    )
+                else:
+                    sdf_string = xyz_to_sdf(
+                        recon_coords_device.numpy(),
+                        recon_types[0].cpu().numpy(),
+                        elements
+                    )
+                
                 sdf_path = mol_save_dir / f"genmol_{generated_idx:04d}.sdf"
-                with open(sdf_path, 'w') as sdf_file:
+                with open(sdf_path, 'w', encoding='utf-8') as sdf_file:
                     sdf_file.write(sdf_string)
 
                 # 计算生成分子的原子统计

@@ -19,14 +19,14 @@ def compute_position_weights(
     Compute position weights for grid coordinates based on the number of nearby atoms.
     
     For each grid coordinate, count the number of atoms within the specified radius,
-    and compute weight as: weight = 1 + alpha * num_atoms
+    and compute weight as: weight = 0.1 + alpha * num_atoms
     
     Args:
         atom_coords: Atom coordinates [N_atoms, 3]
         grid_coords: Grid coordinates [B, n_grid, 3] or [n_grid, 3]
         batch_idx: Batch index for atoms [N_atoms] indicating which molecule each atom belongs to
         radius: Radius threshold in Angstroms for counting nearby atoms
-        weight_alpha: Weight coefficient for linear weighting: weight = 1 + alpha * num_atoms
+        weight_alpha: Weight coefficient for linear weighting: weight = 0.1 + alpha * num_atoms
         device: Device to perform computation on. If None, uses atom_coords device.
     
     Returns:
@@ -56,15 +56,15 @@ def compute_position_weights(
         else:
             raise ValueError(f"Batch size mismatch: grid_coords has {B} batches, but batch_idx suggests {B_actual} batches")
     
-    # Initialize weights
-    weights = torch.ones(B, n_grid, device=device, dtype=torch.float32)
+    # Initialize weights (will be updated based on nearby atoms)
+    weights = torch.full((B, n_grid), 0.1, device=device, dtype=torch.float32)
     
     # Process each molecule in the batch
     for b_idx, batch_id in enumerate(unique_batches):
         # Get atoms belonging to this batch
         atom_mask = (batch_idx == batch_id)
         if not atom_mask.any():
-            # No atoms for this batch, keep weights as 1.0
+            # No atoms for this batch, keep weights as 0.1 (base weight)
             continue
         
         batch_atom_coords = atom_coords[atom_mask]  # [N_atoms_b, 3]
@@ -79,8 +79,8 @@ def compute_position_weights(
         nearby_mask = distances < radius  # [n_grid, N_atoms_b]
         num_nearby_atoms = nearby_mask.sum(dim=1).float()  # [n_grid]
         
-        # Compute weights: weight = 1 + alpha * num_atoms
-        batch_weights = 1.0 + weight_alpha * num_nearby_atoms  # [n_grid]
+        # Compute weights: weight = 0.1 + alpha * num_atoms
+        batch_weights = 0.1 + weight_alpha * num_nearby_atoms  # [n_grid]
         weights[b_idx] = batch_weights
     
     return weights
@@ -103,6 +103,55 @@ def add_noise_to_code(codes: torch.Tensor, smooth_sigma: float = 0.1) -> torch.T
     return codes + noise
 
 
+def find_checkpoint_path(checkpoint_path_or_dir):
+    """
+    Find checkpoint file path from either a direct .ckpt file path or a directory.
+    
+    Args:
+        checkpoint_path_or_dir (str): Path to checkpoint file (.ckpt) or directory containing checkpoint files
+        
+    Returns:
+        str: Path to the checkpoint file
+        
+    Raises:
+        FileNotFoundError: If no checkpoint file is found
+    """
+    import glob
+    
+    # Check if checkpoint_path_or_dir is a .ckpt file (Lightning format) or directory
+    if checkpoint_path_or_dir.endswith('.ckpt'):
+        # Direct Lightning checkpoint file
+        checkpoint_path = checkpoint_path_or_dir
+    else:
+        # Directory path, try to find Lightning checkpoint file
+        # Priority: 1) last.ckpt, 2) latest .ckpt file
+        checkpoint_path = None
+        
+        # Try last.ckpt first (Lightning's default last checkpoint)
+        last_ckpt_path = os.path.join(checkpoint_path_or_dir, "last.ckpt")
+        if os.path.exists(last_ckpt_path):
+            checkpoint_path = last_ckpt_path
+            print(f"Found last.ckpt in directory")
+        else:
+            # Try to find the latest .ckpt file
+            ckpt_files = glob.glob(os.path.join(checkpoint_path_or_dir, "*.ckpt"))
+            if ckpt_files:
+                # Sort by modification time, get the latest
+                ckpt_files.sort(key=os.path.getmtime, reverse=True)
+                checkpoint_path = ckpt_files[0]
+                print(f"Found latest .ckpt file: {os.path.basename(checkpoint_path)}")
+            else:
+                raise FileNotFoundError(
+                    f"No checkpoint file found in directory: {checkpoint_path_or_dir}\n"
+                    f"Expected: last.ckpt or any .ckpt file"
+                )
+    
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
+    
+    return checkpoint_path
+
+
 def load_checkpoint_fm(
     model: torch.nn.Module,
     pretrained_path: str,
@@ -110,30 +159,27 @@ def load_checkpoint_fm(
 ):
     """
     Loads a checkpoint file and restores the model and optimizer states.
+    Used for inference scenarios (e.g., sample_fm.py).
 
     Args:
         model (torch.nn.Module): The model to load the checkpoint into.
-        pretrained_path (str): The path to the directory containing the checkpoint file.
+        pretrained_path (str): The path to the checkpoint file (.ckpt) or directory containing checkpoint files.
         optimizer (torch.optim.Optimizer, optional): The optimizer to load the checkpoint into. Defaults to None.
-        best_model (bool, optional): Whether to load the best model checkpoint or the regular checkpoint.
-            Defaults to True.
 
     Returns:
-        tuple: A tuple containing the loaded model, optimizer (if provided), and the number of epochs trained.
+        tuple: A tuple containing the loaded model, optimizer (if provided), and code_stats.
     """
-    # Check if pretrained_path is a .ckpt file (Lightning format) or directory
-    if pretrained_path.endswith('.ckpt'):
-        # Load Lightning checkpoint directly
-        lightning_checkpoint = torch.load(pretrained_path, map_location='cpu', weights_only=False)
-        # Convert Lightning checkpoint format to expected format
-        checkpoint = {
-            "funcmol_ema_state_dict": lightning_checkpoint["funcmol_ema_state_dict"],
-            "code_stats": lightning_checkpoint.get("code_stats", {}),
-            "epoch": lightning_checkpoint.get("epoch", 0)
-        }
-    else:
-        # Load from directory with checkpoint.pth.tar
-        checkpoint = torch.load(os.path.join(pretrained_path, "checkpoint.pth.tar"))
+    # Find checkpoint file if directory is provided
+    checkpoint_path = find_checkpoint_path(pretrained_path)
+    
+    # Load Lightning checkpoint
+    lightning_checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+    # Convert Lightning checkpoint format to expected format
+    checkpoint = {
+        "funcmol_ema_state_dict": lightning_checkpoint.get("funcmol_ema_state_dict", {}),
+        "code_stats": lightning_checkpoint.get("code_stats", {}),
+        "epoch": lightning_checkpoint.get("epoch", 0)
+    }
     
     # Move model to CPU temporarily for loading, then back to original device
     original_device = next(model.parameters()).device
@@ -192,7 +238,8 @@ def compute_codes(
 def compute_code_stats_offline(
     loader: torch.utils.data.DataLoader,
     split: str,
-    normalize_codes: bool
+    normalize_codes: bool,
+    num_augmentations: int = None
 ) -> dict:
     """
     Computes statistics for codes offline.
@@ -204,11 +251,16 @@ def compute_code_stats_offline(
         loader (torch.utils.data.DataLoader): DataLoader containing the dataset.
         split (str): The data split (e.g., 'train', 'val', 'test').
         normalize_codes (bool): Whether to normalize the codes.
+        num_augmentations (int, optional): Number of augmentations, used for generating cache filename.
 
     Returns:
         dict: A dictionary containing the computed code statistics.
     """
     dataset = loader.dataset
+    
+    # 如果未提供num_augmentations，尝试从dataset中获取
+    if num_augmentations is None and hasattr(dataset, 'num_augmentations'):
+        num_augmentations = dataset.num_augmentations
     
     # 确定缓存文件路径
     cache_path = None
@@ -216,13 +268,19 @@ def compute_code_stats_offline(
         # LMDB模式：使用LMDB路径作为缓存目录
         lmdb_path = dataset.lmdb_path
         cache_dir = os.path.dirname(lmdb_path)
-        # 生成缓存文件名：基于split和normalize_codes参数
-        cache_filename = f"code_stats_{split}_norm{normalize_codes}.pt"
+        # 生成缓存文件名：基于split、normalize_codes和num_augmentations参数
+        if num_augmentations is not None:
+            cache_filename = f"code_stats_{split}_aug{num_augmentations}_norm{normalize_codes}.pt"
+        else:
+            cache_filename = f"code_stats_{split}_norm{normalize_codes}.pt"  # 向后兼容
         cache_path = os.path.join(cache_dir, cache_filename)
     elif hasattr(dataset, 'codes_dir'):
         # 传统模式：使用codes_dir作为缓存目录
         cache_dir = dataset.codes_dir
-        cache_filename = f"code_stats_{split}_norm{normalize_codes}.pt"
+        if num_augmentations is not None:
+            cache_filename = f"code_stats_{split}_aug{num_augmentations}_norm{normalize_codes}.pt"
+        else:
+            cache_filename = f"code_stats_{split}_norm{normalize_codes}.pt"  # 向后兼容
         cache_path = os.path.join(cache_dir, cache_filename)
     
     # 尝试加载缓存
@@ -576,19 +634,23 @@ def get_stats(
     return max_val, min_val, mean, std
 
 
-def load_checkpoint_state_fm(model, checkpoint_path):
+def load_checkpoint_state_fm(model, checkpoint_path_or_dir):
     """
     Helper function to load checkpoint state for FuncMol model.
+    Automatically finds checkpoint file if a directory is provided.
     
     Args:
         model: The FuncMol Lightning module
-        checkpoint_path (str): Path to the checkpoint file
+        checkpoint_path_or_dir (str): Path to the checkpoint file (.ckpt) or directory containing checkpoint files
         
     Returns:
         dict: Training state dictionary containing epoch, losses, and best_loss
     """
+    # Find checkpoint file if directory is provided
+    checkpoint_path = find_checkpoint_path(checkpoint_path_or_dir)
+    
     print(f"Loading checkpoint from: {checkpoint_path}")
-    state_dict = torch.load(checkpoint_path)
+    state_dict = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     
     # Load Funcmol state
     if "funcmol" in state_dict:
@@ -615,6 +677,23 @@ def load_checkpoint_state_fm(model, checkpoint_path):
         new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict["funcmol_ema_state_dict"].items()}
         model.funcmol_ema.load_state_dict(new_state_dict)
         print("Loaded Funcmol EMA state from 'funcmol_ema_state_dict' key")
+    
+    # Load decoder state if joint fine-tuning is enabled
+    if hasattr(model, 'joint_finetune_enabled') and model.joint_finetune_enabled:
+        if hasattr(model, 'dec_module') and model.dec_module is not None:
+            if "decoder_state_dict" in state_dict:
+                decoder_state_dict = state_dict["decoder_state_dict"]
+                # Handle _orig_mod. prefix if present
+                new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in decoder_state_dict.items()}
+                try:
+                    model.dec_module.load_state_dict(new_state_dict, strict=True)
+                    print("Loaded decoder state from checkpoint (joint fine-tuning mode)")
+                except Exception as e:
+                    print(f"Warning: Failed to load decoder state: {e}")
+                    print("Continuing with decoder initialized from neural field checkpoint")
+            else:
+                print("Warning: Joint fine-tuning enabled but no decoder_state_dict found in checkpoint")
+                print("Decoder will use weights from neural field checkpoint")
     
     # Load training state
     training_state = {
