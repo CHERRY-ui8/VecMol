@@ -10,12 +10,13 @@ defaults:
 # fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251029/lightning_logs/version_0/checkpoints/model-epoch=199.ckpt
 # fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251103/lightning_logs/version_0/checkpoints/model-epoch=99.ckpt
 # fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251108/lightning_logs/version_1/checkpoints/model-epoch=364.ckpt
-fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20260105/lightning_logs/version_0/checkpoints/last.ckpt
+fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251225/lightning_logs/version_1/checkpoints/last.ckpt
 dirname: ../exps/funcmol/fm_qm9/20251225
 
 # 生成参数
 max_samples: 1000  # 要生成的分子数量
 field_methods: ['tanh']  # 要使用的field方法
+batch_size: 32  # 批次大小，一次并行生成多个分子（分子级别的并行）
 
 diffusion_method: "new_x0" #  方法选择: "old" (WJS) 或 "new" (DDPM) 或 "new_x0" (DDPM with x0)
 
@@ -43,8 +44,8 @@ ddpm:
 smooth_sigma: 0.5
 
 # 模型路径
-nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/model-epoch=999.ckpt
-# nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260103/lightning_logs/version_0/checkpoints/last.ckpt
+# nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/model-epoch=999.ckpt
+nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260112/lightning_logs/version_1/checkpoints/last.ckpt
 
 # set the running dir
 hydra:

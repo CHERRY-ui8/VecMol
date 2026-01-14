@@ -1,0 +1,38 @@
+# Field Quality Evaluation Configuration for QM9 Dataset
+
+defaults:
+  - dset: qm9
+  - converter: gnf_converter_qm9
+  - encoder: gnn_small
+  - decoder: decoder_global_small
+  - override hydra/job_logging: custom
+  - _self_
+
+seed: 1234  # 随机种子，确保结果可重现
+
+# 数据集类型
+dataset_type: qm9
+
+# Neural Field模型路径
+nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/model-epoch=999.ckpt
+
+# 数据集分割（train/val/test）
+split: test
+
+# 评估的样本数量（None表示使用全部）
+num_samples: 4000
+
+# Batch size（评估时通常使用1）
+batch_size: 1
+
+# 是否采样完整网格
+sample_full_grid: false
+
+# 输出目录
+output_dir: ../exps/analysis/field_quality/qm9
+
+# Hydra 设置
+hydra:
+  run:
+    dir: ../exps/analysis/field_quality
+

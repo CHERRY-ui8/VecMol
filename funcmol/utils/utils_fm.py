@@ -12,21 +12,21 @@ def compute_position_weights(
     grid_coords: torch.Tensor,
     batch_idx: torch.Tensor,
     radius: float = 3.0,
-    weight_alpha: float = 0.1,
+    weight_alpha: float = 0.5,
     device: torch.device = None
 ) -> torch.Tensor:
     """
     Compute position weights for grid coordinates based on the number of nearby atoms.
     
     For each grid coordinate, count the number of atoms within the specified radius,
-    and compute weight as: weight = 0.1 + alpha * num_atoms
+    and compute weight as: weight = 1 + alpha * num_atoms
     
     Args:
         atom_coords: Atom coordinates [N_atoms, 3]
         grid_coords: Grid coordinates [B, n_grid, 3] or [n_grid, 3]
         batch_idx: Batch index for atoms [N_atoms] indicating which molecule each atom belongs to
         radius: Radius threshold in Angstroms for counting nearby atoms
-        weight_alpha: Weight coefficient for linear weighting: weight = 0.1 + alpha * num_atoms
+        weight_alpha: Weight coefficient for linear weighting: weight = 1 + alpha * num_atoms
         device: Device to perform computation on. If None, uses atom_coords device.
     
     Returns:
@@ -57,14 +57,14 @@ def compute_position_weights(
             raise ValueError(f"Batch size mismatch: grid_coords has {B} batches, but batch_idx suggests {B_actual} batches")
     
     # Initialize weights (will be updated based on nearby atoms)
-    weights = torch.full((B, n_grid), 0.1, device=device, dtype=torch.float32)
+    weights = torch.full((B, n_grid), 1.0, device=device, dtype=torch.float32)
     
     # Process each molecule in the batch
     for b_idx, batch_id in enumerate(unique_batches):
         # Get atoms belonging to this batch
         atom_mask = (batch_idx == batch_id)
         if not atom_mask.any():
-            # No atoms for this batch, keep weights as 0.1 (base weight)
+            # No atoms for this batch, keep weights as 1.0 (base weight)
             continue
         
         batch_atom_coords = atom_coords[atom_mask]  # [N_atoms_b, 3]
@@ -79,8 +79,8 @@ def compute_position_weights(
         nearby_mask = distances < radius  # [n_grid, N_atoms_b]
         num_nearby_atoms = nearby_mask.sum(dim=1).float()  # [n_grid]
         
-        # Compute weights: weight = 0.1 + alpha * num_atoms
-        batch_weights = 0.1 + weight_alpha * num_nearby_atoms  # [n_grid]
+        # Compute weights: weight = 1 + alpha * num_atoms
+        batch_weights = 1.0 + weight_alpha * num_nearby_atoms  # [n_grid]
         weights[b_idx] = batch_weights
     
     return weights

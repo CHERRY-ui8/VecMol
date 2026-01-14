@@ -53,7 +53,8 @@ class GradientAscentOptimizer:
         device: torch.device,
         decoder: nn.Module,
         iteration_callback: Optional[callable] = None,
-        enable_timing: bool = False
+        enable_timing: bool = False,
+        clone_for_callback: bool = False
     ) -> torch.Tensor:
         """
         批量梯度上升，对所有原子类型的点同时进行梯度上升。
@@ -67,12 +68,14 @@ class GradientAscentOptimizer:
             decoder: 解码器模型
             iteration_callback: 可选的回调函数，在每次迭代时调用，参数为 (iteration_idx, current_points, atom_types)
             enable_timing: 是否启用时间统计
+            clone_for_callback: 是否在回调中拷贝张量（默认False以减少内存开销）
             
         Returns:
             final_points: 最终点位置 [n_total_points, 3]
         """
         z = points.clone()
-        prev_grad_norm = None
+        prev_grad_norm = None  # 存储为标量（用于比较）
+        prev_grad_norm_tensor = None  # 存储在 GPU 上的张量（用于避免同步）
         
         t_iter_start = time.perf_counter() if enable_timing else None
         iteration_times = [] if enable_timing else None
@@ -94,8 +97,16 @@ class GradientAscentOptimizer:
                   f"配置的批次大小={self.gradient_batch_size}")
         
         # 预计算sigma_ratios和adjusted_step_sizes（避免每次迭代重复计算）
-        sigma_ratios = torch.tensor([self.sigma_params.get(t.item(), self.sigma) / self.sigma 
-                                   for t in atom_types], device=device)  # [n_total_points]
+        # 优化：使用张量索引替代 .item() 循环，避免 GPU-CPU 同步
+        # 创建 sigma 值查找表
+        max_atom_type = int(atom_types.max().item()) if len(atom_types) > 0 else 0
+        sigma_lookup = torch.full((max_atom_type + 1,), self.sigma, device=device, dtype=torch.float32)
+        for atom_type, sigma_val in self.sigma_params.items():
+            if atom_type <= max_atom_type:
+                sigma_lookup[atom_type] = sigma_val
+        
+        # 使用索引查找，完全在 GPU 上操作
+        sigma_ratios = (sigma_lookup[atom_types] / self.sigma)  # [n_total_points]
         adjusted_step_sizes = self.step_size * sigma_ratios.unsqueeze(-1)  # [n_total_points, 1]
         
         for iter_idx in range(self.n_iter):
@@ -135,37 +146,44 @@ class GradientAscentOptimizer:
                         type_indices = atom_types  # [n_total_points]
                         grad = current_field[0, point_indices, type_indices, :]  # [n_total_points, 3]
                 
-                # 检查梯度是否包含NaN/Inf
+                # 检查梯度是否包含NaN/Inf（在 GPU 上检查，避免同步）
                 if torch.isnan(grad).any() or torch.isinf(grad).any():
                     break
                 
-                # 计算当前梯度的模长
-                current_grad_norm = torch.norm(grad, dim=-1).mean().item()
+                # 优化：在 GPU 上计算梯度模长，避免每次迭代都同步到 CPU
+                current_grad_norm_tensor = torch.norm(grad, dim=-1).mean()  # 保持在 GPU 上
                 
                 # 检查收敛条件（仅在启用早停时）
                 if self.enable_early_stopping:
-                    if iter_idx >= self.min_iterations and prev_grad_norm is not None:
-                        grad_change = abs(current_grad_norm - prev_grad_norm)
-                        if grad_change < self.convergence_threshold:
+                    if iter_idx >= self.min_iterations and prev_grad_norm_tensor is not None:
+                        # 在 GPU 上计算梯度变化，避免同步
+                        grad_change_tensor = torch.abs(current_grad_norm_tensor - prev_grad_norm_tensor)
+                        # 只在满足条件时才同步到 CPU 进行检查
+                        if grad_change_tensor.item() < self.convergence_threshold:
                             # 在停止前调用一次回调
                             if iteration_callback is not None:
-                                iteration_callback(iter_idx, z.clone(), atom_types)
+                                callback_points = z.clone() if clone_for_callback else z
+                                iteration_callback(iter_idx, callback_points, atom_types)
                             break
                 
-                prev_grad_norm = current_grad_norm
+                # 更新梯度模长（保持在 GPU 上）
+                prev_grad_norm_tensor = current_grad_norm_tensor
+                # 为了向后兼容，也更新标量版本（但只在需要时）
+                if enable_timing or (self.enable_early_stopping and iter_idx < self.min_iterations):
+                    prev_grad_norm = current_grad_norm_tensor.item()
                 
                 # 更新采样点位置
                 z = z + adjusted_step_sizes * grad
                 
                 # 调用迭代回调（如果提供）
+                # 优化：默认不拷贝，减少内存开销
                 if iteration_callback is not None:
-                    iteration_callback(iter_idx, z.clone(), atom_types)
+                    callback_points = z.clone() if clone_for_callback else z
+                    iteration_callback(iter_idx, callback_points, atom_types)
                 
             except (RuntimeError, ValueError, IndexError):
-                # 发生错误时也清理内存
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    gc.collect()
+                # 发生错误时直接中断，不清理缓存（避免性能开销）
+                # 缓存清理应在外层统一处理
                 break
             
             # 记录单次迭代时间

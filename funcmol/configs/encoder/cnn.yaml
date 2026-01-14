@@ -1,3 +1,0 @@
-use_attention: False
-level_channels: [256, 512, 1024]
-smaller: False

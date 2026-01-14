@@ -76,42 +76,62 @@ class GradientFieldComputer:
         atom_type_mask = (atom_types.unsqueeze(1) == torch.arange(n_atom_types, device=device).unsqueeze(0))  # [n_atoms, n_atom_types]
         
         # 创建sigma参数矩阵 [n_atom_types]
-        sigma_values = torch.tensor([self.sigma_params.get(t, self.sigma) for t in range(n_atom_types)], device=device)  # [n_atom_types]
+        sigma_values = torch.tensor([self.sigma_params.get(t, self.sigma) for t in range(n_atom_types)], device=device, dtype=torch.float32)  # [n_atom_types]
         
         # 初始化结果张量
         vector_field = torch.zeros(n_points, n_atom_types, 3, device=device)
         
+        # 优化：为向量化准备原子类型索引
+        # 创建原子类型到索引的映射 [n_atoms]，用于 scatter 操作
+        atom_type_indices = atom_types  # [n_atoms]，值在 [0, n_atom_types-1]
+        
         # 根据梯度场计算方法进行完全矩阵化计算
         if self.gradient_field_method == "gaussian":
-            # 为每个原子类型分别计算高斯权重（保持与原始实现一致）
-            for t in range(n_atom_types):
-                type_mask = atom_type_mask[:, t]  # [n_atoms]
-                if type_mask.sum() > 0:
-                    sigma = sigma_values[t]
-                    type_diff = diff[type_mask]  # [n_type_atoms, n_points, 3]
-                    type_dist_sq = dist_sq[type_mask]  # [n_type_atoms, n_points, 1]
-                    
-                    individual_gradients = type_diff * torch.exp(-type_dist_sq / (2 * sigma ** 2)) / (sigma ** 2)
-                    vector_field[:, t, :] = torch.sum(individual_gradients, dim=0)  # [n_points, 3]
+            # 向量化版本：一次性处理所有原子类型
+            # 扩展 sigma_values 以匹配每个原子 [n_atoms, 1, 1]
+            sigma_per_atom = sigma_values[atom_type_indices].unsqueeze(1).unsqueeze(2)  # [n_atoms, 1, 1]
+            
+            # 为所有原子计算高斯权重 [n_atoms, n_points, 3]
+            gaussian_weights = torch.exp(-dist_sq / (2 * sigma_per_atom ** 2)) / (sigma_per_atom ** 2)
+            individual_gradients = diff * gaussian_weights  # [n_atoms, n_points, 3]
+            
+            # 使用 index_add 按原子类型聚合：对每个查询点和原子类型，累加对应原子的梯度
+            # 重塑为 [n_atoms * n_points, 3] 以便使用 index_add
+            n_atoms = coords.size(0)
+            individual_gradients_flat = individual_gradients.view(n_atoms * n_points, 3)  # [n_atoms * n_points, 3]
+            
+            # 为每个 (atom, point) 对创建索引：point_idx * n_atom_types + atom_type
+            point_indices = torch.arange(n_points, device=device).unsqueeze(0).expand(n_atoms, -1)  # [n_atoms, n_points]
+            point_indices_flat = point_indices.flatten()  # [n_atoms * n_points]
+            atom_type_indices_flat = atom_type_indices.unsqueeze(1).expand(-1, n_points).flatten()  # [n_atoms * n_points]
+            
+            # 计算在 vector_field 中的线性索引
+            linear_indices = point_indices_flat * n_atom_types + atom_type_indices_flat  # [n_atoms * n_points]
+            
+            # 使用 index_add 聚合
+            vector_field_flat = vector_field.view(n_points * n_atom_types, 3)  # [n_points * n_atom_types, 3]
+            vector_field_flat.index_add_(0, linear_indices, individual_gradients_flat)
+            vector_field = vector_field_flat.view(n_points, n_atom_types, 3)
             
         elif self.gradient_field_method == "softmax":
+            # 优化版本：批量处理，减少 Python 循环开销
             # 计算距离 [n_atoms, n_points]
             distances = torch.sqrt(dist_sq.squeeze(-1))  # [n_atoms, n_points]
             
-            # 为每个原子类型分别计算softmax权重
+            # 为每个原子类型批量计算
             for t in range(n_atom_types):
                 type_mask = atom_type_mask[:, t]  # [n_atoms]
                 if type_mask.sum() > 0:
                     type_distances = distances[type_mask]  # [n_type_atoms, n_points]
                     type_diff = diff[type_mask]  # [n_type_atoms, n_points, 3]
                     
-                    # 计算softmax权重
+                    # 批量计算 softmax 权重 [n_type_atoms, n_points]
                     weights = torch.softmax(-type_distances / self.temperature, dim=0)  # [n_type_atoms, n_points]
                     weights = weights.unsqueeze(-1)  # [n_type_atoms, n_points, 1]
                     weighted_gradients = type_diff * weights  # [n_type_atoms, n_points, 3]
                     type_gradients = torch.sum(weighted_gradients, dim=0)  # [n_points, 3]
                     
-                    # 应用梯度模长截断
+                    # 批量应用梯度模长截断
                     if self.gradient_clip_threshold > 0:
                         gradient_magnitudes = torch.norm(type_gradients, dim=-1, keepdim=True)  # [n_points, 1]
                         clip_mask = gradient_magnitudes > self.gradient_clip_threshold
@@ -244,7 +264,11 @@ class GradientFieldComputer:
             variances = torch.zeros(n_points, n_atom_types, device=device)
             
             if per_type_independent:
-                # 每个原子类型独立处理：基于该类型的field向量找最近邻
+                # 优化：批量处理所有原子类型，减少 Python 循环开销
+                # 为所有原子类型同时计算 field 模长
+                field_magnitudes_all = torch.norm(field_values, dim=2)  # [n_points, n_atom_types]
+                
+                # 对每个原子类型分别计算（因为每个类型的最近邻可能不同）
                 for t in range(n_atom_types):
                     field_t = field_values[:, t, :]  # [n_points, 3]
                     
@@ -256,8 +280,8 @@ class GradientFieldComputer:
                     _, k_nearest_indices = torch.topk(field_dist_matrix, k=k_neighbors + 1, dim=1, largest=False)  # [n_points, k+1]
                     k_nearest_indices = k_nearest_indices[:, 1:]  # 排除自身 [n_points, k]
                     
-                    # 计算field的模长
-                    field_magnitudes = torch.norm(field_t, dim=1)  # [n_points]
+                    # 使用预计算的模长
+                    field_magnitudes = field_magnitudes_all[:, t]  # [n_points]
                     
                     # 对每个点，计算其k个最近邻的field模长
                     neighbor_magnitudes = field_magnitudes[k_nearest_indices]  # [n_points, k]
@@ -274,10 +298,12 @@ class GradientFieldComputer:
                 _, k_nearest_indices = torch.topk(dist_matrix, k=k_neighbors + 1, dim=1, largest=False)  # [n_points, k+1]
                 k_nearest_indices = k_nearest_indices[:, 1:]  # 排除自身 [n_points, k]
                 
+                # 优化：批量计算所有原子类型的 field 模长
+                field_magnitudes_all = torch.norm(field_values, dim=2)  # [n_points, n_atom_types]
+                
                 for t in range(n_atom_types):
-                    field_t = field_values[:, t, :]  # [n_points, 3]
-                    # 计算field的模长
-                    field_magnitudes = torch.norm(field_t, dim=1)  # [n_points]
+                    # 使用预计算的模长
+                    field_magnitudes = field_magnitudes_all[:, t]  # [n_points]
                     
                     # 对每个点，计算其k个最近邻的field模长
                     neighbor_magnitudes = field_magnitudes[k_nearest_indices]  # [n_points, k]

@@ -68,6 +68,7 @@ class GNFConverter(nn.Module):
                 debug_bond_validation: bool = False,  # 是否输出键长检查的调试信息
                 gradient_batch_size: Optional[int] = None,  # 梯度计算时的批次大小，None表示一次性处理所有点
                 n_initial_atoms_no_bond_check: int = 3,  # 前N个原子不受键长限制（无论上限还是下限）
+                enable_bond_validation: bool = True,  # 是否启用键长检查，默认True
                 sampling_range_min: float = -7.0,  # 撒点范围的最小值（单位：Å）
                 sampling_range_max: float = 7.0):  # 撒点范围的最大值（单位：Å）
         super().__init__()
@@ -104,6 +105,8 @@ class GNFConverter(nn.Module):
         self.enable_clustering_history = enable_clustering_history
         self.debug_bond_validation = debug_bond_validation
         self.gradient_batch_size = gradient_batch_size
+        self.n_initial_atoms_no_bond_check = n_initial_atoms_no_bond_check
+        self.enable_bond_validation = enable_bond_validation
         self.sampling_range_min = sampling_range_min
         self.sampling_range_max = sampling_range_max
         
@@ -178,6 +181,7 @@ class GNFConverter(nn.Module):
             max_clustering_iterations=max_clustering_iterations,
             debug_bond_validation=debug_bond_validation,
             n_initial_atoms_no_bond_check=n_initial_atoms_no_bond_check,
+            enable_bond_validation=enable_bond_validation,
         )
         
         # 初始化采样模块
@@ -283,6 +287,11 @@ class GNFConverter(nn.Module):
 
         all_coords = []
         all_types = []
+        
+        # 对于批次化的codes，我们可以尝试并行处理
+        # 但由于聚类、连通分支选择等步骤的复杂性，我们仍然逐个处理每个分子
+        # 不过，process_atom_types_matrix内部已经支持批次化的decoder调用，可以实现部分并行化
+        
         # 对每个batch分别处理
         for b in range(batch_size):
             t_batch_start = time.perf_counter() if enable_timing else None
@@ -295,6 +304,7 @@ class GNFConverter(nn.Module):
                 break
             
             # 检查当前batch的codes
+            # 注意：虽然我们逐个处理每个分子，但process_atom_types_matrix内部已经支持批次化的decoder调用
             current_codes = codes[b:b+1]
             
             if current_codes.numel() == 0:
@@ -425,12 +435,25 @@ class GNFConverter(nn.Module):
                 merged_coords = torch.cat(coords_list, dim=0)
                 merged_types = torch.cat(types_list, dim=0)
                 
-                # 选择最大连通分支
-                t_connected_start = time.perf_counter() if enable_timing else None
-                filtered_coords, filtered_types = self.connectivity_analyzer.select_largest_connected_component(
-                    merged_coords, merged_types
-                )
-                t_connected_end = time.perf_counter() if enable_timing else None
+                # 选择最大连通分支（仅在启用键长检查时执行，因为连通性判断基于键长阈值）
+                # 如果禁用了键长检查，保留所有原子，不进行连通分支过滤
+                if self.enable_bond_validation:
+                    t_connected_start = time.perf_counter() if enable_timing else None
+                    filtered_coords, filtered_types = self.connectivity_analyzer.select_largest_connected_component(
+                        merged_coords, merged_types
+                    )
+                    t_connected_end = time.perf_counter() if enable_timing else None
+                else:
+                    # 禁用键长检查时，只过滤掉填充原子（-1），保留所有有效原子
+                    valid_mask = (merged_types != PADDING_INDEX) & (merged_types != -1)
+                    if valid_mask.any():
+                        filtered_coords = merged_coords[valid_mask]
+                        filtered_types = merged_types[valid_mask]
+                    else:
+                        filtered_coords = torch.empty(0, 3, device=device)
+                        filtered_types = torch.empty(0, dtype=torch.long, device=device)
+                    t_connected_start = None
+                    t_connected_end = None
                 
                 all_coords.append(filtered_coords)
                 all_types.append(filtered_types)

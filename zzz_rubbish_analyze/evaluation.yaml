@@ -1,5 +1,5 @@
 # 实验基础目录
-experiment_dir: "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251221"
+experiment_dir: "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20260105"
 
 # CSV文件配置（用于原子统计分析）
 csv:
@@ -8,12 +8,12 @@ csv:
     # - "denoiser_evaluation_results_1.csv"
     # - "denoiser_evaluation_results_2.csv"
     # - "denoiser_evaluation_results_3.csv"
-    - "samples/20251221_version_0_last/denoiser_evaluation_results.csv"
+    - "samples/20260105_version_1_last_withbonds/denoiser_evaluation_results.csv"
     
 # 分子文件目录配置（用于结构分析和质量评估）
 molecule:
   # molecule目录路径（相对于experiment_dir或绝对路径）
-  dir: "samples/20251221_version_0_last/molecule"
+  dir: "samples/20260105_version_1_last_withbonds/molecule"
   
   # 分子文件匹配模式（用于查找.npz文件）
   pattern: "generated_*.npz"
@@ -60,3 +60,10 @@ bond_evaluation:
   relaxed_margin1: 50  # pm单位
   relaxed_margin2: 30  # pm单位
   relaxed_margin3: 15  # pm单位
+
+# 质量评估配置
+quality_evaluation:
+  # 是否使用 SDF 文件中的键信息（推荐使用，来自 OpenBabel）
+  # True: 使用 SDF 文件中的键（如果存在），否则回退到距离方法
+  # False: 使用距离方法重新推断键
+  use_sdf_bonds: true

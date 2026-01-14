@@ -1,8 +1,8 @@
 defaults:
   - dset: drugs
   - converter: gnf_converter_drugs
-  - encoder: gnn
-  - decoder: decoder_global
+  - encoder: gnn_large # gnn
+  - decoder: decoder_global_large # decoder_global
   - override hydra/job_logging: custom
   - _self_
 
@@ -17,22 +17,41 @@ exp_name: "nf_${dset.dset_name}/${now:%Y%m%d}"
 dirname: "${exp_dir}/${exp_name}"
 reload_model_path: null
 auto_resume: False  # 是否自动加载最新的checkpoint继续训练
-n_samples: None
 
 # training params
-ckpt_every_n_epochs: 5  # 每隔多少epoch保存一次ckpt
+ckpt_every_n_epochs: 1  # 每隔多少epoch保存一次ckpt
 n_epochs: 500
 eval_every: 1
-use_ema: False
-lr_decay: False
+
+# Learning rate scheduler configuration
+lr_decay: True  # 启用学习率衰减，防止后期loss爆炸
+lr_scheduler_type: "plateau"  # "plateau" (ReduceLROnPlateau) 或 "multistep" (MultiStepLR)
+
+# Warmup configuration
+warmup:
+  enabled: False  # 是否启用学习率 warmup
+  warmup_steps: 10000  # warmup 的步数（steps），学习率从 0 线性增长到目标学习率
+
+# ReduceLROnPlateau 参数（当 lr_scheduler_type="plateau" 时使用）
+# 智能学习率调整：当验证损失不再下降时自动降低学习率
+lr_factor: 0.5  # 学习率衰减因子（每次降低为原来的0.5倍）
+lr_patience: 5  # 等待多少个epoch验证损失没有改善才降低学习率
+lr_min: 1e-6  # 最小学习率下限
+lr_mode: "min"  # "min" 表示监控指标下降（val_loss越小越好）
+
+# MultiStepLR 参数（当 lr_scheduler_type="multistep" 时使用）
+lr_milestones: [30, 60, 90]  # 在这些epoch降低学习率
+lr_gamma: 0.5  # 每次衰减为原来的0.5倍（比默认0.1更温和）
+
+# Loss weighting: 对更重要的区域（原子附近）加权
+loss_weighting:
+  enabled: True  # 是否启用loss加权
+  atom_distance_scale: 0.5  # 原子距离衰减尺度（越小，距离衰减越快）
+  # 分别计算grid点和邻近点的loss时的权重
+  grid_loss_weight: 1.0  # grid点loss的权重
+  neighbor_loss_weight: 1.0  # 邻近点loss的权重
 
 # set the running dir
 hydra:
   run:
     dir: ${dirname}
-  job:
-    config:
-      override_dirname:
-        kv_sep: ""
-        item_sep: "_"
-        exclude_keys: ["exp_dir"]

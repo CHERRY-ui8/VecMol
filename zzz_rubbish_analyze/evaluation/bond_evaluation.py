@@ -1193,9 +1193,10 @@ def analyze_bonds(molecule_dir,
                  strict_margin1, strict_margin2, strict_margin3,
                  medium_margin1, medium_margin2, medium_margin3,
                  relaxed_margin1, relaxed_margin2, relaxed_margin3,
-                 output_dir=None):
+                 output_dir=None,
+                 use_sdf_bonds=True):
     """
-    分析分子的键和连通性（使用三种标准：strict, medium, relaxed）
+    分析分子的键和连通性
     
     Args:
         molecule_dir: 包含 .npz 文件的目录
@@ -1203,14 +1204,23 @@ def analyze_bonds(molecule_dir,
         strict_margin1/2/3: 严格标准的margin值（pm单位）
         medium_margin1/2/3: 中等标准的margin值（pm单位）
         relaxed_margin1/2/3: 宽松标准的margin值（pm单位）
+        use_sdf_bonds: 是否使用 SDF 文件中的键信息（默认 True）
+                      - True: 使用 SDF 文件中的键（如果存在），只分析一次
+                      - False: 使用三种不同的 margin 值重新构建键并分析
     
     Returns:
-        dict: 包含键和连通性分析结果的字典（包含三种标准的结果）
+        dict: 包含键和连通性分析结果的字典
     """
+    from funcmol.evaluation.quality_evaluation import _extract_bonds_from_sdf
+    import re
+    
     molecule_dir = Path(molecule_dir)
     npz_files = sorted(molecule_dir.glob("generated_*.npz"))
     
-    print(f"找到 {len(npz_files)} 个 .npz 分子文件")
+    if use_sdf_bonds:
+        print(f"找到 {len(npz_files)} 个 .npz 分子文件（将优先使用 SDF 文件中的键信息）")
+    else:
+        print(f"找到 {len(npz_files)} 个 .npz 分子文件（使用三种标准分析）")
     
     atom_decoder = atom_decoder_dict['qm9_with_h']
     dataset_info = {'name': 'qm9'}
@@ -1231,7 +1241,14 @@ def analyze_bonds(molecule_dir,
     num_components_relaxed = []
     is_connected_relaxed = []
     
-    print("分析分子键和连通性（使用三种标准）...")
+    if use_sdf_bonds:
+        print("分析分子键和连通性（使用 SDF 文件中的键）...")
+    else:
+        print("分析分子键和连通性（使用三种标准）...")
+    
+    sdf_count = 0
+    fallback_count = 0
+    
     for npz_file in tqdm(npz_files, desc="处理分子"):
         try:
             # 加载分子
@@ -1253,49 +1270,129 @@ def analyze_bonds(molecule_dir,
             
             distances = torch.cdist(positions, positions, p=2)
             
-            # 严格标准：分析键和连通性
-            num_comp_strict, is_conn_strict, missing_devs_strict = _analyze_bonds_with_standard(
-                positions, atom_types, atom_decoder, dataset_info,
-                strict_margin1, strict_margin2, strict_margin3
-            )
-            num_components_strict.append(num_comp_strict)
-            is_connected_strict.append(is_conn_strict)
-            all_missing_bond_deviations_strict.extend(missing_devs_strict)
-            
-            # 中等标准：分析键和连通性
-            num_comp_medium, is_conn_medium, missing_devs_medium = _analyze_bonds_with_standard(
-                positions, atom_types, atom_decoder, dataset_info,
-                medium_margin1, medium_margin2, medium_margin3
-            )
-            num_components_medium.append(num_comp_medium)
-            is_connected_medium.append(is_conn_medium)
-            all_missing_bond_deviations_medium.extend(missing_devs_medium)
-            
-            # 宽松标准：分析键和连通性
-            num_comp_relaxed, is_conn_relaxed, missing_devs_relaxed = _analyze_bonds_with_standard(
-                positions, atom_types, atom_decoder, dataset_info,
-                relaxed_margin1, relaxed_margin2, relaxed_margin3
-            )
-            num_components_relaxed.append(num_comp_relaxed)
-            is_connected_relaxed.append(is_conn_relaxed)
-            all_missing_bond_deviations_relaxed.extend(missing_devs_relaxed)
-            
-            # 计算键长（使用relaxed标准构建的键矩阵，用于键长统计）
-            _, _, bond_types_relaxed = build_xae_molecule(
-                positions=positions,
-                atom_types=atom_types,
-                dataset_info=dataset_info,
-                atom_decoder=atom_decoder,
-                margin1_val=relaxed_margin1,
-                margin2_val=relaxed_margin2,
-                margin3_val=relaxed_margin3
-            )
-            triu_mask = torch.triu(torch.ones_like(bond_types_relaxed, dtype=torch.bool), diagonal=1)
-            bond_mask = (bond_types_relaxed > 0) & triu_mask
-            
-            if bond_mask.any():
-                bond_distances = distances[bond_mask]
-                bond_lengths.extend(bond_distances.cpu().numpy())
+            if use_sdf_bonds:
+                # 优先尝试从 SDF 文件读取键信息
+                bond_types_sdf = None
+                npz_stem = npz_file.stem
+                match = re.search(r'generated_(\d+)_tanh', npz_stem)
+                if match:
+                    index = match.group(1)
+                    sdf_file = molecule_dir / f"genmol_{index}.sdf"
+                    
+                    if sdf_file.exists():
+                        try:
+                            with open(sdf_file, 'r', encoding='utf-8') as f:
+                                sdf_string = f.read()
+                            bond_types_sdf = _extract_bonds_from_sdf(sdf_string, len(atom_types))
+                            sdf_count += 1
+                        except Exception:
+                            bond_types_sdf = None
+                
+                # 如果找到 SDF 键，使用它进行分析
+                if bond_types_sdf is not None:
+                    # 计算连通性
+                    num_components, is_connected = check_connectivity(bond_types_sdf)
+                    num_components_strict.append(num_components)
+                    is_connected_strict.append(is_connected)
+                    # 使用 relaxed margin 计算缺失键偏差（用于统计）
+                    missing_bonds = compute_missing_bond_deviations_strict(
+                        positions, atom_types, bond_types_sdf, atom_decoder, dataset_info,
+                        strict_margin1=relaxed_margin1,
+                        strict_margin2=relaxed_margin2,
+                        strict_margin3=relaxed_margin3
+                    )
+                    missing_deviations = [bond['deviation_pct'] for bond in missing_bonds] if missing_bonds else []
+                    all_missing_bond_deviations_strict.extend(missing_deviations)
+                    # 三种标准都使用相同的结果
+                    num_components_medium.append(num_components)
+                    is_connected_medium.append(is_connected)
+                    all_missing_bond_deviations_medium.extend(missing_deviations)
+                    num_components_relaxed.append(num_components)
+                    is_connected_relaxed.append(is_connected)
+                    all_missing_bond_deviations_relaxed.extend(missing_deviations)
+                    
+                    # 计算键长
+                    triu_mask = torch.triu(torch.ones_like(bond_types_sdf, dtype=torch.bool), diagonal=1)
+                    bond_mask = (bond_types_sdf > 0) & triu_mask
+                    if bond_mask.any():
+                        bond_distances = distances[bond_mask]
+                        bond_lengths.extend(bond_distances.cpu().numpy())
+                else:
+                    # 回退到距离方法
+                    fallback_count += 1
+                    num_comp_strict, is_conn_strict, missing_devs_strict = _analyze_bonds_with_standard(
+                        positions, atom_types, atom_decoder, dataset_info,
+                        strict_margin1, strict_margin2, strict_margin3
+                    )
+                    num_components_strict.append(num_comp_strict)
+                    is_connected_strict.append(is_conn_strict)
+                    all_missing_bond_deviations_strict.extend(missing_devs_strict)
+                    num_components_medium.append(num_comp_strict)
+                    is_connected_medium.append(is_conn_strict)
+                    all_missing_bond_deviations_medium.extend(missing_devs_strict)
+                    num_components_relaxed.append(num_comp_strict)
+                    is_connected_relaxed.append(is_conn_strict)
+                    all_missing_bond_deviations_relaxed.extend(missing_devs_strict)
+                    
+                    _, _, bond_types_fallback = build_xae_molecule(
+                        positions=positions,
+                        atom_types=atom_types,
+                        dataset_info=dataset_info,
+                        atom_decoder=atom_decoder,
+                        margin1_val=relaxed_margin1,
+                        margin2_val=relaxed_margin2,
+                        margin3_val=relaxed_margin3
+                    )
+                    triu_mask = torch.triu(torch.ones_like(bond_types_fallback, dtype=torch.bool), diagonal=1)
+                    bond_mask = (bond_types_fallback > 0) & triu_mask
+                    if bond_mask.any():
+                        bond_distances = distances[bond_mask]
+                        bond_lengths.extend(bond_distances.cpu().numpy())
+            else:
+                # 使用三种标准分析
+                # 严格标准：分析键和连通性
+                num_comp_strict, is_conn_strict, missing_devs_strict = _analyze_bonds_with_standard(
+                    positions, atom_types, atom_decoder, dataset_info,
+                    strict_margin1, strict_margin2, strict_margin3
+                )
+                num_components_strict.append(num_comp_strict)
+                is_connected_strict.append(is_conn_strict)
+                all_missing_bond_deviations_strict.extend(missing_devs_strict)
+                
+                # 中等标准：分析键和连通性
+                num_comp_medium, is_conn_medium, missing_devs_medium = _analyze_bonds_with_standard(
+                    positions, atom_types, atom_decoder, dataset_info,
+                    medium_margin1, medium_margin2, medium_margin3
+                )
+                num_components_medium.append(num_comp_medium)
+                is_connected_medium.append(is_conn_medium)
+                all_missing_bond_deviations_medium.extend(missing_devs_medium)
+                
+                # 宽松标准：分析键和连通性
+                num_comp_relaxed, is_conn_relaxed, missing_devs_relaxed = _analyze_bonds_with_standard(
+                    positions, atom_types, atom_decoder, dataset_info,
+                    relaxed_margin1, relaxed_margin2, relaxed_margin3
+                )
+                num_components_relaxed.append(num_comp_relaxed)
+                is_connected_relaxed.append(is_conn_relaxed)
+                all_missing_bond_deviations_relaxed.extend(missing_devs_relaxed)
+                
+                # 计算键长（使用relaxed标准构建的键矩阵，用于键长统计）
+                _, _, bond_types_relaxed = build_xae_molecule(
+                    positions=positions,
+                    atom_types=atom_types,
+                    dataset_info=dataset_info,
+                    atom_decoder=atom_decoder,
+                    margin1_val=relaxed_margin1,
+                    margin2_val=relaxed_margin2,
+                    margin3_val=relaxed_margin3
+                )
+                triu_mask = torch.triu(torch.ones_like(bond_types_relaxed, dtype=torch.bool), diagonal=1)
+                bond_mask = (bond_types_relaxed > 0) & triu_mask
+                
+                if bond_mask.any():
+                    bond_distances = distances[bond_mask]
+                    bond_lengths.extend(bond_distances.cpu().numpy())
             
         except Exception as e:
             print(f"\n处理文件 {npz_file} 时出错: {e}")
@@ -1321,13 +1418,21 @@ def analyze_bonds(molecule_dir,
     print("键和连通性分析结果")
     print("="*60)
     
-    # 打印三种标准的结果
-    _print_standard_results("严格标准", strict_margin1, strict_margin2, strict_margin3,
-                           num_components_strict, is_connected_strict, all_missing_bond_deviations_strict)
-    _print_standard_results("中等标准", medium_margin1, medium_margin2, medium_margin3,
-                           num_components_medium, is_connected_medium, all_missing_bond_deviations_medium)
-    _print_standard_results("宽松标准", relaxed_margin1, relaxed_margin2, relaxed_margin3,
-                           num_components_relaxed, is_connected_relaxed, all_missing_bond_deviations_relaxed)
+    if use_sdf_bonds:
+        print(f"✅ 使用 SDF 文件中的键信息（来自 OpenBabel）")
+        print(f"  - 从 SDF 文件读取键信息: {sdf_count} 个")
+        print(f"  - 使用距离方法推断键: {fallback_count} 个")
+        # 使用 SDF 时，三种标准结果相同，只打印一次
+        _print_standard_results("SDF 键（来自 OpenBabel）", relaxed_margin1, relaxed_margin2, relaxed_margin3,
+                               num_components_strict, is_connected_strict, all_missing_bond_deviations_strict)
+    else:
+        # 打印三种标准的结果
+        _print_standard_results("严格标准", strict_margin1, strict_margin2, strict_margin3,
+                               num_components_strict, is_connected_strict, all_missing_bond_deviations_strict)
+        _print_standard_results("中等标准", medium_margin1, medium_margin2, medium_margin3,
+                               num_components_medium, is_connected_medium, all_missing_bond_deviations_medium)
+        _print_standard_results("宽松标准", relaxed_margin1, relaxed_margin2, relaxed_margin3,
+                               num_components_relaxed, is_connected_relaxed, all_missing_bond_deviations_relaxed)
     
     # 键长统计（使用relaxed标准）
     print(f"\n🔗 键长统计（使用relaxed标准）:")

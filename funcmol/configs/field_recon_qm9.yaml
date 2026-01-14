@@ -1,10 +1,10 @@
-# Field Reconstruction Evaluation Configuration
+# Field Reconstruction Evaluation Configuration for QM9 Dataset
 
 defaults:
-  - dset: qm9  # 或 drugs
-  - converter: gnf_converter_qm9  # 或 gnf_converter_drugs
-  - encoder: gnn  # 添加 encoder 配置
-  - decoder: decoder_global  # 添加 decoder 配置
+  - dset: qm9
+  - converter: gnf_converter_qm9
+  - encoder: gnn
+  - decoder: decoder_global
   - override hydra/job_logging: custom
   - _self_
 
@@ -29,6 +29,12 @@ field_methods: ['tanh']  # 要比较的field方法，现在已经确定了使用
 nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/model-epoch=999.ckpt
 # nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251120/lightning_logs/version_0/checkpoints/model-epoch=259.ckpt
 # 注意：输出目录将基于此路径自动创建，如: exps/neural_field/nf_qm9_20250804_153549_358664
+
+# 多GPU并行设置
+use_multi_gpu: true  # 是否启用多GPU并行处理（分子级别并行），默认true
+gpu_list: null  # 指定要使用的GPU列表，例如 [1,2,3] 或 "1,2,3"，null表示使用CUDA_VISIBLE_DEVICES环境变量或所有GPU
+num_workers: null  # 工作进程数，null表示自动使用所有可用GPU数量，也可以手动指定
+batch_size: 1  # 单GPU模式下的批次大小（多GPU模式下不使用此参数）
 
 # Hydra 设置
 hydra:

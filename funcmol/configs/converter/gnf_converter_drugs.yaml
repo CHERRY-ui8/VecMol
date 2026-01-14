@@ -1,12 +1,13 @@
 sigma: 1
-n_iter: 3000  # 增加迭代次数，因为drugs分子更大
+n_iter: 600  # 略微增加迭代次数，因为drugs分子更大
 # 早停机制配置（可选）
 enable_early_stopping: False  # 是否启用早停机制，默认False（关闭早停，运行完整迭代）
 convergence_threshold: 1e-6  # 收敛阈值（梯度模长变化），仅在启用早停时有效
 min_iterations: 50  # 最少迭代次数（早停前必须达到的最小迭代数），仅在启用早停时有效
-# DBSCAN聚类参数
-eps: 0.01      # 邻域半径，单位为Å。越小越严格（原子密集度高就设小），目前调得很小，但是如果使用预测的梯度场，需要适当放大
-min_samples: 10 # 至少多少个点才能形成一个"原子簇" TODO：这个参数可能需要调整（5的时候感觉有点小）
+
+# 梯度计算批次大小（可选，用于优化性能）
+gradient_batch_size: 2000  # 尝试中等批次大小，平衡性能和内存
+
 sigma_ratios:
   C: 0.9    # 碳原子，较小的 sigma 使梯度场更集中
   H: 1.3    # 氢原子，较大的 sigma 使梯度场更分散
@@ -16,15 +17,32 @@ sigma_ratios:
   S: 1.1    # 硫原子，与氧原子类似
   Cl: 1.3   # 氯原子，较大的 sigma
   Br: 1.4   # 溴原子，最大的 sigma
+
 gradient_field_method: tanh # softmax, sfnorm, logsumexp, inverse_square, tanh, gaussian_mag, distance
 temperature: 0.01 # 温度越高，分布越尖锐，越容易收敛（很可能极端地收敛到单个原子）；温度越低，分布越平缓，越不易收敛
 logsumexp_eps: 1e-8  # logsumexp方法的数值稳定性参数
 inverse_square_strength: 1.0 # 距离平方反比方法的强度参数
 gradient_clip_threshold: 0.3 # 梯度模长截断阈值
 # 梯度采样相关参数
-gradient_sampling_candidate_multiplier: 10  # 梯度采样候选点倍数
+gradient_sampling_candidate_multiplier: 3  # 梯度采样候选点倍数
+# field变化率采样参数
+field_variance_k_neighbors: 10     # 计算方差时使用的最近邻数量（k值越大，方差计算越平滑）
+field_variance_weight: 0.01         # softmax温度参数：值越小，分布越尖锐（更倾向方差大的点）；值越大，分布越平缓
 
-# 不同方法的参数配置
+# 撒点范围（单位：Å）
+sampling_range_min: -7.0  # 撒点范围的最小值（扩大范围以覆盖更大的分子）
+sampling_range_max: 7.0   # 撒点范围的最大值（扩大范围以覆盖更大的分子）    
+
+n_query_points_per_type:
+  C: 800  # 碳原子的 query_points 数
+  H: 800  # 氢原子的 query_points 数
+  O: 150  # 氧原子的 query_points 数
+  N: 250  # 氮原子的 query_points 数
+  F: 20  # 氟原子的 query_points 数
+  S: 20  # 硫原子的 query_points 数
+  Cl: 20  # 氯原子的 query_points 数
+  Br: 20  # 溴原子的 query_points 数
+
 method_configs:
   gaussian_mag:
     n_query_points: 3000  # 增加查询点数量，因为drugs分子更大
@@ -34,16 +52,18 @@ method_configs:
 
   tanh:
     n_query_points: 2000  # 增加查询点数量
-    step_size: 0.003      # 减小步长，更精细的优化
+    step_size: 0.05     # 减小步长，更精细的优化
     sig_sf: 0.1
     sig_mag: 2
   
 
 default_config: # softmax, logsumexp, inverse_square
-  n_query_points: 2000  # 增加查询点数量
-  step_size: 0.008      # 适当减小步长
+  n_query_points: 1000  # 增加查询点数量
+  step_size: 0.02     # 适当减小步长
   sig_sf: 0.1
   sig_mag: 0.45
+  eps: 0.05      # DBSCAN邻域半径参数
+  min_samples: 3  # DBSCAN最小样本数参数
 
 # 自回归聚类配置（可选）
 autoregressive_clustering:
@@ -54,5 +74,7 @@ autoregressive_clustering:
   max_clustering_iterations: 10  # 最大迭代轮数
   bond_length_tolerance: 0.4  # 键长合理性检查的上限容差（单位：Å），在标准键长基础上增加的容差
   bond_length_lower_tolerance: 0.2  # 键长合理性检查的下限容差（单位：Å），从标准键长中减去的容差
+  enable_bond_validation: False  # 是否启用键长检查，默认True。设置为False可以完全关闭键长检查
+  debug_bond_validation: True  # 是否输出键长检查的调试信息，用于诊断问题
   enable_clustering_history: False  # 是否记录聚类历史，默认False
   enable_timing: False  # 是否启用时间统计，默认False

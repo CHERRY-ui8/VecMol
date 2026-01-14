@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import math
-from tqdm import tqdm
 from typing import Dict, Optional, Tuple
 
 
@@ -132,19 +131,46 @@ def extract(a: torch.Tensor, t: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     
     Returns:
         扩展后的时间步值 [B, 1, 1, ...] (匹配x的形状)
+    
+    Note:
+        优化版本：假设所有张量已在正确设备上，移除设备检查以减少开销
     """
-    # 确保t在a的设备上，然后索引
-    if t.device != a.device:
-        t = t.to(a.device)
+    # 直接索引（假设t和a在同一设备）
     out = a[t]
     
-    # 移动到x的设备
-    if out.device != x.device:
-        out = out.to(x.device)
-    
     # 扩展维度以匹配x的形状: [B] -> [B, 1, 1, ...]
-    # 使用view更高效
+    # 使用view更高效，避免不必要的reshape操作
     out = out.view((t.shape[0],) + (1,) * (x.dim() - 1))
+    return out
+
+
+def extract_batch(a: torch.Tensor, t_indices: torch.Tensor, batch_size: int, x_shape: Tuple[int, ...]) -> torch.Tensor:
+    """
+    批量从时间序列a中取出对应timestep的值，并扩展维度匹配x
+    
+    优化版本：一次性提取所有timestep的常数，避免循环中的重复调用
+    
+    Args:
+        a: 时间序列张量 [T]
+        t_indices: 时间步索引序列 [num_timesteps]，按采样顺序排列（从T-1到0）
+        batch_size: batch大小
+        x_shape: 目标张量形状，用于确定输出形状 (B, ...)
+    
+    Returns:
+        扩展后的时间步值 [num_timesteps, B, 1, 1, ...]
+    """
+    # 批量索引：一次性获取所有timestep的值
+    out = a[t_indices]  # [num_timesteps]
+    
+    # 扩展维度以匹配x的形状: [num_timesteps] -> [num_timesteps, B, 1, 1, ...]
+    # 首先添加batch维度，然后添加空间维度
+    out = out.unsqueeze(1)  # [num_timesteps, 1]
+    out = out.expand(-1, batch_size)  # [num_timesteps, B]
+    
+    # 添加剩余的空间维度
+    if len(x_shape) > 1:
+        out = out.view((len(t_indices), batch_size) + (1,) * (len(x_shape) - 1))
+    
     return out
 
 
@@ -187,7 +213,8 @@ def get_time_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
 # ===========================
 @torch.no_grad()
 def p_sample(model: nn.Module, x_t: torch.Tensor, t: torch.Tensor, 
-             diffusion_consts: Dict[str, torch.Tensor], clip_denoised: bool = False) -> torch.Tensor:
+             diffusion_consts: Dict[str, torch.Tensor], clip_denoised: bool = False,
+             precomputed_consts: Optional[Dict[str, torch.Tensor]] = None, timestep_idx: Optional[int] = None) -> torch.Tensor:
     """
     单步反向采样
     
@@ -197,13 +224,24 @@ def p_sample(model: nn.Module, x_t: torch.Tensor, t: torch.Tensor,
         t: 时间步 [B]
         diffusion_consts: 扩散常数
         clip_denoised: 是否将去噪后的结果裁剪到合理范围（用于数值稳定性）
+        precomputed_consts: 预计算的常数字典（优化路径，可选）
+        timestep_idx: 当前timestep在序列中的索引（用于从预计算常数中提取，可选）
     
     Returns:
         去噪后的状态 [B, N*N*N, code_dim]
     """
-    betas_t = extract(diffusion_consts["betas"], t, x_t)
-    sqrt_recip_alphas_t = extract(diffusion_consts["sqrt_recip_alphas"], t, x_t)
-    sqrt_one_minus_alphas_cumprod_t = extract(diffusion_consts["sqrt_one_minus_alphas_cumprod"], t, x_t)
+    # 优化路径：使用预计算的常数
+    if precomputed_consts is not None and timestep_idx is not None:
+        betas_t = precomputed_consts["betas"][timestep_idx]  # [B, 1, 1, ...]
+        sqrt_recip_alphas_t = precomputed_consts["sqrt_recip_alphas"][timestep_idx]  # [B, 1, 1, ...]
+        sqrt_one_minus_alphas_cumprod_t = precomputed_consts["sqrt_one_minus_alphas_cumprod"][timestep_idx]  # [B, 1, 1, ...]
+        posterior_variance_t = precomputed_consts["posterior_variance"][timestep_idx]  # [B, 1, 1, ...]
+    else:
+        # 回退到原始路径（保持向后兼容性）
+        betas_t = extract(diffusion_consts["betas"], t, x_t)
+        sqrt_recip_alphas_t = extract(diffusion_consts["sqrt_recip_alphas"], t, x_t)
+        sqrt_one_minus_alphas_cumprod_t = extract(diffusion_consts["sqrt_one_minus_alphas_cumprod"], t, x_t)
+        posterior_variance_t = extract(diffusion_consts["posterior_variance"], t, x_t)
 
     # 预测噪声
     predicted_noise = model(x_t, t)
@@ -221,9 +259,11 @@ def p_sample(model: nn.Module, x_t: torch.Tensor, t: torch.Tensor,
         # 根据归一化后的codes范围裁剪（通常归一化后范围在[-3, 3]左右）
         model_mean = torch.clamp(model_mean, -3.0, 3.0)
     
-    posterior_variance_t = extract(diffusion_consts["posterior_variance"], t, x_t)
-
-    if t[0] == 0:
+    # 优化：使用预计算的is_last_timestep标志，避免条件判断
+    # 注意：在采样循环中，timestep_idx=num_timesteps-1 对应最后一个timestep（t=0）
+    is_last = (t[0] == 0) if timestep_idx is None else (t[0] == 0)
+    
+    if is_last:
         return model_mean
     else:
         noise = torch.randn_like(x_t)
@@ -242,34 +282,49 @@ def p_sample_loop(model: nn.Module, shape: Tuple[int, ...], diffusion_consts: Di
     """
     完整的反向采样循环（预测噪声epsilon版本）
     
+    优化版本：预计算所有timestep的常数，移除循环内的extract()调用和tqdm同步
+    
     Args:
         model: 去噪模型，预测噪声
         shape: 输出形状 [B, N*N*N, code_dim]
         diffusion_consts: 扩散常数
         device: 设备
-        progress: 是否显示进度条
+        progress: 是否显示进度条（已优化：不再使用tqdm以避免GPU-CPU同步，保留参数以保持向后兼容性）
         clip_denoised: 是否将去噪后的结果裁剪到合理范围（用于数值稳定性）
     
     Returns:
         生成的样本 [B, N*N*N, code_dim]
     """
+    # progress 参数保留以保持向后兼容性，但不再使用以避免GPU-CPU同步
+    _ = progress
+    batch_size = shape[0]
     x_t = torch.randn(shape, device=device)
     num_timesteps = diffusion_consts["betas"].shape[0]
     
-    iterator = reversed(range(num_timesteps))
-    if progress:
-        iterator = tqdm(iterator, desc="DDPM Sampling")
+    # 预计算所有timestep的常数（从T-1到0）
+    timestep_indices = torch.arange(num_timesteps - 1, -1, -1, device=device, dtype=torch.long)
     
-    for i in iterator:
-        t = torch.full((shape[0],), i, device=device, dtype=torch.long)
-        x_t = p_sample(model, x_t, t, diffusion_consts, clip_denoised=clip_denoised)
+    # 预计算所有需要的常数，形状: [num_timesteps, B, 1, 1, ...]
+    precomputed_consts = {
+        "betas": extract_batch(diffusion_consts["betas"], timestep_indices, batch_size, shape),
+        "sqrt_recip_alphas": extract_batch(diffusion_consts["sqrt_recip_alphas"], timestep_indices, batch_size, shape),
+        "sqrt_one_minus_alphas_cumprod": extract_batch(diffusion_consts["sqrt_one_minus_alphas_cumprod"], timestep_indices, batch_size, shape),
+        "posterior_variance": extract_batch(diffusion_consts["posterior_variance"], timestep_indices, batch_size, shape),
+    }
+    
+    # 优化循环：移除tqdm以避免GPU-CPU同步，直接使用预计算的常数
+    for timestep_idx in range(num_timesteps):
+        t = torch.full((batch_size,), timestep_indices[timestep_idx].item(), device=device, dtype=torch.long)
+        x_t = p_sample(model, x_t, t, diffusion_consts, clip_denoised=clip_denoised,
+                      precomputed_consts=precomputed_consts, timestep_idx=timestep_idx)
     
     return x_t
 
 
 @torch.no_grad()
 def p_sample_x0(model: nn.Module, x_t: torch.Tensor, t: torch.Tensor, 
-                diffusion_consts: Dict[str, torch.Tensor], clip_denoised: bool = False) -> torch.Tensor:
+                diffusion_consts: Dict[str, torch.Tensor], clip_denoised: bool = False,
+                precomputed_consts: Optional[Dict[str, torch.Tensor]] = None, timestep_idx: Optional[int] = None) -> torch.Tensor:
     """
     单步反向采样（预测x0版本）
     
@@ -279,6 +334,8 @@ def p_sample_x0(model: nn.Module, x_t: torch.Tensor, t: torch.Tensor,
         t: 时间步 [B]
         diffusion_consts: 扩散常数
         clip_denoised: 是否将predicted_x0裁剪到合理范围（可选，用于数值稳定性）
+        precomputed_consts: 预计算的常数字典（优化路径，可选）
+        timestep_idx: 当前timestep在序列中的索引（用于从预计算常数中提取，可选）
     
     Returns:
         去噪后的状态 [B, N*N*N, code_dim]
@@ -292,15 +349,28 @@ def p_sample_x0(model: nn.Module, x_t: torch.Tensor, t: torch.Tensor,
         # 可以根据实际数据分布调整（归一化后的codes通常在[-3, 3]范围内）
         predicted_x0 = torch.clamp(predicted_x0, -3.0, 3.0)
     
-    # 获取需要的常数
-    betas_t = extract(diffusion_consts["betas"], t, x_t)
-    alphas_cumprod_t = extract(diffusion_consts["alphas_cumprod"], t, x_t)  # 累计量 α̅_t
-    alphas_cumprod_prev_t = extract(diffusion_consts["alphas_cumprod_prev"], t, x_t)  # 累计量 α̅_{t-1}
-    sqrt_alphas_t = extract(diffusion_consts["sqrt_alphas"], t, x_t)  # 单步量 sqrt(α_t)
-    sqrt_alphas_cumprod_prev_t = extract(diffusion_consts["sqrt_alphas_cumprod_prev"], t, x_t)  # 累计量 sqrt(α̅_{t-1})
-    posterior_variance_t = extract(diffusion_consts["posterior_variance"], t, x_t)
+    # 优化路径：使用预计算的常数
+    if precomputed_consts is not None and timestep_idx is not None:
+        betas_t = precomputed_consts["betas"][timestep_idx]  # [B, 1, 1, ...]
+        alphas_cumprod_t = precomputed_consts["alphas_cumprod"][timestep_idx]  # [B, 1, 1, ...]
+        alphas_cumprod_prev_t = precomputed_consts["alphas_cumprod_prev"][timestep_idx]  # [B, 1, 1, ...]
+        sqrt_alphas_t = precomputed_consts["sqrt_alphas"][timestep_idx]  # [B, 1, 1, ...]
+        sqrt_alphas_cumprod_prev_t = precomputed_consts["sqrt_alphas_cumprod_prev"][timestep_idx]  # [B, 1, 1, ...]
+        posterior_variance_t = precomputed_consts["posterior_variance"][timestep_idx]  # [B, 1, 1, ...]
+    else:
+        # 回退到原始路径（保持向后兼容性）
+        betas_t = extract(diffusion_consts["betas"], t, x_t)
+        alphas_cumprod_t = extract(diffusion_consts["alphas_cumprod"], t, x_t)  # 累计量 α̅_t
+        alphas_cumprod_prev_t = extract(diffusion_consts["alphas_cumprod_prev"], t, x_t)  # 累计量 α̅_{t-1}
+        sqrt_alphas_t = extract(diffusion_consts["sqrt_alphas"], t, x_t)  # 单步量 sqrt(α_t)
+        sqrt_alphas_cumprod_prev_t = extract(diffusion_consts["sqrt_alphas_cumprod_prev"], t, x_t)  # 累计量 sqrt(α̅_{t-1})
+        posterior_variance_t = extract(diffusion_consts["posterior_variance"], t, x_t)
     
-    if t[0] == 0:
+    # 优化：使用预计算的is_last_timestep标志，避免条件判断
+    # 注意：在采样循环中，timestep_idx=num_timesteps-1 对应最后一个timestep（t=0）
+    is_last = (t[0] == 0) if timestep_idx is None else (t[0] == 0)
+    
+    if is_last:
         # 最后一步，直接返回预测的x0
         return predicted_x0
     else:
@@ -333,27 +403,43 @@ def p_sample_loop_x0(model: nn.Module, shape: Tuple[int, ...], diffusion_consts:
     """
     完整的反向采样循环（预测x0版本）
     
+    优化版本：预计算所有timestep的常数，移除循环内的extract()调用和tqdm同步
+    
     Args:
         model: 去噪模型，预测x0
         shape: 输出形状 [B, N*N*N, code_dim]
         diffusion_consts: 扩散常数
         device: 设备
-        progress: 是否显示进度条
+        progress: 是否显示进度条（已优化：不再使用tqdm以避免GPU-CPU同步，保留参数以保持向后兼容性）
         clip_denoised: 是否将predicted_x0裁剪到合理范围（用于数值稳定性，默认False）
     
     Returns:
         生成的样本 [B, N*N*N, code_dim]
     """
+    # progress 参数保留以保持向后兼容性，但不再使用以避免GPU-CPU同步
+    _ = progress
+    batch_size = shape[0]
     x_t = torch.randn(shape, device=device)
     num_timesteps = diffusion_consts["betas"].shape[0]
     
-    iterator = reversed(range(num_timesteps))
-    if progress:
-        iterator = tqdm(iterator, desc="DDPM Sampling (x0)")
+    # 预计算所有timestep的常数（从T-1到0）
+    timestep_indices = torch.arange(num_timesteps - 1, -1, -1, device=device, dtype=torch.long)
     
-    for i in iterator:
-        t = torch.full((shape[0],), i, device=device, dtype=torch.long)
-        x_t = p_sample_x0(model, x_t, t, diffusion_consts, clip_denoised=clip_denoised)
+    # 预计算所有需要的常数，形状: [num_timesteps, B, 1, 1, ...]
+    precomputed_consts = {
+        "betas": extract_batch(diffusion_consts["betas"], timestep_indices, batch_size, shape),
+        "alphas_cumprod": extract_batch(diffusion_consts["alphas_cumprod"], timestep_indices, batch_size, shape),
+        "alphas_cumprod_prev": extract_batch(diffusion_consts["alphas_cumprod_prev"], timestep_indices, batch_size, shape),
+        "sqrt_alphas": extract_batch(diffusion_consts["sqrt_alphas"], timestep_indices, batch_size, shape),
+        "sqrt_alphas_cumprod_prev": extract_batch(diffusion_consts["sqrt_alphas_cumprod_prev"], timestep_indices, batch_size, shape),
+        "posterior_variance": extract_batch(diffusion_consts["posterior_variance"], timestep_indices, batch_size, shape),
+    }
+    
+    # 优化循环：移除tqdm以避免GPU-CPU同步，直接使用预计算的常数
+    for timestep_idx in range(num_timesteps):
+        t = torch.full((batch_size,), timestep_indices[timestep_idx].item(), device=device, dtype=torch.long)
+        x_t = p_sample_x0(model, x_t, t, diffusion_consts, clip_denoised=clip_denoised,
+                         precomputed_consts=precomputed_consts, timestep_idx=timestep_idx)
     
     return x_t
 

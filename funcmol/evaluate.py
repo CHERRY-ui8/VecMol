@@ -10,7 +10,7 @@ SDF分子评估脚本
 """
 
 # 配置参数：实验目录
-exp_dir = "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251225/samples/20251225_version_1_last_withbonds_addH"
+exp_dir = "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20260105/samples/20260105_version_1_last_withbonds_addH"
 
 # 数据集类型：'qm9' 或 'drugs'
 dataset_type = 'qm9'  # 设置为 'drugs' 以启用额外的 drugs 指标

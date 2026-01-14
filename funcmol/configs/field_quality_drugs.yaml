@@ -1,0 +1,38 @@
+# Field Quality Evaluation Configuration for Drugs Dataset
+
+defaults:
+  - dset: drugs
+  - converter: gnf_converter_drugs
+  - encoder: gnn
+  - decoder: decoder_global
+  - override hydra/job_logging: custom
+  - _self_
+
+seed: 1234  # 随机种子，确保结果可重现
+
+# 数据集类型
+dataset_type: drugs
+
+# Neural Field模型路径
+nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_drugs/20260112/lightning_logs/version_0/checkpoints/model-epoch=999.ckpt
+
+# 数据集分割（train/val/test）
+split: test
+
+# 评估的样本数量（None表示使用全部）
+num_samples: 4000
+
+# Batch size（评估时通常使用1）
+batch_size: 1
+
+# 是否采样完整网格
+sample_full_grid: false
+
+# 输出目录
+output_dir: ../exps/analysis/field_quality/drugs
+
+# Hydra 设置
+hydra:
+  run:
+    dir: ../exps/analysis/field_quality
+

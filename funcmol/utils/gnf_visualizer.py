@@ -9,7 +9,7 @@ import imageio.v2 as imageio
 from omegaconf import OmegaConf
 from lightning import Fabric
 from torch_geometric.utils import to_dense_batch
-from funcmol.utils.constants import PADDING_INDEX
+from funcmol.utils.constants import PADDING_INDEX, ELEMENTS_HASH_INV
 from funcmol.utils.gnf_converter import GNFConverter
 
 # 设置项目根目录
@@ -97,11 +97,14 @@ class MoleculeVisualizer:
     
     def __init__(self):
         self.atom_colors = {
-            0: 'black',  # C
-            1: 'gray',   # H
-            2: 'red',    # O
-            3: 'blue',   # N
-            4: 'green'   # F
+            0: 'green',      # C
+            1: 'gray',       # H
+            2: 'red',        # O
+            3: 'blue',       # N
+            4: 'deeppink',   # F
+            5: 'yellow',     # S
+            6: 'yellowgreen', # Cl
+            7: 'brown'       # Br
         }
         plt.style.use('default')
         plt.rcParams['figure.dpi'] = 150
@@ -143,12 +146,50 @@ class MoleculeVisualizer:
 
 # 原子颜色映射
 ATOM_COLORS = {
-    0: 'black',  # C
-    1: 'gray',   # H
-    2: 'red',    # O
-    3: 'blue',   # N
-    4: 'green'   # F
+    0: 'green',      # C
+    1: 'gray',       # H
+    2: 'red',        # O
+    3: 'blue',       # N
+    4: 'deeppink',   # F
+    5: 'yellow',     # S
+    6: 'yellowgreen', # Cl
+    7: 'brown'       # Br
 }
+
+def _get_atom_names(n_atom_types: int = None) -> List[str]:
+    """获取原子类型名称列表。
+    
+    Args:
+        n_atom_types: 原子类型数量，如果为None则返回所有已知元素
+        
+    Returns:
+        原子类型名称列表
+    """
+    if n_atom_types is None:
+        # 返回所有已知元素
+        max_idx = max(ELEMENTS_HASH_INV.keys())
+        n_atom_types = max_idx + 1
+    
+    atom_names = []
+    for i in range(n_atom_types):
+        atom_names.append(ELEMENTS_HASH_INV.get(i, f"Type{i}"))
+    return atom_names
+
+def _get_max_atom_type(atom_types: torch.Tensor) -> int:
+    """从原子类型张量中获取最大原子类型索引。
+    
+    Args:
+        atom_types: 原子类型张量
+        
+    Returns:
+        最大原子类型索引，如果为空则返回默认值8
+    """
+    if atom_types is None or len(atom_types) == 0:
+        return 8  # 默认支持8种元素
+    valid_types = atom_types[atom_types >= 0]
+    if len(valid_types) == 0:
+        return 8
+    return int(valid_types.max().item()) + 1
 
 def _setup_3d_axis(ax: plt.Axes, coords_list: List[np.ndarray], margin: float = 0.5):
     """设置 3D 坐标轴的通用属性（独立函数版本）。
@@ -194,15 +235,19 @@ def visualize_generation_step(
     points_np = current_points.detach().cpu().numpy()
     if current_types is not None:
         types_np = current_types.detach().cpu().numpy()
-        for atom_type in range(5):
+        n_atom_types = _get_max_atom_type(current_types)
+        atom_names = _get_atom_names(n_atom_types)
+        for atom_type in range(n_atom_types):
             mask = (types_np == atom_type)
             if mask.sum() > 0:
+                color = ATOM_COLORS.get(atom_type, 'gray')
+                atom_name = atom_names[atom_type] if atom_type < len(atom_names) else f"Type{atom_type}"
                 ax.scatter(points_np[mask, 0], points_np[mask, 1], points_np[mask, 2], 
-                          c=ATOM_COLORS[atom_type], marker='.', s=20, 
-                          label=f'{["C", "H", "O", "N", "F"][atom_type]}', alpha=0.5)
+                          c=color, marker='.', s=40, 
+                          label=atom_name, alpha=0.5)
     else:
         ax.scatter(points_np[:, 0], points_np[:, 1], points_np[:, 2], 
-                  c='blue', marker='.', s=20, label='Generated Points', alpha=0.5)
+                  c='blue', marker='.', s=40, label='Generated Points', alpha=0.5)
     
     # 设置坐标轴
     if fixed_axis_limits is not None:
@@ -249,12 +294,16 @@ def visualize_generated_molecule(
     points_np = final_points.detach().cpu().numpy()
     if final_types is not None and len(final_types) > 0:
         types_np = final_types.detach().cpu().numpy()
-        for atom_type in range(5):
+        n_atom_types = _get_max_atom_type(final_types)
+        atom_names = _get_atom_names(n_atom_types)
+        for atom_type in range(n_atom_types):
             mask = (types_np == atom_type)
             if mask.sum() > 0:
+                color = ATOM_COLORS.get(atom_type, 'gray')
+                atom_name = atom_names[atom_type] if atom_type < len(atom_names) else f"Type{atom_type}"
                 ax.scatter(points_np[mask, 0], points_np[mask, 1], points_np[mask, 2], 
-                          c=ATOM_COLORS[atom_type], marker='o', s=150, 
-                          label=f'{["C", "H", "O", "N", "F"][atom_type]}', alpha=0.9)
+                          c=color, marker='o', s=150, 
+                          label=atom_name, alpha=0.9)
     else:
         ax.scatter(points_np[:, 0], points_np[:, 1], points_np[:, 2], 
                   c='blue', marker='o', s=150, label='Generated Molecule', alpha=0.9)
@@ -304,12 +353,16 @@ def visualize_molecule_comparison(
     
     if orig_types is not None:
         orig_types_np = orig_types.detach().cpu().numpy()
-        for atom_type in range(5):
+        n_atom_types = max(_get_max_atom_type(orig_types), _get_max_atom_type(recon_types) if recon_types is not None else 8)
+        atom_names = _get_atom_names(n_atom_types)
+        for atom_type in range(n_atom_types):
             mask = (orig_types_np == atom_type)
             if mask.sum() > 0:
+                color = ATOM_COLORS.get(atom_type, 'gray')
+                atom_name = atom_names[atom_type] if atom_type < len(atom_names) else f"Type{atom_type}"
                 ax1.scatter(orig_coords_np[mask, 0], orig_coords_np[mask, 1], orig_coords_np[mask, 2], 
-                           c=ATOM_COLORS[atom_type], marker='o', s=100, 
-                           label=f'Original {["C", "H", "O", "N", "F"][atom_type]}')
+                           c=color, marker='o', s=100, 
+                           label=f'Original {atom_name}')
     else:
         ax1.scatter(orig_coords_np[:, 0], orig_coords_np[:, 1], orig_coords_np[:, 2], 
                    c='blue', marker='o', s=100, label='Original', alpha=0.8)
@@ -321,12 +374,16 @@ def visualize_molecule_comparison(
     
     if recon_types is not None:
         recon_types_np = recon_types.detach().cpu().numpy()
-        for atom_type in range(5):
+        n_atom_types = max(_get_max_atom_type(orig_types) if orig_types is not None else 8, _get_max_atom_type(recon_types))
+        atom_names = _get_atom_names(n_atom_types)
+        for atom_type in range(n_atom_types):
             mask = (recon_types_np == atom_type)
             if mask.sum() > 0:
+                color = ATOM_COLORS.get(atom_type, 'gray')
+                atom_name = atom_names[atom_type] if atom_type < len(atom_names) else f"Type{atom_type}"
                 ax2.scatter(recon_coords_np[mask, 0], recon_coords_np[mask, 1], recon_coords_np[mask, 2], 
-                           c=ATOM_COLORS[atom_type], marker='o', s=100, 
-                           label=f'Reconstructed {["C", "H", "O", "N", "F"][atom_type]}')
+                           c=color, marker='o', s=100, 
+                           label=f'Reconstructed {atom_name}')
     else:
         ax2.scatter(recon_coords_np[:, 0], recon_coords_np[:, 1], recon_coords_np[:, 2], 
                    c='red', marker='o', s=100, label='Reconstructed', alpha=0.8)
@@ -336,20 +393,28 @@ def visualize_molecule_comparison(
     ax3 = fig.add_subplot(133, projection='3d')
     
     if orig_types is not None:
-        for atom_type in range(5):
+        n_atom_types = max(_get_max_atom_type(orig_types), _get_max_atom_type(recon_types) if recon_types is not None else 8)
+        atom_names = _get_atom_names(n_atom_types)
+        for atom_type in range(n_atom_types):
             mask = (orig_types_np == atom_type)
             if mask.sum() > 0:
+                color = ATOM_COLORS.get(atom_type, 'gray')
+                atom_name = atom_names[atom_type] if atom_type < len(atom_names) else f"Type{atom_type}"
                 ax3.scatter(orig_coords_np[mask, 0], orig_coords_np[mask, 1], orig_coords_np[mask, 2], 
-                           c=ATOM_COLORS[atom_type], marker='o', s=100, alpha=0.5, 
-                           label=f'Original {["C", "H", "O", "N", "F"][atom_type]}')
+                           c=color, marker='o', s=100, alpha=0.5, 
+                           label=f'Original {atom_name}')
     
     if recon_types is not None:
-        for atom_type in range(5):
+        n_atom_types = max(_get_max_atom_type(orig_types) if orig_types is not None else 8, _get_max_atom_type(recon_types))
+        atom_names = _get_atom_names(n_atom_types)
+        for atom_type in range(n_atom_types):
             mask = (recon_types_np == atom_type)
             if mask.sum() > 0:
+                color = ATOM_COLORS.get(atom_type, 'gray')
+                atom_name = atom_names[atom_type] if atom_type < len(atom_names) else f"Type{atom_type}"
                 ax3.scatter(recon_coords_np[mask, 0], recon_coords_np[mask, 1], recon_coords_np[mask, 2], 
-                           c=ATOM_COLORS[atom_type], marker='s', s=100, alpha=0.5, 
-                           label=f'Reconstructed {["C", "H", "O", "N", "F"][atom_type]}')
+                           c=color, marker='s', s=100, alpha=0.5, 
+                           label=f'Reconstructed {atom_name}')
     else:
         ax3.scatter(recon_coords_np[:, 0], recon_coords_np[:, 1], recon_coords_np[:, 2], 
                    c='red', marker='s', s=100, alpha=0.5, label='Reconstructed')
@@ -382,7 +447,8 @@ def visualize_reconstruction_step(
     iteration: int,
     save_path: str,
     coords_types: Optional[torch.Tensor] = None,
-    points_types: Optional[torch.Tensor] = None):
+    points_types: Optional[torch.Tensor] = None,
+    fixed_axis_limits: Optional[Dict] = None):
     """可视化重建过程的单个步骤（独立函数版本）。
     
     Args:
@@ -392,6 +458,7 @@ def visualize_reconstruction_step(
         save_path: 保存路径
         coords_types: 真实原子类型，形状 [N]
         points_types: 当前原子类型，形状 [M]
+        fixed_axis_limits: 可选的固定坐标轴范围字典
     """
     fig = plt.figure(figsize=(8, 8))
     ax = fig.add_subplot(111, projection='3d')
@@ -399,12 +466,16 @@ def visualize_reconstruction_step(
     coords_np = coords.detach().cpu().numpy()
     if coords_types is not None:
         coords_types_np = coords_types.detach().cpu().numpy()
-        for atom_type in range(5):
+        n_atom_types = max(_get_max_atom_type(coords_types), _get_max_atom_type(points_types) if points_types is not None else 8)
+        atom_names = _get_atom_names(n_atom_types)
+        for atom_type in range(n_atom_types):
             mask = (coords_types_np == atom_type)
             if mask.sum() > 0:
+                color = ATOM_COLORS.get(atom_type, 'gray')
+                atom_name = atom_names[atom_type] if atom_type < len(atom_names) else f"Type{atom_type}"
                 ax.scatter(coords_np[mask, 0], coords_np[mask, 1], coords_np[mask, 2], 
-                          c=ATOM_COLORS[atom_type], marker='o', s=100, 
-                          label=f'Original {["C", "H", "O", "N", "F"][atom_type]}', alpha=0.7)
+                          c=color, marker='o', s=100, 
+                          label=f'Original {atom_name}', alpha=0.7)
     else:
         ax.scatter(coords_np[:, 0], coords_np[:, 1], coords_np[:, 2], 
                   c='blue', marker='o', s=100, label='Original', alpha=0.8)
@@ -412,18 +483,34 @@ def visualize_reconstruction_step(
     points_np = current_points.detach().cpu().numpy()
     if points_types is not None:
         points_types_np = points_types.detach().cpu().numpy()
-        for atom_type in range(5):
+        n_atom_types = max(_get_max_atom_type(coords_types) if coords_types is not None else 8, _get_max_atom_type(points_types))
+        atom_names = _get_atom_names(n_atom_types)
+        for atom_type in range(n_atom_types):
             mask = (points_types_np == atom_type)
             if mask.sum() > 0:
+                color = ATOM_COLORS.get(atom_type, 'gray')
+                atom_name = atom_names[atom_type] if atom_type < len(atom_names) else f"Type{atom_type}"
                 ax.scatter(points_np[mask, 0], points_np[mask, 1], points_np[mask, 2],
-                          c=ATOM_COLORS[atom_type], marker='.', s=20, 
-                          label=f'Current {["C", "H", "O", "N", "F"][atom_type]}', alpha=0.5)
+                          c=color, marker='.', s=40, 
+                          label=f'Current {atom_name}', alpha=0.5)
     else:
         ax.scatter(points_np[:, 0], points_np[:, 1], points_np[:, 2], 
-                  c='red', marker='.', s=20, label='Current Points', alpha=0.5)
+                  c='red', marker='.', s=40, label='Current Points', alpha=0.5)
     
-    coords_list = [coords_np, points_np]
-    _setup_3d_axis(ax, coords_list, margin=1.0)
+    # 设置坐标轴
+    if fixed_axis_limits is not None:
+        # 使用固定的坐标轴范围
+        ax.set_xlim(fixed_axis_limits['x_min'], fixed_axis_limits['x_max'])
+        ax.set_ylim(fixed_axis_limits['y_min'], fixed_axis_limits['y_max'])
+        ax.set_zlim(fixed_axis_limits['z_min'], fixed_axis_limits['z_max'])
+        ax.set_xlabel('X (Å)')
+        ax.set_ylabel('Y (Å)')
+        ax.set_zlabel('Z (Å)')
+        ax.grid(True, alpha=0.3)
+    else:
+        # 动态调整坐标轴范围
+        coords_list = [coords_np, points_np]
+        _setup_3d_axis(ax, coords_list, margin=1.0)
     
     ax.view_init(elev=30, azim=60)
     ax.set_box_aspect([1, 1, 1])
@@ -512,6 +599,18 @@ class GNFVisualizer(MoleculeVisualizer):
             'kl_2to1': []
         }
         
+        # 预先计算固定坐标轴范围（基于ground truth坐标）
+        gt_coords_np = gt_valid_coords.detach().cpu().numpy()
+        margin = 1.0
+        fixed_axis_limits = {
+            'x_min': gt_coords_np[:, 0].min().item() - margin,
+            'x_max': gt_coords_np[:, 0].max().item() + margin,
+            'y_min': gt_coords_np[:, 1].min().item() - margin,
+            'y_max': gt_coords_np[:, 1].max().item() + margin,
+            'z_min': gt_coords_np[:, 2].min().item() - margin,
+            'z_max': gt_coords_np[:, 2].max().item() + margin
+        }
+        
         # 创建可视化回调函数
         def visualization_callback(iter_idx, all_points_dict, batch_idx=0):
             """在每次迭代时保存可视化帧并计算指标"""
@@ -519,7 +618,10 @@ class GNFVisualizer(MoleculeVisualizer):
             # 合并所有原子类型的点
             all_points = []
             all_types = []
-            for atom_type in range(5):  # C, H, O, N, F
+            # 动态获取原子类型数量（从converter或从all_points_dict推断）
+            max_atom_type = max(all_points_dict.keys()) if all_points_dict else 7  # 默认支持8种元素（0-7）
+            n_atom_types = max_atom_type + 1
+            for atom_type in range(n_atom_types):
                 if atom_type in all_points_dict and len(all_points_dict[atom_type]) > 0:
                     points = all_points_dict[atom_type]
                     all_points.append(points)
@@ -536,7 +638,7 @@ class GNFVisualizer(MoleculeVisualizer):
             frame_path = os.path.join(self.recon_dir, f"frame_sample_{sample_idx}_{iter_idx:04d}.png")
             visualize_reconstruction_step(
                 gt_valid_coords, current_points, iter_idx, frame_path,
-                gt_valid_types, current_types
+                gt_valid_types, current_types, fixed_axis_limits
             )
             frame_paths.append(frame_path)
             
@@ -651,7 +753,7 @@ def visualize_1d_gradient_field_comparison(
         converter: GNF 转换器。当gt_coords为None时可以为None
         field_func: 梯度场函数
         sample_idx: 数据访问的样本索引（用于访问gt_coords和gt_types）
-        atom_types: 原子类型列表或单个原子类型（0=C, 1=H, 2=O, 3=N, 4=F）
+        atom_types: 原子类型列表或单个原子类型（0=C, 1=H, 2=O, 3=N, 4=F, 5=S, 6=Cl, 7=Br）
         x_range: x 轴范围，None 时自动计算（需要gt_coords）或使用默认范围
         n_points: 采样点数
         y_coord: y 坐标固定值
@@ -1420,7 +1522,7 @@ def create_visualization_callback(
     output_dir: str,
     frame_prefix: str,
     codes_device: torch.device,
-    n_atom_types: int = 5,
+    n_atom_types: int = 8,
     fixed_axis_limits_dict: Optional[Dict] = None
 ) -> Tuple[callable, List[str], Dict]:
     """创建通用的可视化回调函数，用于在重建过程中保存可视化帧。
@@ -1429,7 +1531,7 @@ def create_visualization_callback(
         output_dir: 输出目录路径
         frame_prefix: 帧文件前缀（例如 "frame_aug_original"）
         codes_device: codes所在的设备
-        n_atom_types: 原子类型数量，默认为5（C, H, O, N, F）
+        n_atom_types: 原子类型数量，默认为8（C, H, O, N, F, S, Cl, Br）
         fixed_axis_limits_dict: 可选的固定坐标轴限制字典，用于存储和更新坐标轴范围
         
     Returns:
@@ -1461,8 +1563,8 @@ def create_visualization_callback(
             current_points = torch.empty((0, 3), device=codes_device)
             current_types = torch.empty((0,), device=codes_device, dtype=torch.long)
         
-        # 如果是第一帧，确定固定坐标轴范围
-        if iter_idx == 0 and len(current_points) > 0:
+        # 如果是第一个有点的帧，确定固定坐标轴范围
+        if fixed_axis_limits_dict['limits'] is None and len(current_points) > 0:
             points_np = current_points.detach().cpu().numpy()
             margin = 1.0
             fixed_axis_limits_dict['limits'] = {
@@ -1552,7 +1654,7 @@ def visualize_1d_gradient_field_augmentation_comparison(
     
     Args:
         field_funcs: 字典，键为增强类型名称（如'original', 'rotation', 'translation', 'both'），值为对应的field_func
-        atom_types: 原子类型列表或单个原子类型（0=C, 1=H, 2=O, 3=N, 4=F），None时默认为[0,1,2,3,4]
+        atom_types: 原子类型列表或单个原子类型（0=C, 1=H, 2=O, 3=N, 4=F, 5=S, 6=Cl, 7=Br），None时默认为[0,1,2,3,4,5,6,7]
         x_range: x 轴范围，None 时使用默认范围
         n_points: 采样点数
         y_coord: y 坐标固定值
@@ -1570,7 +1672,7 @@ def visualize_1d_gradient_field_augmentation_comparison(
     
     # 确保 atom_types 是列表
     if atom_types is None:
-        atom_types = [0, 1, 2, 3, 4]
+        atom_types = [0, 1, 2, 3, 4, 5, 6, 7]  # C, H, O, N, F, S, Cl, Br
     if isinstance(atom_types, int):
         atom_types = [atom_types]
     

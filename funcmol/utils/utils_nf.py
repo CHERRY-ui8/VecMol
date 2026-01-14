@@ -33,7 +33,6 @@ def create_neural_field(config: dict) -> tuple:
                     - "hidden_dim" (int): The hidden dimension of the decoder.
                     - "coord_dim" (int): The coordinate dimension for the decoder.
                     - "n_layers" (int): The number of layers in the decoder.
-                    - "input_scale" (float): The input scale for the decoder.
                 - "dset": A dictionary with the following keys:
                     - "n_channels" (int): The number of input channels.
                     - "grid_dim" (int): The grid dimension of the dataset.
@@ -1012,6 +1011,9 @@ def compute_decoder_field_loss(
     pred_field_masked = pred_field * valid_mask_expanded
     target_field_masked = target_field * valid_mask_expanded
     
+    # Small epsilon for numerical stability
+    eps = 1e-8
+    
     if use_cosine_loss:
         # Cosine distance + magnitude loss
         # Compute norms
@@ -1019,9 +1021,18 @@ def compute_decoder_field_loss(
         target_norm = torch.norm(target_field_masked, dim=-1, keepdim=True)  # [B, n_points, n_atom_types, 1]
         
         # Compute cosine similarity
-        eps = 1e-8
         dot_product = (pred_field_masked * target_field_masked).sum(dim=-1, keepdim=True)  # [B, n_points, n_atom_types, 1]
-        cosine_sim = dot_product / (pred_norm * target_norm + eps)  # [B, n_points, n_atom_types, 1]
+        
+        # Handle zero vectors: if both vectors are zero (or very close to zero), cosine similarity should be 1 (perfect match)
+        # Otherwise, compute normal cosine similarity
+        both_zero = (pred_norm < eps) & (target_norm < eps)  # [B, n_points, n_atom_types, 1]
+        denominator = pred_norm * target_norm + eps  # [B, n_points, n_atom_types, 1]
+        cosine_sim_normal = dot_product / denominator  # [B, n_points, n_atom_types, 1]
+        cosine_sim = torch.where(
+            both_zero,
+            torch.ones_like(cosine_sim_normal),  # Both zero vectors: perfect match (cosine_sim = 1)
+            cosine_sim_normal  # Normal cosine similarity
+        )
         
         # Cosine loss: 1 - cosine_similarity
         cosine_loss = (1 - cosine_sim) * valid_mask_expanded

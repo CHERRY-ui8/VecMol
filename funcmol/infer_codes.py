@@ -1,5 +1,6 @@
 import sys
 import os
+os.environ['CUDA_VISIBLE_DEVICES'] = "1"
 import omegaconf
 import torch
 from tqdm import tqdm

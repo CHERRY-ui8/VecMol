@@ -32,7 +32,6 @@ class FieldDataset(Dataset):
         elements (list): List of elements to filter by. Default is None, which uses ELEMENTS_HASH.
         split (str): Dataset split to use. Must be one of ["train", "val", "test"]. Default is "train".
         rotate (bool): Whether to apply rotation. Default is False.
-        radius (float): Radius for some operation. Default is 0.5.
         grid_dim (int): Dimension of the grid. Default is 32.
         resolution (float): Resolution of the grid. Default is 0.25.
         n_points (int): Number of points to sample. Default is 4000.
@@ -50,7 +49,6 @@ class FieldDataset(Dataset):
         elements: Optional[dict] = None,
         split: str = "train",
         rotate: bool = False,
-        radius: float = 0.5,
         grid_dim: int = 32,
         resolution: float = 0.25,
         n_points: int = 4000,
@@ -64,14 +62,14 @@ class FieldDataset(Dataset):
     ):
         if elements is None:
             elements = ELEMENTS_HASH
-        assert dset_name in ["qm9", "drugs", "cremp"]
+        # Allow drugs_no_h as a valid dataset name (for datasets without hydrogen atoms)
+        assert dset_name in ["qm9", "drugs", "drugs_no_h", "cremp"]
         assert split in ["train", "val", "test"]
         self.dset_name = dset_name
         self.data_dir = data_dir
         self.elements = elements
         self.split = split
         self.rotate = rotate
-        self.fix_radius = radius
         self.resolution = resolution
         self.n_points = n_points
         self.sample_full_grid = sample_full_grid
@@ -149,23 +147,51 @@ class FieldDataset(Dataset):
         """建立只读数据库连接 - 进程安全版本"""
         if self.db is None:
             # 使用线程本地存储确保每个worker进程有独立的连接
+            # 在spawn模式下，每个进程都有独立的线程本地存储
             if not hasattr(_thread_local, 'lmdb_connections'):
                 _thread_local.lmdb_connections = {}
             
             # 为每个LMDB路径创建独立的连接
             if self.lmdb_path not in _thread_local.lmdb_connections:
-                _thread_local.lmdb_connections[self.lmdb_path] = lmdb.open(
-                    self.lmdb_path,
-                    map_size=10*(1024*1024*1024),   # 10GB
-                    create=False,
-                    subdir=True,
-                    readonly=True,
-                    lock=False,
-                    readahead=False,
-                    meminit=False,
-                )
+                try:
+                    _thread_local.lmdb_connections[self.lmdb_path] = lmdb.open(
+                        self.lmdb_path,
+                        map_size=10*(1024*1024*1024),   # 10GB
+                        create=False,
+                        subdir=True,
+                        readonly=True,
+                        lock=False,
+                        readahead=False,
+                        meminit=False,
+                        max_readers=256,  # 增加最大读取器数量，支持更多并发worker
+                    )
+                except Exception as e:
+                    # 如果连接失败，清理并重试
+                    if self.lmdb_path in _thread_local.lmdb_connections:
+                        try:
+                            _thread_local.lmdb_connections[self.lmdb_path].close()
+                        except:
+                            pass
+                        del _thread_local.lmdb_connections[self.lmdb_path]
+                    raise
             
             self.db = _thread_local.lmdb_connections[self.lmdb_path]
+            
+            # 验证连接是否有效
+            try:
+                with self.db.begin() as txn:
+                    txn.stat()
+            except Exception:
+                # 连接无效，清理并重新创建
+                try:
+                    self.db.close()
+                except:
+                    pass
+                if self.lmdb_path in _thread_local.lmdb_connections:
+                    del _thread_local.lmdb_connections[self.lmdb_path]
+                # 递归调用重新连接
+                self.db = None
+                self._connect_db()
 
     def _close_db(self):
         """关闭数据库连接"""
@@ -238,7 +264,7 @@ class FieldDataset(Dataset):
         sample = self._preprocess_molecule(sample_raw)
 
         # sample points for field prediction
-        xs = self._get_xs(sample)
+        xs, point_types = self._get_xs(sample)
 
         # get data from preprocessed sample
         coords = sample["coords"]
@@ -265,6 +291,7 @@ class FieldDataset(Dataset):
             x=atoms_channel.long(),
             xs=xs.float(),
             target_field=target_field.float(),  # 新增：添加目标梯度场
+            point_types=point_types.long(),  # 新增：点类型标记，0=grid点，1=邻近点
             idx=torch.tensor([index], dtype=torch.long)
         )
         return data
@@ -279,7 +306,7 @@ class FieldDataset(Dataset):
         sample = self._preprocess_molecule(sample_raw)
 
         # sample points for field prediction
-        xs = self._get_xs(sample)
+        xs, point_types = self._get_xs(sample)
 
         # get data from preprocessed sample
         coords = sample["coords"]
@@ -306,14 +333,14 @@ class FieldDataset(Dataset):
             x=atoms_channel.long(),
             xs=xs.float(),
             target_field=target_field.float(),  # 新增：添加目标梯度场
+            point_types=point_types.long(),  # 新增：点类型标记，0=grid点，1=邻近点
             idx=torch.tensor([index], dtype=torch.long)
         )
         return data
 
     def _preprocess_molecule(self, sample_raw) -> dict:
         """
-        Preprocesses a raw molecule sample by removing invalid values and fixing
-        the radius if necessary.
+        Preprocesses a raw molecule sample by removing invalid values.
 
         Args:
             sample_raw (dict): The raw molecule sample.
@@ -324,10 +351,7 @@ class FieldDataset(Dataset):
         sample = {
             "coords": sample_raw["coords"],
             "atoms_channel": sample_raw["atoms_channel"],
-            "radius": sample_raw["radius"]
         }
-        if self.fix_radius > 0:
-            sample["radius"].fill_(self.fix_radius)
 
         if self.rotate:
             sample["coords"] = self._rotate_coords(sample)
@@ -339,17 +363,50 @@ class FieldDataset(Dataset):
 
         return sample
 
-    def _get_xs(self, sample) -> torch.Tensor:
+    def _get_xs(self, sample) -> tuple:
+        """
+        采样query点，返回query点坐标和点类型标记
+        
+        Returns:
+            tuple: (query_points, point_types)
+                - query_points: [n_points, 3] query点坐标
+                - point_types: [n_points] 点类型标记，0表示grid点，1表示邻近点
+        """
         mask = sample["atoms_channel"] != PADDING_INDEX
         coords = sample["coords"][mask]
         device = coords.device
         
         if self.sample_full_grid:
-            return self.full_grid_high_res.to(device)
+            query_points = self.full_grid_high_res.to(device)
+            point_types = torch.zeros(len(query_points), dtype=torch.long, device=device)  # 全部是grid点
+            return query_points, point_types
         
         grid_size = len(self.full_grid_high_res) # grid_dim**3
 
-        if self.targeted_sampling_ratio >= 1:
+        if self.targeted_sampling_ratio == 0:
+            # 只从网格中随机采样
+            sample_size = min(self.n_points * 2, grid_size)
+            grid_indices = torch.randperm(grid_size, device=device)[:sample_size]
+            grid_points = self.full_grid_high_res[grid_indices].to(device)
+            unique_points = torch.unique(grid_points, dim=0)
+            
+            if unique_points.size(0) < self.n_points:
+                remaining = self.n_points - unique_points.size(0)
+                additional_indices = torch.randint(grid_size, (remaining,), device=device)
+                additional_points = self.full_grid_high_res[additional_indices].to(device)
+                unique_points = torch.cat([unique_points, additional_points], dim=0)
+            
+            indices = torch.randperm(unique_points.size(0), device=device)[:self.n_points]
+            query_points = unique_points[indices]
+            point_types = torch.zeros(self.n_points, dtype=torch.long, device=device)  # 全部是grid点
+            return query_points, point_types
+        
+        else:
+            # targeted_sampling_ratio > 0: 可以自由设置grid点和邻近点的比例
+            # targeted_sampling_ratio 表示 grid点数量 : 邻近点数量 的比例
+            # 例如 targeted_sampling_ratio = 2 表示 grid点:邻近点 = 2:1
+            # 例如 targeted_sampling_ratio = 0.5 表示 grid点:邻近点 = 1:2
+            
             if self.sample_near_atoms_only:
                 # 只采样原子附近的点：在阈值范围内，使用向量化球体均匀采样
                 n_points = self.n_points
@@ -366,59 +423,74 @@ class FieldDataset(Dataset):
                 offsets = direction * r  # [n_points, 3]
                 
                 # 3. 相加得到最终坐标
-                return atom_centers + offsets  # [n_points, 3]
+                query_points = atom_centers + offsets  # [n_points, 3]
+                point_types = torch.ones(n_points, dtype=torch.long, device=device)  # 全部是邻近点
+                return query_points, point_types
             else:
-                # 原有的采样逻辑：使用increments在原子周围采样，然后合并网格点
-                # 1. 目标采样：原子周围的点
-                # 注意：coords 现在保持原始坐标，不再进行缩放
-                # coords 的范围是真实的埃单位
+                # 根据targeted_sampling_ratio计算grid点和邻近点的数量
+                # 设 grid点数量 = n_grid, 邻近点数量 = n_neighbor
+                # targeted_sampling_ratio = n_grid / n_neighbor
+                # n_grid + n_neighbor = n_points
+                # 解得: n_neighbor = n_points / (1 + targeted_sampling_ratio)
+                #      n_grid = n_points - n_neighbor
+                
+                n_neighbor = int(self.n_points / (1 + self.targeted_sampling_ratio))
+                n_grid = self.n_points - n_neighbor
+                
+                # 1. 采样邻近点（原子周围的点）
                 rand_points = coords
                 # 添加小的噪声，噪声大小应该与网格分辨率相关
-                noise = torch.randn_like(rand_points, device=device) * self.resolution / 4  # Scale noise by resolution
-                rand_points = (rand_points + noise)  # .floor().long() NOTE：如果这里floor()再long()，会全部变成-1,0,1
+                noise = torch.randn_like(rand_points, device=device) * self.resolution / 4
+                rand_points = (rand_points + noise)
                 
                 # 计算每个原子周围需要采样的点数
-                points_per_atom = max(1, (self.n_points // coords.size(0)) // self.targeted_sampling_ratio)
-                random_indices = torch.randperm(self.increments.size(0), device=device)[:points_per_atom]
+                if n_neighbor > 0:
+                    points_per_atom = max(1, n_neighbor // coords.size(0))
+                    random_indices = torch.randperm(self.increments.size(0), device=device)[:points_per_atom]
+                    
+                    # 在原子周围采样
+                    neighbor_points = (rand_points.unsqueeze(1) + self.increments[random_indices].to(device)).view(-1, 3)
+                    # Calculate bounds based on real-world distances
+                    total_span = (self.grid_dim - 1) * self.resolution
+                    half_span = total_span / 2
+                    min_bound = -half_span
+                    max_bound = half_span
+                    neighbor_points = torch.clamp(neighbor_points, min_bound, max_bound).float()
+                    
+                    # 如果采样点数超过需要的数量，随机选择
+                    if neighbor_points.size(0) > n_neighbor:
+                        indices = torch.randperm(neighbor_points.size(0), device=device)[:n_neighbor]
+                        neighbor_points = neighbor_points[indices]
+                    elif neighbor_points.size(0) < n_neighbor:
+                        # 如果采样点数不足，允许重复采样
+                        remaining = n_neighbor - neighbor_points.size(0)
+                        additional_indices = torch.randint(0, neighbor_points.size(0), (remaining,), device=device)
+                        neighbor_points = torch.cat([neighbor_points, neighbor_points[additional_indices]], dim=0)
+                else:
+                    neighbor_points = torch.empty((0, 3), device=device)
                 
-                # 在原子周围采样
-                rand_points = (rand_points.unsqueeze(1) + self.increments[random_indices].to(device)).view(-1, 3)
-                # Calculate bounds based on real-world distances
-                total_span = (self.grid_dim - 1) * self.resolution
-                half_span = total_span / 2
-                min_bound = -half_span
-                max_bound = half_span
-                rand_points = torch.clamp(rand_points, min_bound, max_bound).float()
+                # 2. 采样网格点
+                if n_grid > 0:
+                    grid_indices = torch.randperm(grid_size, device=device)[:n_grid]
+                    grid_points = self.full_grid_high_res[grid_indices].to(device)
+                else:
+                    grid_points = torch.empty((0, 3), device=device)
                 
-                # 2. 随机采样网格点
-                grid_indices = torch.randperm(grid_size, device=device)[:self.n_points]
-                grid_points = self.full_grid_high_res[grid_indices].to(device)
+                # 3. 合并点
+                query_points = torch.cat([grid_points, neighbor_points], dim=0)  # [n_points, 3]
                 
-                # 3. 合并并去重
-                all_points = torch.cat([rand_points, grid_points], dim=0)
-                unique_points = torch.unique(all_points, dim=0)
+                # 4. 创建点类型标记：0表示grid点，1表示邻近点
+                point_types = torch.cat([
+                    torch.zeros(n_grid, dtype=torch.long, device=device),  # grid点
+                    torch.ones(n_neighbor, dtype=torch.long, device=device)  # 邻近点
+                ], dim=0)
                 
-                # 4. 随机选择所需数量的点
-                indices = torch.randperm(unique_points.size(0), device=device)[:self.n_points]
-                return unique_points[indices]
-        
-        else:
-            # raise NotImplementedError("Targeted sampling ratio < 1 is not implemented") 
-            # （在init里有写，如果split是val，则targeted_sampling_ratio=0，所以这个else是有用的，是用来处理val的）
-            # 简单随机采样
-            sample_size = min(self.n_points * 2, grid_size)
-            grid_indices = torch.randperm(grid_size, device=device)[:sample_size]
-            grid_points = self.full_grid_high_res[grid_indices].to(device)
-            unique_points = torch.unique(grid_points, dim=0)
-            
-            if unique_points.size(0) < self.n_points:
-                remaining = self.n_points - unique_points.size(0)
-                additional_indices = torch.randint(grid_size, (remaining,), device=device)
-                additional_points = self.full_grid_high_res[additional_indices].to(device)
-                unique_points = torch.cat([unique_points, additional_points], dim=0)
-            
-            indices = torch.randperm(unique_points.size(0), device=device)[:self.n_points]
-            return unique_points[indices]
+                # 5. 随机打乱顺序（保持点类型标记同步）
+                perm = torch.randperm(self.n_points, device=device)
+                query_points = query_points[perm]
+                point_types = point_types[perm]
+                
+                return query_points, point_types
 
     def _center_molecule(self, coords) -> torch.Tensor:
         """
@@ -571,6 +643,9 @@ def create_field_loaders(
     if joint_finetune_config.get("enabled", False) and "n_points" in joint_finetune_config:
         n_points = joint_finetune_config["n_points"]
     
+    # 从配置中读取targeted_sampling_ratio（grid点和邻近点的比例）
+    targeted_sampling_ratio = config["dset"].get("targeted_sampling_ratio", 2)
+    
     dset = FieldDataset(
         gnf_converter=gnf_converter,  # 传入GNFConverter实例
         dset_name=config["dset"]["dset_name"],
@@ -581,12 +656,12 @@ def create_field_loaders(
         rotate=config["dset"]["data_aug"] if split == "train" else False,
         resolution=config["dset"]["resolution"],
         grid_dim=config["dset"]["grid_dim"],
-        radius=config["dset"]["atomic_radius"],
         sample_full_grid=sample_full_grid,
         debug_one_mol=config.get("debug_one_mol", False),
         debug_subset=config.get("debug_subset", False),
         sample_near_atoms_only=sample_near_atoms_only,
         atom_distance_threshold=atom_distance_threshold,
+        targeted_sampling_ratio=targeted_sampling_ratio,  # 添加targeted_sampling_ratio参数
     )
 
     if config.get("debug_one_mol", False):
@@ -709,6 +784,8 @@ def create_gnf_converter(config: dict) -> GNFConverter:
     debug_bond_validation = autoregressive_config.get("debug_bond_validation", False)
     # 前N个原子不受键长限制（可选，默认为3）
     n_initial_atoms_no_bond_check = autoregressive_config.get("n_initial_atoms_no_bond_check", 3)
+    # 是否启用键长检查（可选，默认为True）
+    enable_bond_validation = autoregressive_config.get("enable_bond_validation", True)
     
     # 获取梯度批次大小（可选，默认为None，表示一次性处理所有点）
     gradient_batch_size = gnf_config.get("gradient_batch_size", None)
@@ -752,6 +829,7 @@ def create_gnf_converter(config: dict) -> GNFConverter:
         debug_bond_validation=debug_bond_validation,
         gradient_batch_size=gradient_batch_size,
         n_initial_atoms_no_bond_check=n_initial_atoms_no_bond_check,
+        enable_bond_validation=enable_bond_validation,
         sampling_range_min=sampling_range_min,
         sampling_range_max=sampling_range_max,
     )

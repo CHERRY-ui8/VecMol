@@ -3,15 +3,22 @@ data_dir: dataset/data
 data_aug: True
 grid_dim: 48 # 48*0.25=12，差不多是qm9里的分子的最大直径（之所以是直径，是因为在求scale_factor的时候，缩放比例是1/（resolution*grid_dim/2））
 resolution: .25
+
 grid_size: 9  # 统一的grid_size参数，用于编码器和解码器 # NOTE: 记得后续可以变回11
 anchor_spacing: 1.5  # 锚点间距，单位为埃（之前用的1.5 # NOTE: 记得后续可以变回1
-atomic_radius: .5
+# grid_size: 5
+# anchor_spacing: 3
+
 elements: ["C", "H", "O", "N", "F"]
 n_channels: 5
 n_points: 500 # 在 FieldDataset 的 _get_xs 方法中使用。之前训练都设置的是500，可能小了
 subsampling_ratio: 2
 
+# Query points sampling configuration
+# targeted_sampling_ratio: grid点和邻近点的比例 (n_grid / n_neighbor)
+targeted_sampling_ratio: 0.5  # 默认值：grid点:邻近点 = 2:1
+
 num_workers: 4
 batch_size: 32
-lr_enc: 1e-4
-lr_dec: 1e-3 # 非微调模式下是2e-4，微调模式提高到1e-3以加快训练（原2e-4导致更新太小）
+lr_enc: 2e-4
+lr_dec: 2e-4 # 非微调模式下是2e-4

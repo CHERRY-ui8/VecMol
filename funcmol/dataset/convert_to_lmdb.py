@@ -128,7 +128,7 @@ def main():
     parser.add_argument("--data_dir", type=str, required=True, 
                        help="数据目录路径")
     parser.add_argument("--dset_name", type=str, required=True,
-                       choices=["qm9", "drugs", "cremp"],
+                       choices=["qm9", "drugs", "drugs_no_h", "cremp"],
                        help="数据集名称")
     parser.add_argument("--splits", type=str, nargs="+", 
                        default=["train", "val", "test"],
@@ -144,6 +144,7 @@ def main():
             fname = f"{split}_50_data"
         else:
             fname = f"{split}_data"
+        # Note: drugs_no_h uses the same file naming convention as drugs
         
         pth_path = os.path.join(data_dir, f"{fname}.pth")
         lmdb_path = os.path.join(data_dir, f"{fname}.lmdb")

@@ -6,7 +6,7 @@ import os
 
 # Set GPU environment
 # os.environ['CUDA_VISIBLE_DEVICES'] = "1"
-os.environ['CUDA_VISIBLE_DEVICES'] = "1,2,3,4,5,6,7"
+os.environ['CUDA_VISIBLE_DEVICES'] = "0,2,3,4,5,6,7"
 # os.environ['CUDA_VISIBLE_DEVICES'] = "0,3,5,6,7"
 
 # Data visualization and processing
@@ -126,7 +126,7 @@ class FuncmolLightningModule(pl.LightningModule):
                 print(f"Using cosine distance + magnitude loss (magnitude_weight={self.magnitude_loss_weight})")
             else:
                 print(f"Using MSE loss for decoder training")
-            print(f"Multi-timestep decoder training: using last {self.num_timesteps_for_decoder} timesteps")
+            print(f"Multi-timestep decoder training: using first {self.num_timesteps_for_decoder} small timesteps (t=0,1,...,{self.num_timesteps_for_decoder-1}) for slight noise perturbation, then denoising")
             print(f"Query points filtering: keeping points within {self.atom_distance_threshold}Å of atoms")
 
         self._freeze_nf()
@@ -208,7 +208,9 @@ class FuncmolLightningModule(pl.LightningModule):
                     code_stats=self.code_stats if self.config["normalize_codes"] else None
                 )
         else:
-            codes = normalize_code(codes, self.code_stats)
+            # Only normalize codes if normalize_codes is enabled and code_stats is available
+            if self.config["normalize_codes"] and self.code_stats is not None:
+                codes = normalize_code(codes, self.code_stats)
         
         with torch.no_grad():
             smooth_codes = add_noise_to_code(codes, smooth_sigma=self.config["smooth_sigma"])
@@ -246,7 +248,7 @@ class FuncmolLightningModule(pl.LightningModule):
         grid_size = self.config["dset"]["grid_size"]
         anchor_spacing = self.config["dset"]["anchor_spacing"]
         radius = self.position_weight_config.get("radius", 3.0)
-        weight_alpha = self.position_weight_config.get("alpha", 0.1)
+        weight_alpha = self.position_weight_config.get("alpha", 0.5)
         
         # Get grid coordinates
         grid_coords = create_grid_coords(1, grid_size, device=device, anchor_spacing=anchor_spacing)
@@ -402,33 +404,38 @@ class FuncmolLightningModule(pl.LightningModule):
     
     def _get_multi_timestep_codes(self, x_0):
         """
-        Get denoised codes for the last N timesteps.
+        Get slightly perturbed and denoised codes by adding noise to the last N small timesteps, then denoising.
+        This ensures codes are only slightly perturbed (using small timesteps like t=0,1,2,3,4),
+        and after denoising, the codes should be close to the original x_0, so decoder can 
+        still generate fields similar to ground truth.
         
         Args:
             x_0: Ground truth codes [B, n_grid, code_dim]
             
         Returns:
-            multi_timestep_codes: [B, n_timesteps, n_grid, code_dim] tensor containing denoised codes for each timestep
+            multi_timestep_codes: [B, n_timesteps, n_grid, code_dim] tensor containing 
+                denoised codes for each timestep. These are codes that were slightly perturbed 
+                (using small timesteps like t=0,1,2,3,4) and then denoised, so they should be 
+                close to the original x_0.
         """
         from funcmol.models.ddpm import q_sample, p_sample_x0
         
         device = x_0.device
         B = x_0.shape[0]
-        num_timesteps = self.funcmol.num_timesteps
         diffusion_consts = self.funcmol.diffusion_consts
         
-        # Get the last N timesteps (e.g., last 50 timesteps: [950, 951, ..., 999] for 1000 total timesteps)
-        start_timestep = max(0, num_timesteps - self.num_timesteps_for_decoder)
-        timesteps_list = list(range(start_timestep, num_timesteps))
+        # Use the last N small timesteps (e.g., t=0,1,2,3,4 for num_timesteps_for_decoder=5)
+        # These are timesteps close to 0, where noise is minimal, ensuring only slight perturbation
+        timesteps_list = list(range(0, self.num_timesteps_for_decoder))
         
-        # Collect denoised codes for each timestep
+        # Collect denoised codes for each timestep (add noise, then denoise)
         all_denoised_codes = []
         
         for t_val in timesteps_list:
             # Create timestep tensor for this value
             t = torch.full((B,), t_val, device=device, dtype=torch.long)
             
-            # Add noise to x_0 to get x_t
+            # Add noise to x_0 to get x_t (forward diffusion with small timestep)
             noise = torch.randn_like(x_0)
             x_t = q_sample(x_0, t, diffusion_consts, noise)
             
@@ -1191,8 +1198,8 @@ class FuncmolLightningModule(pl.LightningModule):
         if "best_loss" in checkpoint:
             self.best_loss = checkpoint["best_loss"]
 
-# @hydra.main(config_path="configs", config_name="train_fm_drugs", version_base=None)
-@hydra.main(config_path="configs", config_name="train_fm_qm9", version_base=None)
+@hydra.main(config_path="configs", config_name="train_fm_drugs", version_base=None)
+# @hydra.main(config_path="configs", config_name="train_fm_qm9", version_base=None)
 def main_hydra(config):
     """Entry point for Hydra configuration system"""
     main(config)

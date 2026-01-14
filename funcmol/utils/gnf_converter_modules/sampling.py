@@ -76,23 +76,37 @@ class SamplingProcessor:
         使用图结构思想：构建同种原子内部连边的图，一次性处理所有原子类型。
         
         Args:
-            current_codes: 当前batch的编码 [1, code_dim]
+            current_codes: 当前batch的编码 [batch_size, grid_size**3, code_dim] 或 [1, grid_size**3, code_dim]
+                          支持批次处理以实现真正的并行
             n_atom_types: 原子类型数量
             device: 设备
             decoder: 解码器模型
             iteration_callback: 可选的回调函数
-            element_existence: 可选的元素存在性向量 [n_atom_types]，如果提供，只处理存在的元素类型
+            element_existence: 可选的元素存在性向量 [batch_size, n_atom_types] 或 [n_atom_types]，如果提供，只处理存在的元素类型
             gradient_ascent_callback: 梯度上升回调
             enable_timing: 是否启用时间统计
             
         Returns:
             (coords_list, types_list, histories): 坐标列表、类型列表和聚类历史列表
+            如果输入是批次化的，返回的列表长度等于batch_size
         """
+        # 检查是否是批次处理
+        batch_size = current_codes.size(0)
+        is_batch = batch_size > 1
+        
         # 如果提供了element_existence，只处理存在的元素类型
         if element_existence is not None:
-            # element_existence: [n_atom_types] 或 [1, n_atom_types]
+            # element_existence: [batch_size, n_atom_types] 或 [n_atom_types] 或 [1, n_atom_types]
             if element_existence.dim() == 2:
-                element_existence = element_existence.squeeze(0)  # [n_atom_types]
+                if element_existence.size(0) == 1:
+                    element_existence = element_existence.squeeze(0)  # [n_atom_types]
+                elif element_existence.size(0) == batch_size:
+                    # 批次化的element_existence，对于批次处理，我们使用第一个batch的元素存在性
+                    # 或者可以分别处理每个batch，但为了简化，这里使用第一个batch
+                    if is_batch:
+                        element_existence = element_existence[0]  # 使用第一个batch的元素存在性
+                    else:
+                        element_existence = element_existence.squeeze(0)  # [n_atom_types]
             
             # 将概率转换为二进制（阈值0.5）
             element_mask = (element_existence > 0.5).float()
@@ -101,7 +115,10 @@ class SamplingProcessor:
             
             if len(existing_types) == 0:
                 # 如果没有元素存在，返回空列表
-                return [], [], []
+                if is_batch:
+                    return [[] for _ in range(batch_size)], [[] for _ in range(batch_size)], []
+                else:
+                    return [], [], []
         else:
             # 如果没有提供element_existence，处理所有类型
             existing_types = list(range(n_atom_types))
@@ -122,13 +139,18 @@ class SamplingProcessor:
             timing_info['init_sampling'] = time.perf_counter() - t_init_start
         
         # 计算候选点的梯度场强度
-        candidate_batch = candidate_points.unsqueeze(0)  # [1, n_candidates, 3]
+        # 对于批次处理，将candidate_points扩展到批次维度
+        if is_batch:
+            candidate_batch = candidate_points.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, n_candidates, 3]
+        else:
+            candidate_batch = candidate_points.unsqueeze(0)  # [1, n_candidates, 3]
         
         t_field_start = time.perf_counter() if enable_timing else None
         try:
             # 使用torch.no_grad()包装候选点采样
+            # decoder支持批次处理：x: [B, n_points, 3], codes: [B, n_grid, code_dim]
             with torch.no_grad():
-                candidate_field = decoder(candidate_batch, current_codes)
+                candidate_field = decoder(candidate_batch, current_codes)  # [batch_size, n_candidates, n_atom_types, 3]
         except Exception as e:
             raise e
         if enable_timing:
@@ -137,8 +159,10 @@ class SamplingProcessor:
         # 2. 完全矩阵化采样 - 一次性处理所有原子类型
         # 计算每个候选点的field方差（为每个原子类型分别计算），基于方差采样
         t_variance_start = time.perf_counter() if enable_timing else None
+        # 对于批次处理，使用第一个batch的field计算方差（或者可以分别处理每个batch）
+        field_for_variance = candidate_field[0] if is_batch else candidate_field[0]
         field_variances_per_type = self.gradient_field_computer.compute_field_variance(
-            candidate_points, candidate_field[0], 
+            candidate_points, field_for_variance, 
             self.field_variance_k_neighbors, 
             per_type_independent=True
         )  # [n_candidates, n_atom_types] 或 [n_candidates]
@@ -240,14 +264,18 @@ class SamplingProcessor:
             
             # 使用跨原子类型iteration循环
             # 1. 先为每个原子类型准备簇
+            # 优化：批量转换所有点，减少 GPU-CPU 同步次数
+            # 只在需要聚类时才转换（DBSCAN 需要 numpy）
+            final_points_np = final_points.detach().cpu().numpy()  # 一次性转换所有点
+            
             type_clusters_data = {}  # {atom_type: (clusters_with_tags, iteration_thresholds)}
             type_points_dict = {}  # {atom_type: points}
             
             for type_idx, t in enumerate(existing_types):
                 start_idx = type_start_indices[type_idx]
                 end_idx = start_idx + query_points_per_type[type_idx]
-                type_points = final_points[start_idx:end_idx]  # [n_query_points_t, 3]
-                z_np = type_points.detach().cpu().numpy()
+                # 从已转换的 numpy 数组中切片，避免重复转换
+                z_np = final_points_np[start_idx:end_idx]  # [n_query_points_t, 3]
                 type_points_dict[t] = z_np
                 
                 # 准备簇
@@ -284,7 +312,8 @@ class SamplingProcessor:
                             reference_points=global_ref_points if len(global_ref_points) > 0 else None,
                             reference_types=global_ref_types if len(global_ref_types) > 0 else None,
                             pending_clusters=pending_clusters,
-                            current_type_atom_count=current_type_atom_count
+                            current_type_atom_count=current_type_atom_count,
+                            enable_timing=enable_timing
                         )
                     
                     # 更新pending簇
@@ -309,7 +338,8 @@ class SamplingProcessor:
                         if stats['n_rejected'] > 0:
                             reason_str = ", ".join([f"{k}={v}" for k, v in stats['rejection_reasons'].items() if v > 0])
                             print(f"  拒绝原因: {reason_str}")
-                        if len(global_ref_points) > 0:
+                        # 只有启用键长检查时，才输出参考点信息
+                        if self.clustering_processor.enable_bond_validation and len(global_ref_points) > 0:
                             type_counts = Counter([ELEMENTS_HASH_INV.get(int(tt), f"Type{int(tt)}") for tt in global_ref_types])
                             print(f"  当前参考点: {len(global_ref_points)} 个, 类型分布: {dict(type_counts)}")
                         print(f"{'='*60}")

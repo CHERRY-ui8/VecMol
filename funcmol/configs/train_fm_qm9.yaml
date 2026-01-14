@@ -45,18 +45,19 @@ ddpm:
 # 根据每个grid坐标附近原子的数量计算权重，对重要位置的codes在loss计算时加大权重
 position_weight:
   enabled: True  # 是否启用位置权重
-  radius: 2.0     # 计算附近原子的半径阈值（单位：埃） 2, 3
-  alpha: 1.0      # 权重系数：weight = 0.1 + alpha * num_atoms
+  radius: 3.0     # 计算附近原子的半径阈值（单位：埃） 2, 3
+  alpha: 0.5      # 权重系数：weight = 1 + alpha * num_atoms
+ # 也用过权重系数：weight = 0.1 + alpha * num_atoms
 
 # NOTE: 联合微调配置（decoder + denoiser）
 # 启用后，decoder 和 denoiser 将同时优化，encoder 始终冻结
 # decoder 默认使用 neural field checkpoint 中的 decoder，如果从 reload_model_path 加载的 checkpoint 中包含 decoder_state_dict，则优先使用
 joint_finetune:
-  enabled: False  # 是否启用联合微调（同时优化 decoder 和 denoiser）
+  enabled: True  # 是否启用联合微调（同时优化 decoder 和 denoiser）
   decoder_loss_weight: 1.0  # decoder 损失权重（λ），用于组合损失：total_loss = denoiser_loss + λ * decoder_loss
   decoder_lr: null  # decoder 的学习率，如果为 null 则使用 denoiser 的学习率（lr）
   # 新增配置：多timestep和query points采样
-  num_timesteps_for_decoder: 15  # 使用最后多少个timestep的diffusion结果训练decoder
+  num_timesteps_for_decoder: 5  # 使用最后多少个很小的timestep（如t=0,1,2,3,4）进行轻微加噪，然后去噪。这样codes只是经过轻微扰动，去噪后应该接近原始codes，decoder应该能够从这些codes得到和原先ground truth近似的field
   sample_near_atoms_only: True  # 是否只在采样时采样原子附近的点
   atom_distance_threshold: 0.5  # 只采样距离原子0.5Å内的query points（单位：Å）
   n_points: 300  # joint fine-tuning时使用的query points数量（如果未设置，则使用dset.n_points，默认500）
@@ -70,8 +71,8 @@ exp_dir: ../exps/funcmol
 exp_name: "fm_${dset.dset_name}/${now:%Y%m%d}"
 dirname: "${exp_dir}/${exp_name}"
 
-reload_model_path: null
-# reload_model_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251225/lightning_logs/version_1/checkpoints
+# reload_model_path: null
+reload_model_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20260105/lightning_logs/version_1/checkpoints
   # Funcmol (denoiser) checkpoint 路径，支持两种格式：
   # 1. Lightning checkpoint 文件路径（.ckpt 文件），例如：/path/to/model-epoch=100.ckpt
   # 2. 目录路径，会自动查找 last.ckpt 或最新的 .ckpt 文件，例如：/path/to/checkpoint_dir
@@ -101,10 +102,10 @@ codes_dir_with_aug: "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-ne
 num_epochs: 50000
 num_iterations: 50000  # 总迭代次数，用于学习率调度
 dset:
-  batch_size: 16
+  batch_size: 4
   num_workers: 4
 
-ckpt_every_n_epochs: 5  # 每隔多少epoch保存一次ckpt
+ckpt_every_n_epochs: 1  # 每隔多少epoch保存一次ckpt
 decoder:
   code_dim: 128 # 和encoder的code_dim一致
 

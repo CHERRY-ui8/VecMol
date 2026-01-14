@@ -6,8 +6,8 @@ import os
 
 # Set GPU environment BEFORE importing torch (must be before any CUDA initialization)
 # TODO: set gpus based on server id
-os.environ['CUDA_VISIBLE_DEVICES'] = "2,3,4,5,6,7"
-# os.environ['CUDA_VISIBLE_DEVICES'] = "0,2,3,4,5"
+# os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3,4,5,6,7"
+os.environ['CUDA_VISIBLE_DEVICES'] = "0,2,3,4,5"
 # os.environ['CUDA_VISIBLE_DEVICES'] = "0"
 
 # Data visualization and processing
@@ -24,7 +24,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.strategies import DDPStrategy
 
 # Configuration management
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, DictConfig
 import hydra
 
 from funcmol.utils.utils_nf import (
@@ -94,6 +94,12 @@ class NeuralFieldLightningModule(pl.LightningModule):
         self.use_denoiser_for_codes = finetune_config.get("use_denoiser_for_codes", False)
         self.denoiser = None
         
+        # On-the-fly mode: use encoder to compute codes in real-time during fine-tuning
+        # This is the default when finetune_enabled=True and use_denoiser_for_codes is False
+        self.use_on_the_fly_codes = self.finetune_enabled and not self.use_denoiser_for_codes
+        if self.use_on_the_fly_codes:
+            print(f">> On-the-fly code generation enabled: codes will be computed from encoder in real-time during fine-tuning")
+        
         # Configuration for use_denoiser_for_codes mode
         if self.use_denoiser_for_codes:
             self.sample_near_atoms_only = finetune_config.get("sample_near_atoms_only", True)
@@ -101,6 +107,7 @@ class NeuralFieldLightningModule(pl.LightningModule):
             self.use_cosine_loss = finetune_config.get("use_cosine_loss", False)  # 默认使用MSE loss
             self.magnitude_loss_weight = finetune_config.get("magnitude_loss_weight", 0.1)
             self.n_points = finetune_config.get("n_points", None)  # If None, use dset.n_points
+            self.max_timestep_for_decoder = finetune_config.get("max_timestep_for_decoder", 5)  # 使用很小的timestep范围（0到max_timestep_for_decoder-1）进行轻微加噪
             
             print(f"use_denoiser_for_codes mode enabled:")
             print(f"  - sample_near_atoms_only: {self.sample_near_atoms_only}")
@@ -110,6 +117,7 @@ class NeuralFieldLightningModule(pl.LightningModule):
                 print(f"  - magnitude_loss_weight: {self.magnitude_loss_weight}")
             if self.n_points is not None:
                 print(f"  - n_points: {self.n_points}")
+            print(f"  - max_timestep_for_decoder: {self.max_timestep_for_decoder} (using small timesteps t=0 to {self.max_timestep_for_decoder-1} for slight noise perturbation, then denoising)")
         
         if self.use_denoiser_for_codes:
             # Load denoiser model for code generation
@@ -158,7 +166,41 @@ class NeuralFieldLightningModule(pl.LightningModule):
             self.denoiser.eval()
             for param in self.denoiser.parameters():
                 param.requires_grad = False
-            print(f">> Denoiser loaded successfully. Will use final timestep denoised codes for decoder training.")
+            
+            # CRITICAL: Load code_stats from denoiser checkpoint for code normalization
+            # Denoiser was trained on normalized codes, so we must normalize encoder-generated codes
+            self.denoiser_code_stats = checkpoint.get("code_stats", None)
+            denoiser_normalize_codes = denoiser_config.get("normalize_codes", False)
+            
+            if denoiser_normalize_codes:
+                if self.denoiser_code_stats is None:
+                    print(f">> WARNING: denoiser was trained with normalize_codes=True but code_stats not found in checkpoint!")
+                    print(f">>   This may cause codes mismatch. Denoiser expects normalized codes.")
+                    self.denoiser_code_stats = None
+                else:
+                    print(f">> Loaded code_stats from denoiser checkpoint for code normalization")
+                    # Handle both tensor and scalar types for mean/std
+                    mean_info = 'N/A'
+                    std_info = 'N/A'
+                    if 'mean' in self.denoiser_code_stats:
+                        mean_val = self.denoiser_code_stats['mean']
+                        if hasattr(mean_val, 'shape'):
+                            mean_info = str(mean_val.shape)
+                        else:
+                            mean_info = f"scalar ({type(mean_val).__name__})"
+                    if 'std' in self.denoiser_code_stats:
+                        std_val = self.denoiser_code_stats['std']
+                        if hasattr(std_val, 'shape'):
+                            std_info = str(std_val.shape)
+                        else:
+                            std_info = f"scalar ({type(std_val).__name__})"
+                    print(f">>   code_stats mean: {mean_info}")
+                    print(f">>   code_stats std: {std_info}")
+            else:
+                self.denoiser_code_stats = None
+                print(f">> Denoiser was trained without code normalization (normalize_codes=False)")
+            
+            print(f">> Denoiser loaded successfully. Will use slightly perturbed and denoised codes (small timestep noise + denoising) for decoder training.")
         
         if self.finetune_enabled:
             # Freeze encoder parameters
@@ -205,47 +247,76 @@ class NeuralFieldLightningModule(pl.LightningModule):
     
     def _get_denoised_code(self, x_0):
         """
-        Get denoised code from the final timestep using denoiser.
+        Get slightly perturbed and denoised code by adding noise using a small timestep, then denoising.
+        This ensures codes are only slightly perturbed (using small timestep like t=0,1,2,3,4),
+        and after denoising, the codes should be close to the original x_0, so decoder can 
+        still generate fields similar to ground truth.
         
         Args:
             x_0: Ground truth codes [B, n_grid, code_dim]
             
         Returns:
-            denoised_code: [B, n_grid, code_dim] tensor containing denoised code from final timestep
+            denoised_code: [B, n_grid, code_dim] tensor containing denoised code after slight perturbation.
+                This is a code that was slightly perturbed (using small timestep) and then denoised,
+                so it should be close to the original x_0.
         """
-        from funcmol.models.ddpm import q_sample, p_sample_x0
+        from funcmol.models.ddpm import q_sample, extract
         
         device = x_0.device
         B = x_0.shape[0]
-        num_timesteps = self.denoiser.num_timesteps
         diffusion_consts = self.denoiser.diffusion_consts
         
-        # Use the final timestep (t = num_timesteps - 1)
-        t_val = num_timesteps - 1
-        t = torch.full((B,), t_val, device=device, dtype=torch.long)
+        # Use a small timestep (randomly sample from 0 to max_timestep_for_decoder-1)
+        # These are timesteps close to 0, where noise is minimal, ensuring only slight perturbation
+        t_val = torch.randint(0, self.max_timestep_for_decoder, (B,), device=device, dtype=torch.long)
+        t = t_val  # [B]
         
-        # Add noise to x_0 to get x_t
+        # Add noise to x_0 to get x_t (forward diffusion with small timestep)
         noise = torch.randn_like(x_0)
         x_t = q_sample(x_0, t, diffusion_consts, noise)
         
         # Denoise using the model (predict x0)
-        if self.denoiser.diffusion_method == "new_x0":
-            # Model predicts x0 directly
-            with torch.no_grad():
+        # CRITICAL: We want the predicted x_0 directly, not x_{t-1}
+        with torch.no_grad():
+            if self.denoiser.diffusion_method == "new_x0":
+                # Model directly predicts x0
                 predicted_x0 = self.denoiser.net(x_t, t)
-        else:
-            # For "new" method, we need to use p_sample_x0 to get denoised codes
-            with torch.no_grad():
-                predicted_x0 = p_sample_x0(self.denoiser.net, x_t, t, diffusion_consts, clip_denoised=False)
+            else:
+                # For "new" method, model predicts noise (epsilon)
+                # We need to convert from noise prediction to x0 prediction
+                # Formula: x_0 = (x_t - √(1 - α̅_t) · ε_θ) / √(α̅_t)
+                predicted_noise = self.denoiser.net(x_t, t)  # [B, n_grid, code_dim]
+                
+                # Extract diffusion constants
+                sqrt_alphas_cumprod_t = extract(diffusion_consts["sqrt_alphas_cumprod"], t, x_t)
+                sqrt_one_minus_alphas_cumprod_t = extract(diffusion_consts["sqrt_one_minus_alphas_cumprod"], t, x_t)
+                
+                # Convert noise prediction to x0 prediction
+                predicted_x0 = (x_t - sqrt_one_minus_alphas_cumprod_t * predicted_noise) / sqrt_alphas_cumprod_t
         
         return predicted_x0  # [B, n_grid, code_dim]
     
-    def forward(self, batch):
+    def _prepare_code_stats(self, code_stats_dict, device, dtype):
+        """Prepare code_stats dictionary, converting scalars to tensors if needed."""
+        if code_stats_dict is None:
+            return None
+        prepared = {}
+        for key in ['mean', 'std']:
+            if key in code_stats_dict:
+                val = code_stats_dict[key]
+                if not isinstance(val, torch.Tensor):
+                    prepared[key] = torch.tensor(val, device=device, dtype=dtype)
+                else:
+                    prepared[key] = val.to(device=device, dtype=dtype)
+        return prepared
+    
+    def forward(self, batch, codes=None):
         """
         Forward pass through the neural field model
         
         Args:
             batch: PyTorch Geometric batch object
+            codes: Optional precomputed codes [B, n_grid, code_dim]. If None, codes will be generated.
             
         Returns:
             torch.Tensor: Predicted field
@@ -254,14 +325,30 @@ class NeuralFieldLightningModule(pl.LightningModule):
         query_points = batch.xs
         
         # Get codes from encoder or denoiser
-        if self.use_denoiser_for_codes:
+        if codes is not None:
+            # Use provided codes (should not happen in normal flow)
+            pass  # codes already provided
+        elif self.use_denoiser_for_codes:
             # Use denoiser to generate codes from ground truth codes (via encoder)
             # First, get ground truth codes from encoder
             with torch.no_grad():
                 x_0 = self.enc(batch)  # [B, n_grid, code_dim]
             
+            # CRITICAL: Normalize codes before passing to denoiser
+            # Denoiser was trained on normalized codes, so encoder-generated codes must be normalized
+            if hasattr(self, 'denoiser_code_stats') and self.denoiser_code_stats is not None:
+                from funcmol.utils.utils_nf import normalize_code
+                code_stats = self._prepare_code_stats(self.denoiser_code_stats, x_0.device, x_0.dtype)
+                x_0 = normalize_code(x_0, code_stats)
+            
             # Get denoised code from final timestep using denoiser
             codes = self._get_denoised_code(x_0)  # [B, n_grid, code_dim]
+            
+            # CRITICAL: Unnormalize codes after denoising (decoder expects unnormalized codes)
+            if hasattr(self, 'denoiser_code_stats') and self.denoiser_code_stats is not None:
+                from funcmol.utils.utils_nf import unnormalize_code
+                code_stats = self._prepare_code_stats(self.denoiser_code_stats, codes.device, codes.dtype)
+                codes = unnormalize_code(codes, code_stats)
         else:
             # Get codes from encoder
             # In fine-tuning mode, encoder is in eval mode, so use torch.no_grad() for efficiency
@@ -334,27 +421,130 @@ class NeuralFieldLightningModule(pl.LightningModule):
             # Use exponential decay: weight = exp(-distance / scale)
             sample_weights = torch.exp(-min_distances / self.atom_distance_scale)
             
-            # Normalize weights to have mean=1 (preserve overall loss scale)
-            weight_mean = sample_weights.mean()
-            if weight_mean > 0:
-                sample_weights = sample_weights / weight_mean
-            
             weights[b] = sample_weights
         
         return weights
     
-    def _process_batch(self, batch):
+    def _compute_separate_loss(self, pred_field, target_field, point_types, 
+                               use_cosine_loss=False, magnitude_loss_weight=0.1,
+                               use_weighting=False, batch=None, query_points=None):
+        """
+        分别计算grid点和邻近点的loss
+        
+        Args:
+            pred_field: [B, n_points, n_atom_types, 3] 预测的field
+            target_field: [B, n_points, n_atom_types, 3] 目标field
+            point_types: [B, n_points] 或 [N_total_points] 点类型标记，0=grid点，1=邻近点
+            use_cosine_loss: 是否使用cosine loss
+            magnitude_loss_weight: magnitude loss的权重
+            use_weighting: 是否使用距离加权
+            batch: batch对象（用于计算权重）
+            query_points: [B, n_points, 3] query点坐标（用于计算权重）
+            
+        Returns:
+            loss: 总loss（标量）
+            loss_dict: 包含各种loss的字典
+        """
+        B, n_points, n_atom_types, _ = pred_field.shape
+        device = pred_field.device
+        
+        # Reshape point_types if needed
+        # In PyTorch Geometric batch, point_types might be [N_total_points] or [B, n_points]
+        if point_types.dim() == 1:
+            # [N_total_points] -> [B, n_points]
+            # Need to handle batching: each sample has n_points points
+            if point_types.shape[0] == B * n_points:
+                point_types = point_types.view(B, n_points)
+            elif point_types.shape[0] == n_points:
+                # Single sample case, expand to batch
+                point_types = point_types.unsqueeze(0).expand(B, -1)
+            else:
+                raise ValueError(f"Unexpected point_types shape: {point_types.shape}, expected {B * n_points} or {n_points}")
+        elif point_types.dim() == 2:
+            # Already [B, n_points] or might need reshaping
+            if point_types.shape[0] == B and point_types.shape[1] == n_points:
+                pass  # Already correct shape
+            else:
+                raise ValueError(f"Unexpected point_types 2D shape: {point_types.shape}, expected [{B}, {n_points}]")
+        else:
+            raise ValueError(f"Unexpected point_types shape: {point_types.shape}")
+        
+        # Create masks for grid and neighbor points
+        grid_mask = (point_types == 0)  # [B, n_points]
+        neighbor_mask = (point_types == 1)  # [B, n_points]
+        
+        # Get loss weights if needed
+        if use_weighting and batch is not None and query_points is not None:
+            weights = self._compute_loss_weights(batch, query_points, target_field)  # [B, n_points]
+        else:
+            weights = torch.ones(B, n_points, device=device)
+        
+        # Compute element-wise loss
+        if use_cosine_loss:
+            # Use cosine distance + magnitude loss
+            from funcmol.utils.utils_nf import compute_decoder_field_loss
+            
+            # Compute loss for grid points
+            grid_loss = compute_decoder_field_loss(
+                pred_field * grid_mask.unsqueeze(-1).unsqueeze(-1),
+                target_field * grid_mask.unsqueeze(-1).unsqueeze(-1),
+                use_cosine_loss=True,
+                magnitude_loss_weight=magnitude_loss_weight,
+                valid_mask=grid_mask
+            )
+            
+            # Compute loss for neighbor points
+            neighbor_loss = compute_decoder_field_loss(
+                pred_field * neighbor_mask.unsqueeze(-1).unsqueeze(-1),
+                target_field * neighbor_mask.unsqueeze(-1).unsqueeze(-1),
+                use_cosine_loss=True,
+                magnitude_loss_weight=magnitude_loss_weight,
+                valid_mask=neighbor_mask
+            )
+        else:
+            # Use MSE loss
+            elementwise_loss = self.criterion(pred_field, target_field)  # [B, n_points, n_atom_types, 3]
+            pointwise_loss = elementwise_loss.mean(dim=(-2, -1))  # [B, n_points]
+            
+            # Apply weights
+            weighted_loss = pointwise_loss * weights  # [B, n_points]
+            
+            # Separate loss for grid and neighbor points
+            grid_loss = (weighted_loss * grid_mask).sum() / (grid_mask.sum() + 1e-8)
+            neighbor_loss = (weighted_loss * neighbor_mask).sum() / (neighbor_mask.sum() + 1e-8)
+        
+        # Get loss weights from config (if specified)
+        loss_weight_config = self.config.get("loss_weighting", {})
+        grid_loss_weight = loss_weight_config.get("grid_loss_weight", 1.0)
+        neighbor_loss_weight = loss_weight_config.get("neighbor_loss_weight", 1.0)
+        
+        # Combine losses
+        total_loss = grid_loss_weight * grid_loss + neighbor_loss_weight * neighbor_loss
+        
+        # Create loss dictionary
+        loss_dict = {
+            "loss": total_loss,
+            "grid_loss": grid_loss,
+            "neighbor_loss": neighbor_loss,
+            "grid_points_count": float(grid_mask.sum().item()),
+            "neighbor_points_count": float(neighbor_mask.sum().item())
+        }
+        
+        return total_loss, loss_dict
+    
+    def _process_batch(self, batch, codes=None):
         """
         Process a batch and return the predicted and target fields
         
         Args:
             batch: PyTorch Geometric batch object
+            codes: Optional precomputed codes [B, n_grid, code_dim]
             
         Returns:
             tuple: (pred_field, target_field) with matching dimensions [B, n_points, n_atom_types, 3]
         """
         # Get predictions from forward pass
-        pred_field = self(batch)  # [B, n_points, n_atom_types, 3]
+        pred_field = self(batch, codes=codes)  # [B, n_points, n_atom_types, 3]
         
         # Get target field from batch
         target_field = batch.target_field
@@ -398,17 +588,29 @@ class NeuralFieldLightningModule(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         """Training step logic"""
         # Get predictions and targets
-        pred_field, target_field = self._process_batch(batch)
+        # Codes will be computed on-the-fly in forward() method
+        pred_field, target_field = self._process_batch(batch, codes=None)
+        
+        # Get point types if available (for separate grid/neighbor loss computation)
+        has_point_types = hasattr(batch, 'point_types')
         
         # Calculate loss
         if self.use_denoiser_for_codes and self.use_cosine_loss:
             # Use cosine distance + magnitude loss for denoiser-based training
-            loss = compute_decoder_field_loss(
-                pred_field,
-                target_field,
-                use_cosine_loss=True,
-                magnitude_loss_weight=self.magnitude_loss_weight
-            )
+            if has_point_types:
+                # Separate loss computation for grid and neighbor points
+                loss, loss_dict = self._compute_separate_loss(
+                    pred_field, target_field, batch.point_types,
+                    use_cosine_loss=True, magnitude_loss_weight=self.magnitude_loss_weight
+                )
+            else:
+                loss = compute_decoder_field_loss(
+                    pred_field,
+                    target_field,
+                    use_cosine_loss=True,
+                    magnitude_loss_weight=self.magnitude_loss_weight
+                )
+                loss_dict = {"loss": loss}
         elif self.loss_weighting_enabled:
             # Get query points
             query_points = batch.xs
@@ -421,25 +623,49 @@ class NeuralFieldLightningModule(pl.LightningModule):
             if query_points.dim() == 2:
                 query_points = query_points.view(B, n_points, 3)
             
-            # Compute weights for each query point
-            weights = self._compute_loss_weights(batch, query_points, target_field)  # [B, n_points]
-            
-            # Compute element-wise MSE loss
-            # pred_field: [B, n_points, n_atom_types, 3]
-            # target_field: [B, n_points, n_atom_types, 3]
-            elementwise_loss = self.criterion(pred_field, target_field)  # [B, n_points, n_atom_types, 3]
-            
-            # Average over atom_types and spatial dimensions, keep batch and point dimensions
-            pointwise_loss = elementwise_loss.mean(dim=(-2, -1))  # [B, n_points]
-            
-            # Apply weights
-            weighted_loss = pointwise_loss * weights  # [B, n_points]
-            
-            # Average over batch and points
-            loss = weighted_loss.mean()
+            if has_point_types:
+                # Separate loss computation for grid and neighbor points
+                loss, loss_dict = self._compute_separate_loss(
+                    pred_field, target_field, batch.point_types,
+                    use_cosine_loss=False, use_weighting=True,
+                    batch=batch, query_points=query_points
+                )
+            else:
+                # Compute weights for each query point
+                weights = self._compute_loss_weights(batch, query_points, target_field)  # [B, n_points]
+                
+                # Compute element-wise MSE loss
+                # pred_field: [B, n_points, n_atom_types, 3]
+                # target_field: [B, n_points, n_atom_types, 3]
+                elementwise_loss = self.criterion(pred_field, target_field)  # [B, n_points, n_atom_types, 3]
+                
+                # Average over atom_types and spatial dimensions, keep batch and point dimensions
+                pointwise_loss = elementwise_loss.mean(dim=(-2, -1))  # [B, n_points]
+                
+                # Apply weights
+                weighted_loss = pointwise_loss * weights  # [B, n_points]
+                
+                # Average over batch and points
+                loss = weighted_loss.mean()
+                loss_dict = {"loss": loss}
         else:
             # Standard MSE loss
-            loss = self.criterion(pred_field, target_field)
+            if has_point_types:
+                # Separate loss computation for grid and neighbor points
+                loss, loss_dict = self._compute_separate_loss(
+                    pred_field, target_field, batch.point_types,
+                    use_cosine_loss=False, use_weighting=False
+                )
+            else:
+                loss = self.criterion(pred_field, target_field)
+                loss_dict = {"loss": loss}
+        
+        # Log separate losses if available
+        if "grid_loss" in loss_dict:
+            self.log("train/grid_loss", loss_dict["grid_loss"], batch_size=len(batch), on_step=True, on_epoch=True, prog_bar=False)
+            self.log("train/neighbor_loss", loss_dict["neighbor_loss"], batch_size=len(batch), on_step=True, on_epoch=True, prog_bar=False)
+            self.log("train/grid_points_count", loss_dict["grid_points_count"], batch_size=len(batch), on_step=True, on_epoch=True, prog_bar=False)
+            self.log("train/neighbor_points_count", loss_dict["neighbor_points_count"], batch_size=len(batch), on_step=True, on_epoch=True, prog_bar=False)
         
         # Update metrics
         # self.train_metrics["loss"](loss.detach())
@@ -462,17 +688,30 @@ class NeuralFieldLightningModule(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         """Validation step logic"""
         # Get predictions and targets
-        pred_field, target_field = self._process_batch(batch)
+        # Codes will be computed on-the-fly in forward() method
+        pred_field, target_field = self._process_batch(batch, codes=None)
+        
+        # Get point types if available (for separate grid/neighbor loss computation)
+        has_point_types = hasattr(batch, 'point_types')
+        loss_dict = {}  # Initialize loss_dict
         
         # Calculate loss
         if self.use_denoiser_for_codes and self.use_cosine_loss:
             # Use cosine distance + magnitude loss for denoiser-based training
-            loss = compute_decoder_field_loss(
-                pred_field,
-                target_field,
-                use_cosine_loss=True,
-                magnitude_loss_weight=self.magnitude_loss_weight
-            )
+            if has_point_types:
+                # Separate loss computation for grid and neighbor points
+                loss, loss_dict = self._compute_separate_loss(
+                    pred_field, target_field, batch.point_types,
+                    use_cosine_loss=True, magnitude_loss_weight=self.magnitude_loss_weight
+                )
+            else:
+                loss = compute_decoder_field_loss(
+                    pred_field,
+                    target_field,
+                    use_cosine_loss=True,
+                    magnitude_loss_weight=self.magnitude_loss_weight
+                )
+                loss_dict = {"loss": loss}
         elif self.loss_weighting_enabled:
             # Get query points
             query_points = batch.xs
@@ -485,23 +724,47 @@ class NeuralFieldLightningModule(pl.LightningModule):
             if query_points.dim() == 2:
                 query_points = query_points.view(B, n_points, 3)
             
-            # Compute weights for each query point
-            weights = self._compute_loss_weights(batch, query_points, target_field)  # [B, n_points]
-            
-            # Compute element-wise MSE loss
-            elementwise_loss = self.criterion(pred_field, target_field)  # [B, n_points, n_atom_types, 3]
-            
-            # Average over atom_types and spatial dimensions, keep batch and point dimensions
-            pointwise_loss = elementwise_loss.mean(dim=(-2, -1))  # [B, n_points]
-            
-            # Apply weights
-            weighted_loss = pointwise_loss * weights  # [B, n_points]
-            
-            # Average over batch and points
-            loss = weighted_loss.mean()
+            if has_point_types:
+                # Separate loss computation for grid and neighbor points
+                loss, loss_dict = self._compute_separate_loss(
+                    pred_field, target_field, batch.point_types,
+                    use_cosine_loss=False, use_weighting=True,
+                    batch=batch, query_points=query_points
+                )
+            else:
+                # Compute weights for each query point
+                weights = self._compute_loss_weights(batch, query_points, target_field)  # [B, n_points]
+                
+                # Compute element-wise MSE loss
+                elementwise_loss = self.criterion(pred_field, target_field)  # [B, n_points, n_atom_types, 3]
+                
+                # Average over atom_types and spatial dimensions, keep batch and point dimensions
+                pointwise_loss = elementwise_loss.mean(dim=(-2, -1))  # [B, n_points]
+                
+                # Apply weights
+                weighted_loss = pointwise_loss * weights  # [B, n_points]
+                
+                # Average over batch and points
+                loss = weighted_loss.mean()
+                loss_dict = {"loss": loss}
         else:
             # Standard MSE loss
-            loss = self.criterion(pred_field, target_field)
+            if has_point_types:
+                # Separate loss computation for grid and neighbor points
+                loss, loss_dict = self._compute_separate_loss(
+                    pred_field, target_field, batch.point_types,
+                    use_cosine_loss=False, use_weighting=False
+                )
+            else:
+                loss = self.criterion(pred_field, target_field)
+                loss_dict = {"loss": loss}
+        
+        # Log separate losses if available
+        if "grid_loss" in loss_dict:
+            self.log("val/grid_loss", loss_dict["grid_loss"], batch_size=len(batch), on_step=False, on_epoch=True, prog_bar=False)
+            self.log("val/neighbor_loss", loss_dict["neighbor_loss"], batch_size=len(batch), on_step=False, on_epoch=True, prog_bar=False)
+            self.log("val/grid_points_count", loss_dict["grid_points_count"], batch_size=len(batch), on_step=False, on_epoch=True, prog_bar=False)
+            self.log("val/neighbor_points_count", loss_dict["neighbor_points_count"], batch_size=len(batch), on_step=False, on_epoch=True, prog_bar=False)
         
         # Log metrics
         self.log('val_loss', loss, batch_size=len(batch),
@@ -556,27 +819,108 @@ class NeuralFieldLightningModule(pl.LightningModule):
                 {"params": self.dec.parameters(), "lr": self.config["dset"]["lr_dec"]}
             ])
         
-        # Create learning rate scheduler if needed
-        if "lr_decay" in self.config and self.config["lr_decay"]:
-            # Default milestone if not specified in config
-            milestones = self.config.get("lr_milestones", [500])
-            gamma = self.config.get("lr_gamma", 0.1)
-                
-            scheduler = torch.optim.lr_scheduler.MultiStepLR(
-                optimizer, milestones=milestones, gamma=gamma
+        # Check if warmup is enabled
+        warmup_config = self.config.get("warmup", {})
+        warmup_enabled = warmup_config.get("enabled", False)
+        warmup_steps = warmup_config.get("warmup_steps", 1000)
+        
+        schedulers = []
+        
+        # Create warmup scheduler if enabled
+        if warmup_enabled:
+            # LambdaLR for linear warmup: lr = base_lr * (step / warmup_steps)
+            # After warmup_steps, lr = base_lr (multiplier = 1.0)
+            def warmup_lambda(step):
+                if step < warmup_steps:
+                    return float(step + 1) / float(warmup_steps)
+                else:
+                    return 1.0
+            
+            warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(
+                optimizer, lr_lambda=warmup_lambda
             )
             
-            # Configure the scheduler with proper interval
-            scheduler_config = {
-                "scheduler": scheduler,
-                "interval": "epoch",
+            warmup_scheduler_config = {
+                "scheduler": warmup_scheduler,
+                "interval": "step",  # Warmup is step-based
                 "frequency": 1,
-                "monitor": "val_loss"
             }
+            schedulers.append(warmup_scheduler_config)
             
-            return {"optimizer": optimizer, "lr_scheduler": scheduler_config}
+            print(f"Warmup enabled:")
+            print(f"  - warmup_steps: {warmup_steps} (learning rate will linearly increase from 0 to target LR over {warmup_steps} steps)")
         
-        return optimizer
+        # Create learning rate decay scheduler if needed
+        if "lr_decay" in self.config and self.config["lr_decay"]:
+            # Get scheduler type from config (default: "plateau" for ReduceLROnPlateau)
+            scheduler_type = self.config.get("lr_scheduler_type", "plateau")
+            
+            if scheduler_type == "plateau":
+                # Use ReduceLROnPlateau: reduce LR when val_loss stops decreasing
+                factor = self.config.get("lr_factor", 0.5)  # 学习率衰减因子
+                patience = self.config.get("lr_patience", 10)  # 等待多少个epoch没有改善
+                min_lr = self.config.get("lr_min", 1e-6)  # 最小学习率
+                mode = self.config.get("lr_mode", "min")  # 'min' for val_loss (default)
+                
+                scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                    optimizer,
+                    mode=mode,
+                    factor=factor,
+                    patience=patience,
+                    min_lr=min_lr,
+                    verbose=True  # 打印学习率变化信息
+                )
+                
+                print(f"Using ReduceLROnPlateau scheduler:")
+                print(f"  - factor: {factor} (LR will be multiplied by this when plateau detected)")
+                print(f"  - patience: {patience} (wait {patience} epochs without improvement)")
+                print(f"  - min_lr: {min_lr} (minimum learning rate)")
+                print(f"  - mode: {mode} (monitoring val_loss)")
+                
+                # Configure the scheduler for PyTorch Lightning
+                scheduler_config = {
+                    "scheduler": scheduler,
+                    "interval": "epoch",
+                    "frequency": 1,
+                    "monitor": "val_loss"  # Monitor validation loss
+                }
+                schedulers.append(scheduler_config)
+            
+            elif scheduler_type == "multistep":
+                # Use MultiStepLR: reduce LR at fixed milestones
+                milestones = self.config.get("lr_milestones", [500])
+                gamma = self.config.get("lr_gamma", 0.1)
+                
+                print(f"Using MultiStepLR scheduler:")
+                print(f"  - milestones: {milestones} (LR will be reduced at these epochs)")
+                print(f"  - gamma: {gamma} (LR will be multiplied by this at each milestone)")
+                    
+                scheduler = torch.optim.lr_scheduler.MultiStepLR(
+                    optimizer, milestones=milestones, gamma=gamma
+                )
+                
+                # Configure the scheduler with proper interval
+                scheduler_config = {
+                    "scheduler": scheduler,
+                    "interval": "epoch",
+                    "frequency": 1,
+                    "monitor": "val_loss"
+                }
+                schedulers.append(scheduler_config)
+            
+            else:
+                raise ValueError(f"Unknown scheduler type: {scheduler_type}. Choose 'plateau' or 'multistep'")
+        
+        # Return optimizer with schedulers
+        # PyTorch Lightning expects:
+        # - Single scheduler: {"optimizer": optimizer, "lr_scheduler": scheduler_config_dict}
+        # - Multiple schedulers: {"optimizer": optimizer, "lr_scheduler": [scheduler_config_dict1, scheduler_config_dict2]}
+        if len(schedulers) == 0:
+            return optimizer
+        elif len(schedulers) == 1:
+            return {"optimizer": optimizer, "lr_scheduler": schedulers[0]}
+        else:
+            return {"optimizer": optimizer, "lr_scheduler": schedulers}
     
     def on_save_checkpoint(self, checkpoint):        
         # 保存前去掉多余的封装（但是lightning模式理论上会自动处理好，不需要去除，只是以防万一）
@@ -605,9 +949,26 @@ def main(config):
     # Setup GNF Converter for data processing
     data_gnf_converter = create_gnf_converter(config)
     
-    # Check if use_denoiser_for_codes mode is enabled and update config for field loaders
+    # Check if use_denoiser_for_codes mode is enabled
     finetune_config = config.get("finetune_decoder", {})
+    finetune_enabled = finetune_config.get("enabled", False)
     use_denoiser_for_codes = finetune_config.get("use_denoiser_for_codes", False)
+    
+    # On-the-fly mode: use encoder to compute codes in real-time (default for fine-tuning)
+    use_on_the_fly_codes = finetune_enabled and not use_denoiser_for_codes
+    
+    # CRITICAL: Disable data augmentation in fine-tuning mode
+    # When encoder is frozen, random rotations would cause codes to change, breaking the correspondence
+    # between codes and target fields. We need consistent codes for the same molecule.
+    if finetune_enabled:
+        original_data_aug = config["dset"].get("data_aug", False)
+        config["dset"]["data_aug"] = False
+        if use_on_the_fly_codes:
+            print(f">> [on-the-fly codes] Disabled data augmentation (rotation) for fine-tuning")
+            print(f">>   Encoder is frozen, so codes must be consistent for the same molecule")
+        elif use_denoiser_for_codes:
+            print(f">> [use_denoiser_for_codes] Disabled data augmentation (rotation) to match denoiser training data")
+        print(f">>   Original data_aug value: {original_data_aug}, now set to: False")
     
     if use_denoiser_for_codes:
         # Add sampling configuration to config for create_field_loaders
@@ -619,7 +980,7 @@ def main(config):
         config["joint_finetune"]["atom_distance_threshold"] = finetune_config.get("atom_distance_threshold", 0.5)
         if "n_points" in finetune_config and finetune_config["n_points"] is not None:
             config["joint_finetune"]["n_points"] = finetune_config["n_points"]
-    
+        
     # Create data loaders
     try:
         loader_train = create_field_loaders(config, data_gnf_converter, split="train")

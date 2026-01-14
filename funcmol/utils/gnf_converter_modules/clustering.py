@@ -2,6 +2,7 @@
 聚类模块：DBSCAN聚类和点合并
 """
 import numpy as np
+import time
 from typing import Optional, Tuple
 from sklearn.cluster import DBSCAN
 from funcmol.utils.gnf_converter_modules.dataclasses import ClusteringIterationRecord, ClusteringHistory
@@ -23,6 +24,7 @@ class ClusteringProcessor:
         max_clustering_iterations: int = 10,
         debug_bond_validation: bool = False,
         n_initial_atoms_no_bond_check: int = 3,
+        enable_bond_validation: bool = True,
     ):
         """
         初始化聚类处理器
@@ -38,6 +40,7 @@ class ClusteringProcessor:
             max_clustering_iterations: 最大迭代轮数
             debug_bond_validation: 是否输出键长检查的调试信息
             n_initial_atoms_no_bond_check: 前N个原子不受键长限制（无论上限还是下限）
+            enable_bond_validation: 是否启用键长检查，默认True
         """
         self.bond_validator = bond_validator
         self.eps = eps
@@ -49,6 +52,11 @@ class ClusteringProcessor:
         self.max_clustering_iterations = max_clustering_iterations
         self.debug_bond_validation = debug_bond_validation
         self.n_initial_atoms_no_bond_check = n_initial_atoms_no_bond_check
+        self.enable_bond_validation = enable_bond_validation
+        
+        # 调试输出：确认参数是否正确设置
+        if self.debug_bond_validation:
+            print(f"[ClusteringProcessor] enable_bond_validation = {self.enable_bond_validation}")
     
     def _prepare_clusters(self, points: np.ndarray) -> Tuple[list, list]:
         """
@@ -184,6 +192,7 @@ class ClusteringProcessor:
         reference_types: Optional[np.ndarray] = None,
         pending_clusters: Optional[list] = None,
         current_type_atom_count: int = 0,
+        enable_timing: bool = False
     ) -> Tuple[np.ndarray, list, dict, np.ndarray, np.ndarray]:
         """
         处理单个iteration的聚类
@@ -197,6 +206,7 @@ class ClusteringProcessor:
             reference_types: 参考点类型
             pending_clusters: 待处理的簇列表 [(center, n_samples, cluster_points, original_iteration_tag), ...]
             current_type_atom_count: 当前原子类型已通过的原子数量（用于判断是否需要键长检查）
+            enable_timing: 是否启用时间统计
             
         Returns:
             new_atoms: 本轮通过检查的原子坐标
@@ -205,6 +215,8 @@ class ClusteringProcessor:
             updated_reference_points: 更新后的参考点坐标
             updated_reference_types: 更新后的参考点类型
         """
+        t_start = time.perf_counter() if enable_timing else None
+        
         if pending_clusters is None:
             pending_clusters = []
         
@@ -237,8 +249,11 @@ class ClusteringProcessor:
             bond_validation_passed = True
             rejection_reason = None
             
+            # 如果禁用了键长检查，直接通过
+            if not self.enable_bond_validation:
+                bond_validation_passed = True
             # 如果当前原子类型已通过的原子数量小于阈值，前N个原子不受键长限制
-            if current_type_atom_count < self.n_initial_atoms_no_bond_check:
+            elif current_type_atom_count < self.n_initial_atoms_no_bond_check:
                 bond_validation_passed = True
             elif current_reference_points is not None and len(current_reference_points) > 0:
                 if current_iteration == 0:
@@ -260,15 +275,17 @@ class ClusteringProcessor:
                 new_atoms.append(center)
                 n_passed += 1
                 
-                # 更新参考点
-                if current_reference_points is None:
-                    current_reference_points = np.array([center])
-                    current_reference_types = np.array([atom_type if atom_type is not None else -1])
-                else:
-                    distances_to_existing = np.sqrt(((current_reference_points - center[None, :]) ** 2).sum(axis=1))
-                    if len(distances_to_existing) == 0 or distances_to_existing.min() > 1e-6:
-                        current_reference_points = np.vstack([current_reference_points, center])
-                        current_reference_types = np.append(current_reference_types, atom_type if atom_type is not None else -1)
+                # 只有启用键长检查时，才更新参考点
+                if self.enable_bond_validation:
+                    # 更新参考点
+                    if current_reference_points is None:
+                        current_reference_points = np.array([center])
+                        current_reference_types = np.array([atom_type if atom_type is not None else -1])
+                    else:
+                        distances_to_existing = np.sqrt(((current_reference_points - center[None, :]) ** 2).sum(axis=1))
+                        if len(distances_to_existing) == 0 or distances_to_existing.min() > 1e-6:
+                            current_reference_points = np.vstack([current_reference_points, center])
+                            current_reference_types = np.append(current_reference_types, atom_type if atom_type is not None else -1)
             else:
                 new_pending_clusters.append((center, n_samples, cluster_points, original_iteration_tag))
                 n_rejected += 1
@@ -286,6 +303,14 @@ class ClusteringProcessor:
         updated_reference_points = current_reference_points if current_reference_points is not None else np.empty((0, 3))
         updated_reference_types = current_reference_types if current_reference_types is not None else np.empty((0,), dtype=np.int64)
         
+        if enable_timing and t_start is not None:
+            t_end = time.perf_counter()
+            elapsed = t_end - t_start
+            atom_symbol = ELEMENTS_HASH_INV.get(atom_type, f"Type{atom_type}") if atom_type is not None else "Unknown"
+            print(f"      [ClusteringProcessor.merge_points_single_iteration] 原子类型: {atom_symbol}, "
+                  f"iteration: {current_iteration}, 通过: {n_passed}, 拒绝: {n_rejected}, "
+                  f"用时: {elapsed*1000:.2f}ms")
+        
         return (np.array(new_atoms) if len(new_atoms) > 0 else np.empty((0, 3)), 
                 new_pending_clusters, stats, updated_reference_points, updated_reference_types)
     
@@ -295,7 +320,8 @@ class ClusteringProcessor:
         atom_type: Optional[int] = None,
         reference_points: Optional[np.ndarray] = None,
         reference_types: Optional[np.ndarray] = None,
-        record_history: bool = False
+        record_history: bool = False,
+        enable_timing: bool = False
     ) -> Tuple[np.ndarray, Optional[ClusteringHistory]]:
         """
         Use DBSCAN to merge close points and determine atom centers.
@@ -307,11 +333,14 @@ class ClusteringProcessor:
             reference_points: 参考点坐标 [M, 3]（可选，用于键长检查）
             reference_types: 参考点原子类型 [M]（可选）
             record_history: 是否记录聚类历史
+            enable_timing: 是否启用时间统计
             
         Returns:
             merged_points: 合并后的点坐标
             history: 聚类历史记录（如果record_history=True）
         """
+        t_start = time.perf_counter() if enable_timing else None
+        
         if len(points.shape) == 3:
             points = points.reshape(-1, 3)
         elif len(points.shape) != 2 or points.shape[1] != 3:
@@ -331,8 +360,31 @@ class ClusteringProcessor:
             initial_min_samples = self.min_samples
             clustering_min_samples = self.min_samples
         
+        # 调试信息：显示输入点的空间分布
+        if self.debug_bond_validation and len(points) > 0:
+            atom_symbol = ELEMENTS_HASH_INV.get(atom_type, f"Type{atom_type}") if atom_type is not None else "Unknown"
+            print(f"[ClusteringProcessor.merge_points] 原子类型: {atom_symbol}, 输入点数: {len(points)}, "
+                  f"eps={self.eps}, min_samples={clustering_min_samples}, "
+                  f"enable_bond_validation={self.enable_bond_validation}")
+            print(f"  输入点坐标范围: X[{points[:, 0].min():.2f}, {points[:, 0].max():.2f}], "
+                  f"Y[{points[:, 1].min():.2f}, {points[:, 1].max():.2f}], "
+                  f"Z[{points[:, 2].min():.2f}, {points[:, 2].max():.2f}]")
+        
         initial_clustering = DBSCAN(eps=self.eps, min_samples=clustering_min_samples).fit(points)
         initial_labels = initial_clustering.labels_
+        
+        # 调试信息：统计聚类结果
+        n_clusters = len(set(initial_labels)) - (1 if -1 in initial_labels else 0)
+        n_noise = np.sum(initial_labels == -1)
+        if self.debug_bond_validation:
+            atom_symbol = ELEMENTS_HASH_INV.get(atom_type, f"Type{atom_type}") if atom_type is not None else "Unknown"
+            print(f"  DBSCAN结果: 找到簇数={n_clusters}, 噪声点数={n_noise}")
+            if n_noise > 0:
+                # 显示噪声点的空间分布
+                noise_points = points[initial_labels == -1]
+                print(f"  噪声点坐标范围: X[{noise_points[:, 0].min():.2f}, {noise_points[:, 0].max():.2f}], "
+                      f"Y[{noise_points[:, 1].min():.2f}, {noise_points[:, 1].max():.2f}], "
+                      f"Z[{noise_points[:, 2].min():.2f}, {noise_points[:, 2].max():.2f}]")
         
         # 2. 收集所有簇及其samples数量
         all_clusters = []  # [(center, n_samples, cluster_points), ...]
@@ -495,7 +547,10 @@ class ClusteringProcessor:
                 # 键长检查
                 bond_validation_passed = True
                 rejection_reason = None
-                if current_reference_points is not None and len(current_reference_points) > 0:
+                # 如果禁用了键长检查，直接通过
+                if not self.enable_bond_validation:
+                    bond_validation_passed = True
+                elif current_reference_points is not None and len(current_reference_points) > 0:
                     # 有参考点时，根据是否为第一轮决定检查方式
                     if current_iteration == 0:
                         # 第一轮：只检查下限（防止同一类型原子太近），不检查上限
@@ -524,17 +579,20 @@ class ClusteringProcessor:
                     all_merged_points.append(center)
                     n_passed += 1
                     
-                    # 只有通过键长检查的簇才添加到参考点（用于后续iteration的键长检查）
-                    # pending 的簇不作为参考点，因为它们本身还没有通过键长检查
-                    if current_reference_points is None:
-                        current_reference_points = np.array([center])
-                        current_reference_types = np.array([atom_type if atom_type is not None else -1])
-                    else:
-                        # 检查是否已经存在（避免重复添加）
-                        distances_to_existing = np.sqrt(((current_reference_points - center[None, :]) ** 2).sum(axis=1))
-                        if len(distances_to_existing) == 0 or distances_to_existing.min() > 1e-6:  # 容差：1e-6 Å
-                            current_reference_points = np.vstack([current_reference_points, center])
-                            current_reference_types = np.append(current_reference_types, atom_type if atom_type is not None else -1)
+                    # 只有启用键长检查时，才更新参考点（用于后续iteration的键长检查）
+                    # 如果禁用了键长检查，不需要参考点，因此不更新
+                    if self.enable_bond_validation:
+                        # 只有通过键长检查的簇才添加到参考点（用于后续iteration的键长检查）
+                        # pending 的簇不作为参考点，因为它们本身还没有通过键长检查
+                        if current_reference_points is None:
+                            current_reference_points = np.array([center])
+                            current_reference_types = np.array([atom_type if atom_type is not None else -1])
+                        else:
+                            # 检查是否已经存在（避免重复添加）
+                            distances_to_existing = np.sqrt(((current_reference_points - center[None, :]) ** 2).sum(axis=1))
+                            if len(distances_to_existing) == 0 or distances_to_existing.min() > 1e-6:  # 容差：1e-6 Å
+                                current_reference_points = np.vstack([current_reference_points, center])
+                                current_reference_types = np.append(current_reference_types, atom_type if atom_type is not None else -1)
                 else:
                     # 键长检查失败，加入pending列表，在下一轮重新检查
                     pending_clusters.append((center, n_samples, cluster_points, original_iteration_tag))
@@ -552,7 +610,8 @@ class ClusteringProcessor:
                 if n_rejected > 0:
                     reason_str = ", ".join([f"{k}={v}" for k, v in rejection_reasons.items() if v > 0])
                     print(f"  拒绝原因: {reason_str}")
-                if current_reference_points is not None and len(current_reference_points) > 0:
+                # 只有启用键长检查时，才输出参考点信息
+                if self.enable_bond_validation and current_reference_points is not None and len(current_reference_points) > 0:
                     from collections import Counter
                     type_counts = Counter([ELEMENTS_HASH_INV.get(t, f"Type{t}") for t in current_reference_types])
                     print(f"  当前参考点: {len(current_reference_points)} 个, 类型分布: {dict(type_counts)}")
@@ -583,6 +642,14 @@ class ClusteringProcessor:
         
         if history is not None:
             history.total_atoms = len(all_merged_points)
+        
+        if enable_timing and t_start is not None:
+            t_end = time.perf_counter()
+            elapsed = t_end - t_start
+            atom_symbol = ELEMENTS_HASH_INV.get(atom_type, f"Type{atom_type}") if atom_type is not None else "Unknown"
+            print(f"    [ClusteringProcessor.merge_points] 原子类型: {atom_symbol}, "
+                  f"输入点数: {len(points)}, 输出原子数: {len(all_merged_points)}, "
+                  f"用时: {elapsed:.3f}s")
         
         result = np.array(all_merged_points) if len(all_merged_points) > 0 else np.empty((0, 3))
         return result, history
