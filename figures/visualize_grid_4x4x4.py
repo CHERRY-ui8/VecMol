@@ -88,7 +88,7 @@ def create_grid_plot(use_colors=False, save_path=None):
     # 根据参数选择颜色
     if use_colors:
         # 为每个点生成随机颜色（64个点，每个点一个随机RGB颜色）
-        np.random.seed(43)  # 设置随机种子以便结果可复现
+        np.random.seed(42)  # 设置随机种子以便结果可复现
         num_points = len(x_flat)
         point_colors = np.random.rand(num_points, 3)  # 生成64个随机RGB颜色
     else:

@@ -462,6 +462,14 @@ def compute_ddpm_loss(model: nn.Module, x_0: torch.Tensor, diffusion_consts: Dic
     Returns:
         训练损失
     """
+    # Ensure all tensors involved (x_0, diffusion constants, timesteps) live on the same device
+    device = x_0.device
+
+    # Move diffusion constants to the current data device if needed
+    for k, v in diffusion_consts.items():
+        if v.device != device:
+            diffusion_consts[k] = v.to(device)
+
     batch_size = x_0.shape[0]
     
     # 随机采样时间步
@@ -509,6 +517,14 @@ def compute_ddpm_loss_x0(model: nn.Module, x_0: torch.Tensor, diffusion_consts: 
     Returns:
         训练损失
     """
+    # Ensure all tensors involved (x_0, diffusion constants, timesteps) on the same device
+    device = x_0.device
+
+    # Move diffusion constants to the current data device if needed
+    for k, v in diffusion_consts.items():
+        if v.device != device:
+            diffusion_consts[k] = v.to(device)
+
     batch_size = x_0.shape[0]
     num_timesteps = diffusion_consts["betas"].shape[0]
     

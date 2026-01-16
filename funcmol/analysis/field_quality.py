@@ -23,8 +23,8 @@ from funcmol.dataset.dataset_field import FieldDataset, create_gnf_converter
 from funcmol.utils.utils_nf import load_neural_field
 from funcmol.utils.constants import PADDING_INDEX
 
-# 设置项目根目录
-PROJECT_ROOT = Path(__file__).parent.parent.parent
+# 设置项目根目录（funcmol目录）
+PROJECT_ROOT = Path(__file__).parent.parent
 
 
 def compute_mse(pred_field: torch.Tensor, gt_field: torch.Tensor) -> float:
@@ -81,7 +81,7 @@ def compute_field_magnitude_mse(pred_field: torch.Tensor, gt_field: torch.Tensor
     return mse
 
 
-@hydra.main(config_path="../configs", config_name="field_quality_qm9", version_base=None)
+@hydra.main(config_path="../configs", config_name="field_quality_drugs", version_base=None)
 def main(config: DictConfig) -> None:
     """
     主函数：评估neural field场的质量
@@ -147,8 +147,9 @@ def main(config: DictConfig) -> None:
     # 创建FieldDataset
     # 评估时只从格点采样，不采样邻近点（targeted_sampling_ratio=0）
     # 将相对路径转换为绝对路径
-    data_dir = config_dict.get("dset", {}).get("data_dir", "funcmol/dataset/data")
+    data_dir = config_dict.get("dset", {}).get("data_dir", "dataset/data")
     if not os.path.isabs(data_dir):
+        # PROJECT_ROOT 指向 funcmol 目录，所以直接拼接 dataset/data
         data_dir = str(PROJECT_ROOT / data_dir)
     
     dataset = FieldDataset(
@@ -167,16 +168,17 @@ def main(config: DictConfig) -> None:
     
     # 限制评估的样本数量
     num_samples = config.get("num_samples", None)
-    if num_samples is not None and num_samples < len(dataset):
+    total_samples = len(dataset)  # 保存原始数据集大小
+    if num_samples is not None and num_samples < total_samples:
         # 随机选择样本
-        indices = list(range(len(dataset)))
+        indices = list(range(total_samples))
         random.Random(seed).shuffle(indices)
         selected_indices = indices[:num_samples]
         # 创建子集（通过修改field_idxs）
         dataset.field_idxs = torch.tensor(selected_indices)
-        print(f"从 {len(dataset)} 个样本中选择 {num_samples} 个进行评估")
+        print(f"从 {total_samples} 个样本中选择 {num_samples} 个进行评估")
     else:
-        num_samples = len(dataset)
+        num_samples = total_samples
         print(f"使用全部 {num_samples} 个样本进行评估")
     
     # 创建DataLoader

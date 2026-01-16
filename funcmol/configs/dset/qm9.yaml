@@ -4,10 +4,10 @@ data_aug: True
 grid_dim: 48 # 48*0.25=12，差不多是qm9里的分子的最大直径（之所以是直径，是因为在求scale_factor的时候，缩放比例是1/（resolution*grid_dim/2））
 resolution: .25
 
-grid_size: 9  # 统一的grid_size参数，用于编码器和解码器 # NOTE: 记得后续可以变回11
-anchor_spacing: 1.5  # 锚点间距，单位为埃（之前用的1.5 # NOTE: 记得后续可以变回1
-# grid_size: 5
-# anchor_spacing: 3
+# grid_size: 9  # 统一的grid_size参数，用于编码器和解码器 # NOTE: 记得后续可以变回11
+# anchor_spacing: 1.5  # 锚点间距，单位为埃（之前用的1.5 # NOTE: 记得后续可以变回1
+grid_size: 5
+anchor_spacing: 3
 
 elements: ["C", "H", "O", "N", "F"]
 n_channels: 5

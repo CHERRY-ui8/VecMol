@@ -3,8 +3,8 @@
 defaults:
   - dset: drugs
   - converter: gnf_converter_drugs
-  - encoder: gnn
-  - decoder: decoder_global
+  - encoder: gnn_large
+  - decoder: decoder_global_large
   - override hydra/job_logging: custom
   - _self_
 
@@ -14,7 +14,7 @@ seed: 1234  # 随机种子，确保结果可重现
 dataset_type: drugs
 
 # Neural Field模型路径
-nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_drugs/20260112/lightning_logs/version_0/checkpoints/model-epoch=999.ckpt
+nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_drugs/20260113/lightning_logs/version_1/checkpoints/last.ckpt
 
 # 数据集分割（train/val/test）
 split: test

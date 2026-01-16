@@ -5,5 +5,5 @@ coord_dim: 3
 n_layers: 5
 # 实际使用 knn（k_neighbors=32）构建图，而不是 radius
 radius: 3  # TODO：0.5太小了，可以稍微数值模拟一下，看看效果
-cutoff: 5.0
-k_neighbors: 32  # 添加k_neighbors参数
+cutoff: 8.0
+k_neighbors: 32  # 查询点-锚点（query-anchor）：使用 knn，每个查询点连接最近的 k_neighbors 个锚点

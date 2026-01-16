@@ -9,12 +9,12 @@ resolution: .25
 # anchor_spacing: 1.5  # 锚点间距，单位为埃，大一些可以大幅减小计算量
 
 # 20260112/version1, 20260113/version0
-grid_size: 9
-anchor_spacing: 2.5
+# grid_size: 9
+# anchor_spacing: 2.5
 
 # 20260113/version1
-# grid_size: 7
-# anchor_spacing: 3
+grid_size: 7
+anchor_spacing: 3
 
 elements: ["C", "H", "O", "N", "F", "S", "Cl", "Br"]
 n_channels: 8
@@ -25,7 +25,7 @@ subsampling_ratio: 2
 # targeted_sampling_ratio: grid点和邻近点的比例 (n_grid / n_neighbor)
 targeted_sampling_ratio: 0.5  # 默认值：grid点:邻近点 = 2:1
 
-num_workers: 16
+num_workers: 2
 batch_size: 24
 lr_enc: 1.5e-4  # 2e-4
 lr_dec: 1.5e-4  # 1e-3

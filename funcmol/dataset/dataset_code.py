@@ -32,6 +32,7 @@ class CodeDataset(Dataset):
         split: str = "train",
         codes_dir: str = None,
         num_augmentations = None,  # 数据增强数量，用于查找对应的LMDB文件
+        use_sharded_lmdb: bool = None,  # 是否使用分片LMDB。None表示自动检测，True强制使用分片，False强制使用完整LMDB
     ):
         self.dset_name = dset_name
         self.split = split
@@ -53,10 +54,70 @@ class CodeDataset(Dataset):
             lmdb_path = os.path.join(self.codes_dir, "codes.lmdb")
             keys_path = os.path.join(self.codes_dir, "codes_keys.pt")
         
-        if os.path.exists(lmdb_path) and os.path.exists(keys_path):
-            # 使用LMDB数据库
-            self._use_lmdb_database(lmdb_path, keys_path)
+        # 根据配置决定是否使用分片LMDB
+        # use_sharded_lmdb: None=自动检测, True=强制使用分片, False=强制使用完整LMDB
+        lmdb_loaded = False
+        
+        if use_sharded_lmdb is False:
+            # 强制使用完整LMDB，跳过分片检测
+            if os.path.exists(lmdb_path) and os.path.exists(keys_path):
+                self._use_lmdb_database(lmdb_path, keys_path)
+                lmdb_loaded = True
         else:
+            # 检查是否存在分片LMDB（更高效）
+            # 检查两个可能的位置：
+            # 1. 直接在codes_dir下：codes_dir/shard_info.pt
+            # 2. 在sharded子目录下：codes_dir/sharded/shard_info.pt
+            shard_info_path = os.path.join(self.codes_dir, "shard_info.pt")
+            shard_info_path_sharded = os.path.join(self.codes_dir, "sharded", "shard_info.pt")
+            
+            shard_found = False
+            if os.path.exists(shard_info_path):
+                # 使用分片LMDB（直接在codes_dir下）
+                self._use_sharded_lmdb_database(self.codes_dir, num_augmentations)
+                shard_found = True
+                lmdb_loaded = True
+            elif os.path.exists(shard_info_path_sharded):
+                # 使用分片LMDB（在sharded子目录下）
+                sharded_dir = os.path.join(self.codes_dir, "sharded")
+                self._use_sharded_lmdb_database(sharded_dir, num_augmentations)
+                shard_found = True
+                lmdb_loaded = True
+            
+            # 如果没有找到分片LMDB，尝试使用完整LMDB
+            if not shard_found:
+                if use_sharded_lmdb is True:
+                    # 强制使用分片但未找到
+                    # 对于val/test split，允许回退到完整LMDB（因为数据量通常较小，不需要分片）
+                    if self.split in ["val", "test"]:
+                        if os.path.exists(lmdb_path) and os.path.exists(keys_path):
+                            print(f"Warning: use_sharded_lmdb=True but no sharded LMDB found for {self.split} split. "
+                                  f"Falling back to full LMDB: {lmdb_path}")
+                            self._use_lmdb_database(lmdb_path, keys_path)
+                            lmdb_loaded = True
+                        else:
+                            raise FileNotFoundError(
+                                f"use_sharded_lmdb=True but no sharded LMDB found in {self.codes_dir}, "
+                                f"and full LMDB also not found at {lmdb_path}.\n"
+                                f"Expected shard_info.pt in either:\n"
+                                f"  - {self.codes_dir}/shard_info.pt, or\n"
+                                f"  - {self.codes_dir}/sharded/shard_info.pt"
+                            )
+                    else:
+                        # train split必须使用分片，如果找不到则报错
+                        raise FileNotFoundError(
+                            f"use_sharded_lmdb=True but no sharded LMDB found in {self.codes_dir}.\n"
+                            f"Expected shard_info.pt in either:\n"
+                            f"  - {self.codes_dir}/shard_info.pt, or\n"
+                            f"  - {self.codes_dir}/sharded/shard_info.pt"
+                        )
+                elif os.path.exists(lmdb_path) and os.path.exists(keys_path):
+                    # 使用单个LMDB数据库
+                    self._use_lmdb_database(lmdb_path, keys_path)
+                    lmdb_loaded = True
+        
+        # 如果LMDB都没有加载成功，继续后续的文件检测逻辑
+        if not lmdb_loaded:
             # 检查是否有多个 codes 文件
             # 查找 codes_aug{num}_XXX.pt 格式的文件
             list_codes = [
@@ -127,12 +188,65 @@ class CodeDataset(Dataset):
                     f"  - codes.pt, codes_XXX.pt, or codes_aug{{num}}_XXX.pt (single file format)"
                 )
 
+    def _use_sharded_lmdb_database(self, codes_dir, num_augmentations):
+        """使用分片LMDB数据库加载数据（更高效，减少多进程竞争）"""
+        shard_info_path = os.path.join(codes_dir, "shard_info.pt")
+        shard_info = torch.load(shard_info_path, weights_only=False)
+        
+        self.num_shards = shard_info['num_shards']
+        self.total_samples = shard_info['total_samples']
+        self.samples_per_shard = shard_info['samples_per_shard']
+        self.shard_keys = shard_info['shard_keys']
+        
+        # 构建分片路径和keys
+        self.shard_lmdb_paths = []
+        self.shard_keys_list = []
+        
+        for shard_id in range(self.num_shards):
+            if num_augmentations is not None:
+                shard_lmdb_path = os.path.join(codes_dir, f"codes_aug{num_augmentations}_shard{shard_id}.lmdb")
+                shard_keys_path = os.path.join(codes_dir, f"codes_aug{num_augmentations}_shard{shard_id}_keys.pt")
+            else:
+                shard_lmdb_path = os.path.join(codes_dir, f"codes_shard{shard_id}.lmdb")
+                shard_keys_path = os.path.join(codes_dir, f"codes_shard{shard_id}_keys.pt")
+            
+            if os.path.exists(shard_lmdb_path) and os.path.exists(shard_keys_path):
+                self.shard_lmdb_paths.append(shard_lmdb_path)
+                self.shard_keys_list.append(torch.load(shard_keys_path, weights_only=False))
+            else:
+                raise FileNotFoundError(f"Shard {shard_id} not found: {shard_lmdb_path}")
+        
+        # 构建全局keys（用于兼容性）
+        self.keys = []
+        for shard_keys in self.shard_keys_list:
+            self.keys.extend(shard_keys)
+        
+        # 初始化分片数据库连接（延迟加载）
+        self.shard_dbs = [None] * self.num_shards
+        self.use_lmdb = True
+        self.use_sharded = True
+        
+        # 设置兼容的lmdb_path属性（用于缓存路径等）
+        # 使用第一个分片的路径作为代表，或者使用codes_dir
+        if self.shard_lmdb_paths:
+            self.lmdb_path = self.shard_lmdb_paths[0]  # 用于兼容性，指向第一个分片
+        else:
+            self.lmdb_path = codes_dir  # 回退到目录路径
+        
+        print(f"  | Using SHARDED LMDB database: {self.num_shards} shards")
+        print(f"  | Total samples: {self.total_samples}")
+        print(f"  | Samples per shard: ~{self.samples_per_shard}")
+        for i, path in enumerate(self.shard_lmdb_paths):
+            shard_size = os.path.getsize(os.path.join(path, "data.mdb")) / (1024**3) if os.path.exists(os.path.join(path, "data.mdb")) else 0
+            print(f"  |   Shard {i}: {len(self.shard_keys_list[i])} samples, {shard_size:.1f} GB")
+    
     def _use_lmdb_database(self, lmdb_path, keys_path):
         """使用LMDB数据库加载数据"""
         self.lmdb_path = lmdb_path
         self.keys = torch.load(keys_path, weights_only=False)  # 直接加载keys文件
         self.db = None
         self.use_lmdb = True
+        self.use_sharded = False  # 标记不是分片模式
         
         print(f"  | Using LMDB database: {lmdb_path}")
         print(f"  | Database contains {len(self.keys)} codes")
@@ -197,9 +311,33 @@ class CodeDataset(Dataset):
             
             # 为每个LMDB路径创建独立的连接
             if self.lmdb_path not in _thread_local.lmdb_connections:
+                # 动态计算map_size：至少是文件大小的1.2倍，最大10TB
+                # 对于大型LMDB文件（如drugs数据集574GB），需要足够大的map_size
+                # 注意：map_size必须>=文件大小，否则LMDB无法正确映射，会导致性能严重下降
+                try:
+                    file_size = os.path.getsize(self.lmdb_path) if os.path.isfile(self.lmdb_path) else 0
+                    # 如果是目录，尝试获取目录大小（LMDB subdir=True时）
+                    if os.path.isdir(self.lmdb_path):
+                        # 估算：检查data.mdb文件大小
+                        data_file = os.path.join(self.lmdb_path, "data.mdb")
+                        if os.path.exists(data_file):
+                            file_size = os.path.getsize(data_file)
+                    
+                    # map_size至少是文件大小的1.2倍，最大10TB
+                    # 注意：map_size必须>=文件大小，否则LMDB无法正确映射
+                    if file_size > 0:
+                        map_size = int(file_size * 1.2)  # 文件大小的1.2倍
+                        map_size = min(map_size, 10 * 1024**4)  # 最大10TB
+                    else:
+                        # 如果无法获取文件大小，使用较大的默认值（针对大型数据集）
+                        map_size = 1024 * (1024**3)  # 1TB，足够大多数情况
+                except Exception:
+                    # 如果出错，使用较大的默认值
+                    map_size = 1024 * (1024**3)  # 1TB
+                
                 _thread_local.lmdb_connections[self.lmdb_path] = lmdb.open(
                     self.lmdb_path,
-                    map_size=10*(1024*1024*1024),   # 10GB
+                    map_size=map_size,
                     create=False,
                     subdir=True,
                     readonly=True,
@@ -218,7 +356,10 @@ class CodeDataset(Dataset):
 
     def __getitem__(self, index):
         if hasattr(self, 'use_lmdb') and self.use_lmdb:
-            code = self._getitem_lmdb(index)
+            if hasattr(self, 'use_sharded') and self.use_sharded:
+                code = self._getitem_sharded_lmdb(index)
+            else:
+                code = self._getitem_lmdb(index)
         else:
             code = self.curr_codes[index]
         
@@ -238,6 +379,81 @@ class CodeDataset(Dataset):
                 return code
         else:
             return code
+    
+    def _getitem_sharded_lmdb(self, index):
+        """从分片LMDB中获取数据"""
+        # 确定数据在哪个分片
+        shard_id = index // self.samples_per_shard
+        shard_index = index % self.samples_per_shard
+        
+        # 确保分片ID有效
+        if shard_id >= self.num_shards:
+            raise IndexError(f"Index {index} out of range for {self.total_samples} samples")
+        
+        # 获取该分片的数据库连接
+        if self.shard_dbs[shard_id] is None:
+            self._connect_shard_db(shard_id)
+        
+        # 获取该分片的key
+        key = self.shard_keys_list[shard_id][shard_index]
+        if isinstance(key, str):
+            key = key.encode('utf-8')
+        
+        # 从分片数据库读取
+        try:
+            with self.shard_dbs[shard_id].begin(buffers=True) as txn:
+                value = txn.get(key)
+                if value is None:
+                    raise KeyError(f"Key not found in shard {shard_id}: {key}")
+                code_raw = pickle.loads(value)
+        except Exception as e:
+            print(f"LMDB transaction failed for shard {shard_id}, reconnecting: {e}")
+            self._connect_shard_db(shard_id, force_reconnect=True)
+            with self.shard_dbs[shard_id].begin(buffers=True) as txn:
+                value = txn.get(key)
+                if value is None:
+                    raise KeyError(f"Key not found in shard {shard_id}: {key}")
+                code_raw = pickle.loads(value)
+        
+        return code_raw
+    
+    def _connect_shard_db(self, shard_id, force_reconnect=False):
+        """建立分片数据库连接"""
+        if self.shard_dbs[shard_id] is not None and not force_reconnect:
+            return
+        
+        shard_lmdb_path = self.shard_lmdb_paths[shard_id]
+        
+        # 使用线程本地存储
+        if not hasattr(_thread_local, 'lmdb_connections'):
+            _thread_local.lmdb_connections = {}
+        
+        if shard_lmdb_path not in _thread_local.lmdb_connections or force_reconnect:
+            # 计算map_size
+            try:
+                data_file = os.path.join(shard_lmdb_path, "data.mdb")
+                if os.path.exists(data_file):
+                    file_size = os.path.getsize(data_file)
+                    map_size = int(file_size * 1.2)
+                    map_size = min(map_size, 10 * 1024**4)  # 最大10TB
+                else:
+                    map_size = 100 * (1024**3)  # 默认100GB
+            except Exception:
+                map_size = 100 * (1024**3)  # 默认100GB
+            
+            _thread_local.lmdb_connections[shard_lmdb_path] = lmdb.open(
+                shard_lmdb_path,
+                map_size=map_size,
+                create=False,
+                subdir=True,
+                readonly=True,
+                lock=False,
+                readahead=True,
+                meminit=False,
+                max_readers=256,
+            )
+        
+        self.shard_dbs[shard_id] = _thread_local.lmdb_connections[shard_lmdb_path]
     
     def _getitem_lmdb(self, index):
         """LMDB模式下的数据获取 - 进程安全版本（优化版）"""
@@ -371,9 +587,26 @@ class CodeDataset(Dataset):
             _thread_local.lmdb_connections = {}
         
         if self.position_weights_lmdb_path not in _thread_local.lmdb_connections:
+            # 动态计算map_size（与codes LMDB相同逻辑）
+            import os
+            try:
+                file_size = os.path.getsize(self.position_weights_lmdb_path) if os.path.isfile(self.position_weights_lmdb_path) else 0
+                if os.path.isdir(self.position_weights_lmdb_path):
+                    data_file = os.path.join(self.position_weights_lmdb_path, "data.mdb")
+                    if os.path.exists(data_file):
+                        file_size = os.path.getsize(data_file)
+                
+                if file_size > 0:
+                    map_size = int(file_size * 1.2)  # 文件大小的1.2倍
+                    map_size = min(map_size, 10 * 1024**4)  # 最大10TB
+                else:
+                    map_size = 1024 * (1024**3)  # 1TB默认值
+            except Exception:
+                map_size = 1024 * (1024**3)  # 1TB默认值
+            
             _thread_local.lmdb_connections[self.position_weights_lmdb_path] = lmdb.open(
                 self.position_weights_lmdb_path,
-                map_size=10*(1024*1024*1024),
+                map_size=map_size,
                 create=False,
                 subdir=True,
                 readonly=True,
@@ -483,12 +716,22 @@ def create_code_loaders(
         num_augmentations = None
         print(f">> {split} split: using default codes.lmdb format (no augmentation)")
     
+    # 从配置中读取是否使用分片LMDB（可选参数）
+    use_sharded_lmdb = config.get("use_sharded_lmdb", None)
+    
     dset = CodeDataset(
         dset_name=config["dset"]["dset_name"],
         codes_dir=config["codes_dir"],
         split=split,
         num_augmentations=num_augmentations,
+        use_sharded_lmdb=use_sharded_lmdb,
     )
+
+    # 如果在配置中显式关闭了 use_augmented_codes，则不使用预计算的 position_weights
+    # 这样可以避免在没有对应 LMDB / 文件时仍然尝试访问 position_weights_keys 等属性
+    if not config.get("use_augmented_codes", False):
+        if isinstance(dset, CodeDataset):
+            dset.use_position_weights = False
 
     # reduce the dataset size for debugging
     if config["debug"] or split in ["val", "test"]:
@@ -498,14 +741,27 @@ def create_code_loaders(
         if len(dset) > len(indexes):
             dset = Subset(dset, indexes)  # Smaller training set for debugging
 
-    loader = torch.utils.data.DataLoader(
-        dset,
-        batch_size=min(config["dset"]["batch_size"], len(dset)),
-        num_workers=config["dset"]["num_workers"],
-        shuffle=True if split == "train" else False,
-        pin_memory=True,
-        drop_last=True,
-    )
+    # DataLoader配置：默认不使用prefetch_factor和persistent_workers，以匹配旧版本的流畅行为
+    # 这些参数可以通过配置显式启用，但默认禁用以避免潜在的性能问题
+    loader_kwargs = {
+        "batch_size": min(config["dset"]["batch_size"], len(dset)),
+        "num_workers": config["dset"]["num_workers"],
+        "shuffle": True if split == "train" else False,
+        "pin_memory": True,
+        "drop_last": True,
+    }
+    
+    # 只有在配置中显式指定时才添加这些参数
+    if "prefetch_factor" in config["dset"]:
+        loader_kwargs["prefetch_factor"] = config["dset"]["prefetch_factor"]
+    
+    if "persistent_workers" in config["dset"]:
+        loader_kwargs["persistent_workers"] = config["dset"]["persistent_workers"]
+    elif config["dset"]["num_workers"] > 0:
+        # 默认禁用persistent_workers，避免LMDB连接问题
+        loader_kwargs["persistent_workers"] = False
+    
+    loader = torch.utils.data.DataLoader(dset, **loader_kwargs)
     # fabric.print(f">> {split} set size: {len(dset)}")
     print(f">> {split} set size: {len(dset)}")
 

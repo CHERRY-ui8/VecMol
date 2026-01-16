@@ -225,8 +225,7 @@ class FieldDataset(Dataset):
             self.data = filtered_data
 
     def __len__(self):
-        if hasattr(self, 'use_lmdb') and self.use_lmdb:
-            return len(self.keys)
+        # 始终使用 field_idxs 来确定数据集大小，这样可以支持子集选择
         return self.field_idxs.size(0)
 
     def __getitem__(self, index) -> Data:
@@ -241,7 +240,9 @@ class FieldDataset(Dataset):
         if self.db is None:
             self._connect_db()
         
-        key = self.keys[index]
+        # 使用 field_idxs 来获取实际的索引
+        idx = self.field_idxs[index].item()
+        key = self.keys[idx]
         # 确保key是bytes格式，因为LMDB需要bytes
         if isinstance(key, str):
             key = key.encode('utf-8')

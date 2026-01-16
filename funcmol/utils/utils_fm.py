@@ -239,12 +239,14 @@ def compute_code_stats_offline(
     loader: torch.utils.data.DataLoader,
     split: str,
     normalize_codes: bool,
-    num_augmentations: int = None
+    num_augmentations: int = None,
+    max_samples: int = None,
 ) -> dict:
     """
     Computes statistics for codes offline.
     
-    This function now supports caching to avoid recomputing statistics.
+    This function now supports caching to avoid recomputing statistics,
+    and optional early stopping / subsampling to compute approximate statistics.
     Cache files are saved in the same directory as the codes data.
 
     Args:
@@ -252,6 +254,7 @@ def compute_code_stats_offline(
         split (str): The data split (e.g., 'train', 'val', 'test').
         normalize_codes (bool): Whether to normalize the codes.
         num_augmentations (int, optional): Number of augmentations, used for generating cache filename.
+        max_samples (int, optional): If provided, stop after processing roughly this many scalar samples.
 
     Returns:
         dict: A dictionary containing the computed code statistics.
@@ -266,8 +269,15 @@ def compute_code_stats_offline(
     cache_path = None
     if hasattr(dataset, 'use_lmdb') and dataset.use_lmdb:
         # LMDB模式：使用LMDB路径作为缓存目录
-        lmdb_path = dataset.lmdb_path
-        cache_dir = os.path.dirname(lmdb_path)
+        # 对于分片LMDB，lmdb_path指向第一个分片，但缓存应该放在分片目录的父目录
+        if hasattr(dataset, 'use_sharded') and dataset.use_sharded:
+            # 分片模式：使用codes_dir作为缓存目录（分片文件的父目录）
+            cache_dir = dataset.codes_dir
+        else:
+            # 单个LMDB模式：使用LMDB路径的目录
+            lmdb_path = dataset.lmdb_path
+            cache_dir = os.path.dirname(lmdb_path)
+        
         # 生成缓存文件名：基于split、normalize_codes和num_augmentations参数
         if num_augmentations is not None:
             cache_filename = f"code_stats_{split}_aug{num_augmentations}_norm{normalize_codes}.pt"
@@ -373,6 +383,8 @@ def compute_code_stats_offline(
         # LMDB模式：使用流式处理计算统计信息，避免内存溢出
         print(f"Computing code statistics from LMDB database for {split} split (streaming mode)...")
         print(f"Total samples: {len(dataset)}")
+        if max_samples is not None:
+            print(f"[Approximate stats] Will stop after roughly {max_samples} scalar samples.")
         
         # 使用在线统计算法（Welford's algorithm）来计算均值和标准差
         # 同时跟踪最大值和最小值
@@ -418,6 +430,9 @@ def compute_code_stats_offline(
             
             # 使用Welford's online algorithm更新均值和方差
             batch_n = batch_flat.numel()
+            
+            # 如果设置了 max_samples，并且这一批已经会让总样本数大幅超过上限，
+            # 我们仍然完整使用这一批的数据，但在达到 / 超过上限后提前结束循环。
             batch_mean = batch_flat.mean()
             
             if mean is None:
@@ -439,6 +454,10 @@ def compute_code_stats_offline(
             del batch_codes, batch_flat, batch_mean
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            
+            if max_samples is not None and n_samples >= max_samples:
+                print(f"[Approximate stats] Reached max_samples≈{max_samples} (actual scalar samples: {n_samples}), stopping early.")
+                break
         
         # 计算最终统计量
         if n_samples == 0:

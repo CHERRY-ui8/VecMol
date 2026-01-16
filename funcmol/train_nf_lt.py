@@ -6,8 +6,8 @@ import os
 
 # Set GPU environment BEFORE importing torch (must be before any CUDA initialization)
 # TODO: set gpus based on server id
-# os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3,4,5,6,7"
-os.environ['CUDA_VISIBLE_DEVICES'] = "0,2,3,4,5"
+os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3,4,5,6,7"
+# os.environ['CUDA_VISIBLE_DEVICES'] = "0,2,3,4,5"
 # os.environ['CUDA_VISIBLE_DEVICES'] = "0"
 
 # Data visualization and processing

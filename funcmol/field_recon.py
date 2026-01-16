@@ -116,6 +116,7 @@ def process_single_molecule(args):
      encoder_path, decoder_path, full_config_dict) = args
     
     # 将字符串路径转换为Path对象
+    output_dir = Path(output_dir)
     mol_save_dir = Path(mol_save_dir)
     csv_path = Path(csv_path)
     
@@ -343,8 +344,8 @@ def process_single_molecule(args):
         }
 
 
-# @hydra.main(version_base=None, config_path="configs", config_name="field_recon_qm9")
-@hydra.main(version_base=None, config_path="configs", config_name="field_recon_drugs")
+@hydra.main(version_base=None, config_path="configs", config_name="field_recon_qm9")
+# @hydra.main(version_base=None, config_path="configs", config_name="field_recon_drugs")
 def main(config: DictConfig) -> None:
     # 设置全局随机种子
     seed = config.get('seed', 1234)

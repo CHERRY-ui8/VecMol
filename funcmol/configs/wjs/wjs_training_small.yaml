@@ -1,7 +1,0 @@
-friction_wjs: 1
-n_chains: 10  # 进一步减小用于测试 100->10
-steps_wjs: 10  # 进一步减小用于测试 100->10
-max_steps_wjs: 10
-delta_wjs: 0.1  # 减小步长提高稳定性 .5->0.1
-repeats_wjs: 1
-batch_size_render: 50  # 进一步减小用于测试 100->50

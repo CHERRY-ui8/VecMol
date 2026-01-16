@@ -49,11 +49,11 @@ sampling_range_max: 4.0   # 撒点范围的最大值
 
 # 缩小撒点范围之后，应该可以减少query_points数
 n_query_points_per_type:
-  C: 1500  # 碳原子的 query_points 数
-  H: 1500  # 氢原子的 query_points 数
-  O: 150  # 氧原子的 query_points 数
-  N: 100  # 氮原子的 query_points 数
-  F: 100  # 氟原子的 query_points 数
+  C: 300  # 碳原子的 query_points 数
+  H: 300  # 氢原子的 query_points 数
+  O: 50  # 氧原子的 query_points 数
+  N: 50  # 氮原子的 query_points 数
+  F: 15  # 氟原子的 query_points 数
 
 # 不同方法的参数配置
 method_configs:
@@ -76,7 +76,7 @@ default_config: # softmax, logsumexp, inverse_square
   sig_sf: 0.1
   sig_mag: 0.45
   eps: 0.05
-  min_samples: 5
+  min_samples: 3
 
 # 自回归聚类配置（可选）
 autoregressive_clustering:

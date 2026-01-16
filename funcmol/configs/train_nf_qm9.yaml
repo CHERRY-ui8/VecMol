@@ -20,9 +20,9 @@ dirname: "${exp_dir}/${exp_name}"
 # 使用 finetune_decoder 时，需要设置 reload_model_path 指向包含已训练 decoder 权重的 checkpoint
 # 该 checkpoint 会同时加载 encoder 和 decoder 的权重，然后冻结 encoder，只微调 decoder
 # reload_model_path: "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/model-epoch=999.ckpt"
-reload_model_path: null
+reload_model_path: "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260115/lightning_logs/version_0/checkpoints/model-epoch=212.ckpt"
 
-auto_resume: False  # 是否自动加载最新的checkpoint继续训练
+auto_resume: True  # 是否自动加载最新的checkpoint继续训练
 
 # training params
 ckpt_every_n_epochs: 1  # 每隔多少epoch保存一次ckpt

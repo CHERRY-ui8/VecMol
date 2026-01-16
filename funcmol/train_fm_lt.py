@@ -6,8 +6,8 @@ import os
 
 # Set GPU environment
 # os.environ['CUDA_VISIBLE_DEVICES'] = "1"
-os.environ['CUDA_VISIBLE_DEVICES'] = "0,2,3,4,5,6,7"
-# os.environ['CUDA_VISIBLE_DEVICES'] = "0,3,5,6,7"
+os.environ['CUDA_VISIBLE_DEVICES'] = "6,7"
+# os.environ['CUDA_VISIBLE_DEVICES'] = "0,2,3,4,5"
 
 # Data visualization and processing
 import matplotlib.pyplot as plt
@@ -1198,8 +1198,8 @@ class FuncmolLightningModule(pl.LightningModule):
         if "best_loss" in checkpoint:
             self.best_loss = checkpoint["best_loss"]
 
-@hydra.main(config_path="configs", config_name="train_fm_drugs", version_base=None)
-# @hydra.main(config_path="configs", config_name="train_fm_qm9", version_base=None)
+# @hydra.main(config_path="configs", config_name="train_fm_drugs", version_base=None)
+@hydra.main(config_path="configs", config_name="train_fm_qm9", version_base=None)
 def main_hydra(config):
     """Entry point for Hydra configuration system"""
     main(config)
@@ -1418,7 +1418,15 @@ def main(config):
             else:
                 print(f">> num_augmentations not specified in config, will auto-infer from codes directory")
             
-            code_stats = compute_code_stats_offline(loader_train, "train", config["normalize_codes"], num_augmentations=num_augmentations)
+            # NOTE: 这里可以通过 max_samples 近似统计，加速大规模 codes 的统计过程
+            # 例如使用前约 20000w 样本来估计 mean/std (20000w个float)
+            code_stats = compute_code_stats_offline(
+                loader_train,
+                "train",
+                config["normalize_codes"],
+                num_augmentations=num_augmentations,
+                max_samples=200000000,
+            )
         
         # Check if loaders are empty
         if not loader_train or len(loader_train) == 0:

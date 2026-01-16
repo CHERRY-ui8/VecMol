@@ -1,9 +1,8 @@
 defaults:
   - dset: drugs
-  - encoder: cnn
-  - decoder: decoder_global
+  - encoder: gnn_large
+  - decoder: decoder_global_large
   - denoiser: gnn
-  - wjs: wjs_training
   - converter: gnf_converter_drugs
   - override hydra/job_logging: custom
   - _self_
@@ -12,7 +11,7 @@ debug: False
 wandb: True
 seed: 1234
 
-diffusion_method: "new"  # "old" (WJS) 或 "new" (DDPM)
+diffusion_method: "new_x0"  # "old" (WJS) 或 "new" (DDPM) 或 "new_x0" (DDPM with x0)
 
 # DDPM配置（仅当diffusion_method为"new"时使用）
 ddpm:  
@@ -36,12 +35,12 @@ ddpm:
 # NOTE: 位置权重配置
 # 根据每个grid坐标附近原子的数量计算权重，对重要位置的codes在loss计算时加大权重
 position_weight:
-  enabled: True  # 是否启用位置权重
+  enabled: False  # 是否启用位置权重
   radius: 3.0     # 计算附近原子的半径阈值（单位：埃） 2, 3
   alpha: 0.5      # 权重系数：weight = 1 + alpha * num_atoms
 
 
-nf_pretrained_path: ../exps/neural_field/nf_drugs
+nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_drugs/20260113/lightning_logs/version_1/checkpoints/last.ckpt
 exp_dir: ../exps/funcmol
 exp_name: "fm_${dset.dset_name}/${now:%Y%m%d}" # NOTE: in lightning, no time stamp needed
 dirname: "${exp_dir}/${exp_name}"
@@ -52,17 +51,20 @@ smooth_sigma: 0.5
 normalize_codes: 1
 on_the_fly: False  # use False if codes are computed offline.
 
-use_augmented_codes: True  # True: 使用数据增强的codes, False: 使用原始codes（不使用数据增强）
-num_augmentations: 5  # null 或具体数字（如 3, 5, 10 等）
+use_augmented_codes: False  # True: 使用数据增强的codes, False: 使用原始codes（不使用数据增强）
+num_augmentations: 1  # null 或具体数字（如 3, 5, 10 等）
 
-codes_dir_no_aug: "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_drugs/20260113/lightning_logs/version_0/checkpoints/code_no_aug/"
-codes_dir_with_aug: "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_drugs/20260113/lightning_logs/version_0/checkpoints/codes_no_shuffle/"
+# LMDB配置
+use_sharded_lmdb: True  # 是否使用分片LMDB。null=自动检测（优先使用分片），true=强制使用分片，false=强制使用完整LMDB
+
+codes_dir_no_aug: "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_drugs/20260113/lightning_logs/version_1/checkpoints/code_no_aug/"
+codes_dir_with_aug: "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_drugs/20260113/lightning_logs/version_1/checkpoints/codes_no_shuffle/"
 
 # training params
 num_epochs: 5000
 dset:
-  batch_size: 32
-  num_workers: 8
+  batch_size: 30
+  num_workers: 4
 
 ckpt_every_n_epochs: 1  # 每隔多少epoch保存一次ckpt
 decoder:
