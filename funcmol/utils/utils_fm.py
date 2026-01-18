@@ -672,32 +672,95 @@ def load_checkpoint_state_fm(model, checkpoint_path_or_dir):
     state_dict = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     
     # Load Funcmol state
+    # Use strict=True to ensure all keys match exactly
     if "funcmol" in state_dict:
         # 统一去掉 _orig_mod. 前缀
         new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict["funcmol"].items()}
-        model.funcmol.load_state_dict(new_state_dict)
-        print("Loaded Funcmol state from 'funcmol' key")
+        try:
+            model.funcmol.load_state_dict(new_state_dict, strict=True)
+            print("Loaded Funcmol state from 'funcmol' key (strict=True)")
+        except RuntimeError as e:
+            raise RuntimeError(
+                f"Failed to load Funcmol state from 'funcmol' key with strict=True. "
+                f"Original error: {str(e)}"
+            ) from e
     elif "funcmol_state_dict" in state_dict:
         # 统一去掉 _orig_mod. 前缀
         new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict["funcmol_state_dict"].items()}
-        model.funcmol.load_state_dict(new_state_dict)
-        print("Loaded Funcmol state from 'funcmol_state_dict' key")
+        try:
+            model.funcmol.load_state_dict(new_state_dict, strict=True)
+            print("Loaded Funcmol state from 'funcmol_state_dict' key (strict=True)")
+        except RuntimeError as e:
+            raise RuntimeError(
+                f"Failed to load Funcmol state from 'funcmol_state_dict' key with strict=True. "
+                f"Original error: {str(e)}"
+            ) from e
     else:
-        print("No Funcmol state found in checkpoint")
+        raise RuntimeError(
+            "No Funcmol state found in checkpoint. "
+            "Expected 'funcmol' or 'funcmol_state_dict' key in checkpoint."
+        )
     
     # Load EMA state
-    if "funcmol_ema" in state_dict:
+    # ModelEma的结构：model.funcmol_ema.module 是实际的模型
+    # 如果ModelEma的module被DDP包装，则：model.funcmol_ema.module.module 是实际模型
+    # Checkpoint中保存的是 model.funcmol_ema.module.state_dict()，键名是 net.xxx
+    # 需要根据目标模型的键名格式，正确地映射checkpoint中的键名
+    
+    if "funcmol_ema" in state_dict or "funcmol_ema_state_dict" in state_dict:
+        # 获取checkpoint中的EMA state_dict
+        ema_state_dict = state_dict.get("funcmol_ema") or state_dict.get("funcmol_ema_state_dict")
         # 统一去掉 _orig_mod. 前缀
-        new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict["funcmol_ema"].items()}
-        model.funcmol_ema.load_state_dict(new_state_dict)
-        print("Loaded Funcmol EMA state from 'funcmol_ema' key")
-    elif "funcmol_ema_state_dict" in state_dict:
-        # 统一去掉 _orig_mod. 前缀
-        new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict["funcmol_ema_state_dict"].items()}
-        model.funcmol_ema.load_state_dict(new_state_dict)
-        print("Loaded Funcmol EMA state from 'funcmol_ema_state_dict' key")
+        checkpoint_state_dict = {k.replace("_orig_mod.", ""): v for k, v in ema_state_dict.items()}
+        
+        # 获取目标模型的state_dict，查看实际的键名格式
+        target_model = model.funcmol_ema.module
+        target_state_dict = target_model.state_dict()
+        
+        # 根据目标模型的键名格式，映射checkpoint中的键名
+        mapped_state_dict = {}
+        for ckpt_key, ckpt_value in checkpoint_state_dict.items():
+            # 尝试直接匹配
+            if ckpt_key in target_state_dict:
+                mapped_state_dict[ckpt_key] = ckpt_value
+            # 尝试添加module.前缀（DDP包装的情况）
+            elif f"module.{ckpt_key}" in target_state_dict:
+                mapped_state_dict[f"module.{ckpt_key}"] = ckpt_value
+            # 尝试去掉module.前缀（如果checkpoint有但目标没有）
+            elif ckpt_key.startswith("module.") and ckpt_key[7:] in target_state_dict:
+                mapped_state_dict[ckpt_key[7:]] = ckpt_value
+            else:
+                # 如果无法匹配，记录警告但继续（会在strict=True时抛出错误）
+                print(f"Warning: Cannot map checkpoint key '{ckpt_key}' to target model")
+        
+        # 验证所有目标模型的键都有对应的checkpoint值
+        missing_keys = set(target_state_dict.keys()) - set(mapped_state_dict.keys())
+        if missing_keys:
+            raise RuntimeError(
+                f"Missing keys in checkpoint for ModelEma: {list(missing_keys)[:10]}... "
+                f"(total {len(missing_keys)} missing keys)"
+            )
+        
+        # 验证checkpoint中没有多余的键
+        unexpected_keys = set(mapped_state_dict.keys()) - set(target_state_dict.keys())
+        if unexpected_keys:
+            raise RuntimeError(
+                f"Unexpected keys in checkpoint for ModelEma: {list(unexpected_keys)[:10]}... "
+                f"(total {len(unexpected_keys)} unexpected keys)"
+            )
+        
+        # 使用strict=True进行严格检查
+        try:
+            target_model.load_state_dict(mapped_state_dict, strict=True)
+            print("Loaded Funcmol EMA state with strict=True (all keys matched)")
+        except RuntimeError as e:
+            raise RuntimeError(
+                f"Failed to load Funcmol EMA state with strict=True. "
+                f"Original error: {str(e)}"
+            ) from e
     
     # Load decoder state if joint fine-tuning is enabled
+    # Use strict=True to ensure all keys match exactly
     if hasattr(model, 'joint_finetune_enabled') and model.joint_finetune_enabled:
         if hasattr(model, 'dec_module') and model.dec_module is not None:
             if "decoder_state_dict" in state_dict:
@@ -706,13 +769,17 @@ def load_checkpoint_state_fm(model, checkpoint_path_or_dir):
                 new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in decoder_state_dict.items()}
                 try:
                     model.dec_module.load_state_dict(new_state_dict, strict=True)
-                    print("Loaded decoder state from checkpoint (joint fine-tuning mode)")
-                except Exception as e:
-                    print(f"Warning: Failed to load decoder state: {e}")
-                    print("Continuing with decoder initialized from neural field checkpoint")
+                    print("Loaded decoder state from checkpoint (joint fine-tuning mode, strict=True)")
+                except RuntimeError as e:
+                    raise RuntimeError(
+                        f"Failed to load decoder state with strict=True (joint fine-tuning mode). "
+                        f"Original error: {str(e)}"
+                    ) from e
             else:
-                print("Warning: Joint fine-tuning enabled but no decoder_state_dict found in checkpoint")
-                print("Decoder will use weights from neural field checkpoint")
+                raise RuntimeError(
+                    "Joint fine-tuning is enabled but no decoder_state_dict found in checkpoint. "
+                    "Cannot continue without decoder state."
+                )
     
     # Load training state
     training_state = {

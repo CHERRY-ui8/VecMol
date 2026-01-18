@@ -70,7 +70,7 @@ exp_dir: ../exps/funcmol
 exp_name: "fm_${dset.dset_name}/${now:%Y%m%d}"
 dirname: "${exp_dir}/${exp_name}"
 
-reload_model_path: null
+reload_model_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20260116/lightning_logs/version_1/checkpoints/last.ckpt
 # reload_model_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20260105/lightning_logs/version_1/checkpoints
   # Funcmol (denoiser) checkpoint 路径，支持两种格式：
   # 1. Lightning checkpoint 文件路径（.ckpt 文件），例如：/path/to/model-epoch=100.ckpt
@@ -83,12 +83,12 @@ on_the_fly: False  # use True to compute codes on the fly from neural field
 
 # Codes directory configuration
 # NOTE：选择是否使用数据增强的codes进行训练
-use_augmented_codes: False  # True: 使用数据增强的codes, False: 使用原始codes（不使用数据增强）
+use_augmented_codes: True  # True: 使用数据增强的codes, False: 使用原始codes（不使用数据增强）
 
 # 数据增强版本选择
 # 指定要使用的数据增强数量（例如：3 表示使用 aug3 版本，5 表示使用 aug5 版本）
 # 如果设置为 null，系统会自动从文件名推断（优先从 LMDB 文件名推断）
-num_augmentations: 1  # null 或具体数字（如 3, 5, 10 等）
+num_augmentations: 3  # null 或具体数字（如 3, 5, 10 等）
 
 # 不使用数据增强的codes路径（原始codes）
 codes_dir_no_aug: "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260116/lightning_logs/version_0/checkpoints/code_no_aug/"
@@ -102,7 +102,7 @@ codes_dir_with_aug: "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-ne
 num_epochs: 50000
 num_iterations: 50000  # 总迭代次数，用于学习率调度
 dset:
-  batch_size: 96
+  batch_size: 112
   num_workers: 4
 
 ckpt_every_n_epochs: 1  # 每隔多少epoch保存一次ckpt

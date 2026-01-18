@@ -2,7 +2,11 @@ import sys
 sys.path.append("..")  # 添加上级目录到sys.path以便导入模块
 
 import os
-# 注意：CUDA_VISIBLE_DEVICES 只在 GPU Worker 内部设置，不在主进程设置
+# 注意：在spawn模式下，子进程会重新执行这个脚本
+# 如果环境变量_WORKER_GPU_ID已设置，说明这是worker子进程，需要先设置CUDA_VISIBLE_DEVICES
+from funcmol.utils.misc import setup_worker_gpu_environment
+setup_worker_gpu_environment()
+
 from funcmol.models.funcmol import create_funcmol
 import hydra
 import torch
@@ -11,13 +15,18 @@ from funcmol.utils.utils_fm import load_checkpoint_fm
 from funcmol.dataset.dataset_field import create_gnf_converter
 from funcmol.utils.utils_nf import load_neural_field
 from funcmol.utils.utils_base import xyz_to_sdf
+from funcmol.utils.misc import (
+    parse_gpu_list_from_config,
+    setup_multiprocessing_spawn,
+    create_worker_process_with_gpu
+)
 import pandas as pd
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 from omegaconf import DictConfig, OmegaConf
 import multiprocessing
-from multiprocessing import Process, Queue
+from multiprocessing import Queue
 import time
 import queue
 
@@ -27,7 +36,8 @@ import queue
 # ============================================================================
 
 def gpu_worker_process(
-    gpu_id: int,
+    logical_gpu_id: int,
+    physical_gpu_id: int,
     config_dict: dict,
     fm_pretrained_path: str,
     nf_pretrained_path: str,
@@ -38,16 +48,22 @@ def gpu_worker_process(
     GPU Worker进程：长期运行，从Queue取任务批量处理
     
     Args:
-        gpu_id: GPU设备ID（整数，如0, 1, 2）
+        logical_gpu_id: 逻辑GPU ID（在worker进程中的GPU ID，通常是0）
+        physical_gpu_id: 物理GPU ID（在主进程中的实际GPU ID，用于日志）
         config_dict: 配置字典
         fm_pretrained_path: FuncMol checkpoint路径
         nf_pretrained_path: Neural field checkpoint路径
         task_queue: 任务队列（从主进程接收任务）
         result_queue: 结果队列（向主进程发送结果）
-        worker_batch_size: Worker内部batch大小（用于decoder优化）
+    
+    注意：CUDA_VISIBLE_DEVICES已经在脚本开头通过环境变量_WORKER_GPU_ID设置了
+    这里torch已经被导入并使用了正确的CUDA_VISIBLE_DEVICES设置
     """
-    # 设置CUDA设备（每个worker只看到自己的GPU）
-    os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+    # 验证GPU设置
+    if torch.cuda.is_available():
+        num_visible_gpus = torch.cuda.device_count()
+        if num_visible_gpus != 1:
+            print(f"Warning: Expected 1 GPU after setting CUDA_VISIBLE_DEVICES={physical_gpu_id}, but got {num_visible_gpus}")
     
     # 设置PyTorch内存优化环境变量
     os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True,max_split_size_mb:128'
@@ -61,7 +77,7 @@ def gpu_worker_process(
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     
-    print(f"[GPU Worker {gpu_id} (PID {worker_id})] Initializing on CUDA device {gpu_id}...")
+    print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id} (PID {worker_id})] Initializing...")
     
     # 加载模型（每个worker独立加载）
     with torch.no_grad():
@@ -77,7 +93,7 @@ def gpu_worker_process(
         decoder.eval()
         decoder.set_code_stats(code_stats)
     
-    print(f"[GPU Worker {gpu_id}] Models loaded successfully")
+    print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id}] Models loaded successfully")
     
     # Worker主循环：持续从Queue取任务并处理
     processed_count = 0
@@ -92,7 +108,7 @@ def gpu_worker_process(
             
             # 检查终止信号
             if task is None:
-                print(f"[GPU Worker {gpu_id}] Received termination signal, exiting...")
+                print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id}] Received termination signal, exiting...")
                 break
             
             # 处理任务（GPU计算部分）
@@ -103,12 +119,12 @@ def gpu_worker_process(
                     decoder,
                     code_stats,
                     config_dict,
-                    worker_id=gpu_id
+                    worker_id=logical_gpu_id
                 )
                 result_queue.put(result)
                 processed_count += 1
             except Exception as e:
-                print(f"[GPU Worker {gpu_id}] Error processing task {task.get('task_id', 'unknown')}: {e}")
+                print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id}] Error processing task {task.get('task_id', 'unknown')}: {e}")
                 traceback.print_exc()
                 # 发送错误结果
                 result_queue.put({
@@ -116,17 +132,17 @@ def gpu_worker_process(
                     'task_id': task.get('task_id', -1),
                     'field_method': task.get('field_method', 'unknown'),
                     'error': str(e),
-                    'gpu_id': gpu_id
+                    'gpu_id': logical_gpu_id
                 })
         
         except KeyboardInterrupt:
-            print(f"[GPU Worker {gpu_id}] Interrupted, exiting...")
+            print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id}] Interrupted, exiting...")
             break
         except Exception as e:
-            print(f"[GPU Worker {gpu_id}] Unexpected error: {e}")
+            print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id}] Unexpected error: {e}")
             traceback.print_exc()
     
-    print(f"[GPU Worker {gpu_id}] Processed {processed_count} tasks, shutting down...")
+    print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id}] Processed {processed_count} tasks, shutting down...")
 
 
 def process_gpu_batch(
@@ -413,15 +429,18 @@ def extract_checkpoint_identifier(fm_path: str) -> str:
 @hydra.main(config_path="configs", config_name="sample_fm", version_base=None)
 def main(config: DictConfig) -> None:
     # 设置multiprocessing启动方法（必须在主进程设置）
-    # 'spawn'方法更安全，确保每个worker进程有独立的Python解释器
-    if multiprocessing.get_start_method(allow_none=True) is None:
-        multiprocessing.set_start_method('spawn', force=True)
+    setup_multiprocessing_spawn()
     
     # 设置PyTorch内存优化环境变量（主进程）
     os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True,max_split_size_mb:128'
     
     # 转换配置为字典格式
     config_dict = OmegaConf.to_container(config, resolve=True)
+    
+    # 解析GPU配置
+    main_gpu_list, _ = parse_gpu_list_from_config(config, default_use_all=True)
+    num_gpus = len(main_gpu_list)
+    use_multi_gpu = config.get('use_multi_gpu', True) and num_gpus > 1
     
     # 设置输出目录
     exps_root = Path(__file__).parent.parent / "exps"
@@ -458,37 +477,26 @@ def main(config: DictConfig) -> None:
     
     # 提取checkpoint标识并创建独立的子目录
     # checkpoint_identifier = extract_checkpoint_identifier(fm_path)
-    checkpoint_identifier = "20260105_version_1_last_finetune_decoderonly"  # 临时硬编码
+    checkpoint_identifier = "20260116_version_2_epoch_6_new"  # 临时硬编码
     output_dir = base_output_dir / "samples" / checkpoint_identifier
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # 获取生成参数
     max_samples = config.get('max_samples', 10)  # 默认生成10个分子
     field_methods = config.get('field_methods', ['tanh'])  # 默认使用tanh方法
-    num_workers = config.get('num_workers', 1)  # 并行worker数量（相当于多个tmux窗口）
     
-    # 获取CUDA设备配置
-    cuda_devices = config.get('cuda_devices', None)
-    if cuda_devices is None:
-        # 如果没有指定，使用所有可用GPU，或者默认使用"0"
-        if torch.cuda.is_available():
-            cuda_devices = list(range(torch.cuda.device_count()))
-        else:
-            cuda_devices = ["0"]  # CPU模式
+    # 根据use_multi_gpu决定worker数量
+    if use_multi_gpu:
+        num_workers = num_gpus  # 每个GPU一个worker
+        print(f"Using multi-GPU mode: {num_gpus} GPUs, {num_workers} workers")
     else:
-        # 转换为列表
-        if isinstance(cuda_devices, (int, str)):
-            cuda_devices = [str(cuda_devices)]
-        else:
-            cuda_devices = [str(d) for d in cuda_devices]
-    
-    # 确保worker数量不超过设备数量
-    num_workers = min(num_workers, len(cuda_devices))
+        num_workers = 1
+        print(f"Using single-GPU mode: 1 worker")
     
     print(f"Checkpoint identifier: {checkpoint_identifier}")
     print(f"Generating {max_samples} molecules with field_methods: {field_methods}")
-    print(f"Number of workers: {num_workers} (true multiprocessing parallelization)")
-    print(f"CUDA devices: {cuda_devices}")
+    print(f"Number of workers: {num_workers}")
+    print(f"Physical GPUs: {main_gpu_list}")
     print(f"Output directory: {output_dir}")
     print("fm_pretrained_path: ", config["fm_pretrained_path"])
     print("nf_pretrained_path: ", config["nf_pretrained_path"])
@@ -505,9 +513,8 @@ def main(config: DictConfig) -> None:
         csv_columns.append(f'{element}_count')
     
     # 创建CSV文件（如果不存在）
-    if not csv_path.exists():
-        results_df = pd.DataFrame(columns=csv_columns)
-        results_df.to_csv(csv_path, index=False)
+    # 注意：如果文件已存在，我们会在增量写入时追加，不会覆盖
+    csv_file_exists = csv_path.exists() and csv_path.stat().st_size > 0
     
     # 创建分子数据保存目录（使用新的独立输出目录）
     mol_save_dir = output_dir / "molecule"
@@ -549,26 +556,31 @@ def main(config: DictConfig) -> None:
     # ============================================================================
     # 启动长期运行的GPU Worker进程
     # ============================================================================
-    print(f"\nStarting {num_workers} GPU workers (like {num_workers} separate tmux windows)...")
+    print(f"\nStarting {num_workers} GPU workers...")
     print(f"Each worker will process molecules independently from the task queue")
     
     # 启动GPU Worker进程
     worker_processes = []
-    for i, gpu_id in enumerate(cuda_devices[:num_workers]):
-        p = Process(
-            target=gpu_worker_process,
+    for i in range(num_workers):
+        logical_gpu_id = i  # 逻辑GPU ID（在worker进程中看到的GPU ID，通常是0）
+        physical_gpu_id = main_gpu_list[i]  # 物理GPU ID（在主进程中的实际GPU ID）
+        
+        p = create_worker_process_with_gpu(
+            worker_func=gpu_worker_process,
+            logical_gpu_id=logical_gpu_id,
+            physical_gpu_id=physical_gpu_id,
             args=(
-                int(gpu_id) if isinstance(gpu_id, str) else gpu_id,
+                logical_gpu_id,
+                physical_gpu_id,
                 config_dict,
                 config["fm_pretrained_path"],
                 config["nf_pretrained_path"],
-        task_queue,
-        result_queue
+                task_queue,
+                result_queue
             )
         )
-        p.start()
         worker_processes.append(p)
-        print(f"Started GPU Worker {i} on CUDA device {gpu_id} (PID {p.pid})")
+        print(f"Started GPU Worker {i} (logical={logical_gpu_id}, physical={physical_gpu_id}, PID={p.pid})")
     
     # ============================================================================
     # 主进程：收集结果并进行IO后处理
@@ -578,6 +590,10 @@ def main(config: DictConfig) -> None:
     failed_tasks = 0
     
     print(f"\nMain process: Collecting results and performing IO postprocessing...")
+    
+    # 跟踪CSV文件是否已有header（用于增量写入）
+    # csv_file_exists 在之前已定义，如果文件已存在且有内容，说明已有header
+    csv_has_header = csv_file_exists
     
     # 收集结果（使用tqdm显示进度）
     with tqdm(total=total_tasks, desc="Generating molecules") as pbar:
@@ -597,6 +613,15 @@ def main(config: DictConfig) -> None:
                 
                 if final_result['success']:
                     successful_tasks += 1
+                    # 立即追加到CSV文件（增量写入）
+                    try:
+                        result_row = final_result['result_row']
+                        result_df = pd.DataFrame([result_row])
+                        # 第一次写入需要header，后续追加不需要
+                        result_df.to_csv(csv_path, mode='a', header=not csv_has_header, index=False)
+                        csv_has_header = True  # 第一次写入后，后续都不需要header
+                    except Exception as e:
+                        print(f"\nWarning: Failed to write result to CSV for task {final_result.get('task_id', 'unknown')}: {e}")
                 else:
                     failed_tasks += 1
                 
@@ -632,7 +657,7 @@ def main(config: DictConfig) -> None:
     print(f"All workers terminated")
     
     # ============================================================================
-    # 合并结果到CSV（避免写入冲突）
+    # 重新排序CSV文件（可选：使结果按generated_idx排序）
     # ============================================================================
     print(f"\nMerging results: {successful_tasks} successful, {failed_tasks} failed")
     
@@ -640,13 +665,19 @@ def main(config: DictConfig) -> None:
     successful_results = [r for r in results if r['success']]
     failed_results = [r for r in results if not r['success']]
     
-    # 写入CSV（按generated_idx排序）
-    if successful_results:
-        result_rows = [r['result_row'] for r in successful_results]
-        result_df = pd.DataFrame(result_rows)
-        result_df = result_df.sort_values('generated_idx')
-        result_df.to_csv(csv_path, mode='w', index=False, header=True)
-        print(f"Saved {len(result_rows)} successful results to {csv_path}")
+    # 重新读取并排序CSV文件（使结果按generated_idx排序，便于查看）
+    if successful_results and csv_path.exists():
+        try:
+            # 读取已写入的CSV
+            existing_df = pd.read_csv(csv_path)
+            if len(existing_df) > 0:
+                # 按generated_idx排序并重新写入
+                existing_df = existing_df.sort_values('generated_idx')
+                existing_df.to_csv(csv_path, mode='w', index=False, header=True)
+                print(f"Re-sorted {len(existing_df)} results in CSV by generated_idx")
+        except Exception as e:
+            print(f"Warning: Failed to re-sort CSV file: {e}")
+            print(f"Results were saved incrementally. CSV contains {successful_tasks} successful results.")
     
     # 处理失败的任务（可选：保存错误信息）
     if failed_results:

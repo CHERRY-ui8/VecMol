@@ -675,12 +675,16 @@ def create_field_loaders(
         # dset.field_idxs = torch.arange(min(128, len(dset.field_idxs)))  # 限制为128个分子
         dset.keys = torch.arange(min(32, len(dset.keys)))  # 限制为32个分子
 
+    # DataLoader配置：中和配置（80%情况最优）
+    # num_workers从config文件读取，不在此处限制
     loader = DataLoader(
         dset,
         batch_size=min(config["dset"]["batch_size"], len(dset)),
         num_workers=config["dset"]["num_workers"],
         shuffle=True if split == "train" else False,
-        pin_memory=True,
+        pin_memory=True,  # 中和配置：可以开启
+        persistent_workers=True,  # 中和配置：可以开启
+        prefetch_factor=2,  # 中和配置：推荐值
         drop_last=True,
     )
     print(f">> {split} set size: {len(dset)}")

@@ -771,10 +771,19 @@ def visualize_1d_gradient_field_comparison(
         device = gt_coords.device
     else:
         # 如果没有gt，从field_func获取device
-        if hasattr(field_func, 'parameters'):
+        if hasattr(field_func, 'device'):
+            # field_func 有 device 属性（由 create_field_function 设置）
+            device = field_func.device
+        elif hasattr(field_func, 'parameters'):
             device = next(field_func.parameters()).device
         else:
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            # 最后尝试通过调用一次 field_func 来获取 device（使用一个小的测试点）
+            try:
+                test_point = torch.tensor([[0.0, 0.0, 0.0]], device='cuda' if torch.cuda.is_available() else 'cpu')
+                test_result = field_func(test_point.unsqueeze(0))
+                device = test_result.device
+            except:
+                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # 设置显示用的样本索引
     if display_sample_idx is None:
@@ -838,10 +847,32 @@ def visualize_1d_gradient_field_comparison(
         if pred_field.dim() == 4:  # [batch, n_points, n_atom_types, 3]
             pred_field = pred_field[0]  # 取第一个batch
     
+    # 检查pred_field的原子类型数量
+    if pred_field.dim() == 3:  # [n_points, n_atom_types, 3]
+        n_atom_types_in_field = pred_field.shape[1]
+        print(f"Decoder输出的场形状: {pred_field.shape} (n_points={pred_field.shape[0]}, n_atom_types={n_atom_types_in_field}, dim=3)")
+    else:
+        raise ValueError(f"Unexpected pred_field shape: {pred_field.shape}")
+    
+    # 过滤掉超出范围的原子类型
+    valid_available_atom_types = [at for at in available_atom_types if at < n_atom_types_in_field]
+    if len(valid_available_atom_types) < len(available_atom_types):
+        skipped = [at for at in available_atom_types if at >= n_atom_types_in_field]
+        atom_names = ['C', 'H', 'O', 'N', 'F', 'S', 'Cl', 'Br']
+        skipped_names = [atom_names[at] if at < len(atom_names) else f"Type{at}" for at in skipped]
+        print(f"警告：decoder输出的原子类型数量为 {n_atom_types_in_field}，请求的原子类型为 {available_atom_types}")
+        print(f"      跳过超出范围的原子类型: {skipped_names}")
+        print(f"      将只可视化以下原子类型: {[atom_names[at] if at < len(atom_names) else f'Type{at}' for at in valid_available_atom_types]}")
+    
+    if not valid_available_atom_types:
+        print(f"错误：没有有效的原子类型可以可视化（decoder输出 {n_atom_types_in_field} 种原子类型，请求的原子类型为 {available_atom_types}）")
+        print(f"      请检查加载的模型配置是否与当前数据集匹配（drugs需要8种原子类型，qm9需要5种）")
+        return None
+    
     # 为每个原子类型创建单独的2×4图
     all_results = {}
     
-    for atom_type in available_atom_types:
+    for atom_type in valid_available_atom_types:
         # 扩展原子类型名称列表以支持更多元素
         atom_names = ["C", "H", "O", "N", "F", "S", "Cl", "Br"]
         if atom_type < len(atom_names):

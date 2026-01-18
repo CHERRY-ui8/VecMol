@@ -476,9 +476,32 @@ def load_network(
         
         new_state_dict[k] = v
 
-    pretrained_dict = {k: v for k, v in new_state_dict.items() if k in net_dict}
+    # 过滤出匹配的参数，并检查形状是否一致
+    pretrained_dict = {}
+    skipped_params = []
+    for k, v in new_state_dict.items():
+        if k in net_dict:
+            # 检查形状是否匹配
+            if net_dict[k].shape == v.shape:
+                pretrained_dict[k] = v
+            else:
+                skipped_params.append((k, net_dict[k].shape, v.shape))
+        else:
+            skipped_params.append((k, None, v.shape))
+    
+    # 打印跳过的参数信息
+    if skipped_params:
+        print(f"Warning: Skipping {len(skipped_params)} mismatched parameters:")
+        for k, model_shape, ckpt_shape in skipped_params:
+            if model_shape is None:
+                print(f"  - {k}: not in model (checkpoint shape: {ckpt_shape})")
+            else:
+                print(f"  - {k}: model shape {model_shape} != checkpoint shape {ckpt_shape}")
+    
+    # 更新匹配的参数
     net_dict.update(pretrained_dict)
-    net.load_state_dict(net_dict)
+    # 使用 strict=False 来允许部分参数不匹配（如 grid_points）
+    net.load_state_dict(net_dict, strict=False)
 
     # weight_first_layer_after = next(iter(net_dict.values())).sum()
     # assert (weight_first_layer_before != weight_first_layer_after).item(), "loading did not work"

@@ -5,11 +5,19 @@
 
 使用方法:
     python convert_temp_codes_to_lmdb.py \
-        --temp_dir /path/to/temp_batches \
-        --output_dir /path/to/output \
+        --temp_dir /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_drugs/20260113/lightning_logs/version_0/checkpoints/code_no_aug/train \
+        --output_dir /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_drugs/20260113/lightning_logs/version_0/checkpoints/code_no_aug/train \
         --num_augmentations 1 \
         --aug_idx 0 \
         --delete_batches  # 可选：转换后删除batch文件
+    
+    python convert_temp_codes_to_lmdb.py \
+    --temp_dir /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_drugs/20260113/lightning_logs/version_0/checkpoints/code_no_aug/train \
+    --output_dir /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_drugs/20260113/lightning_logs/version_0/checkpoints/code_no_aug/train \
+    --num_augmentations 1 \
+    --aug_idx 0 \
+    --only_weights \
+    --delete_batches
 """
 
 import os
@@ -554,6 +562,8 @@ def main():
                        help="转换后删除batch文件（节省空间）")
     parser.add_argument("--convert_weights", action="store_true",
                        help="同时转换position_weights文件")
+    parser.add_argument("--only_weights", action="store_true",
+                       help="只转换position_weights文件，跳过codes转换")
     
     # 新增：混合模式参数
     parser.add_argument("--mixed_mode", action="store_true",
@@ -562,6 +572,75 @@ def main():
                        help="intermediate文件目录路径（仅在--mixed_mode时使用）")
     
     args = parser.parse_args()
+    
+    # 如果指定了--only_weights，直接转换weights并返回
+    if args.only_weights:
+        if not args.temp_dir:
+            raise ValueError("--temp_dir is required when using --only_weights")
+        
+        print("=" * 80)
+        print("Converting Position Weights Only")
+        print("=" * 80)
+        print(f"Temp directory: {args.temp_dir}")
+        print(f"Output directory: {args.output_dir}")
+        print(f"Number of augmentations: {args.num_augmentations}")
+        print(f"Augmentation index: {args.aug_idx}")
+        print(f"Delete batches after conversion: {args.delete_batches}")
+        print("=" * 80)
+        
+        print("\n>> Converting position_weights files...")
+        try:
+            # 尝试加载codes keys用于验证（可选）
+            keys_path = Path(args.output_dir) / f"codes_aug{args.num_augmentations}_{args.aug_idx:03d}_keys.pt"
+            codes_keys = None
+            if keys_path.exists():
+                codes_keys = torch.load(keys_path, weights_only=False)
+                print(f"  Loaded codes keys: {len(codes_keys)} samples (for verification)")
+            else:
+                print(f"  ⚠️  Warning: Codes keys file not found, skipping count verification")
+            
+            if args.mixed_mode:
+                if not args.intermediate_dir:
+                    raise ValueError("--intermediate_dir is required when using --mixed_mode with --only_weights")
+                # 混合模式：处理intermediate + batch position_weights
+                num_weights = convert_mixed_to_lmdb(
+                    intermediate_dir=args.intermediate_dir.replace("codes", "position_weights") if args.intermediate_dir else None,
+                    temp_batches_dir=args.temp_dir,
+                    output_dir=args.output_dir,
+                    num_augmentations=args.num_augmentations,
+                    aug_idx=args.aug_idx,
+                    file_prefix="position_weights",
+                    delete_after_convert=args.delete_batches
+                )
+            else:
+                # 普通模式：只处理batch position_weights
+                num_weights = convert_temp_position_weights_to_lmdb(
+                    temp_dir=args.temp_dir,
+                    output_dir=args.output_dir,
+                    num_augmentations=args.num_augmentations,
+                    aug_idx=args.aug_idx,
+                    codes_keys=codes_keys,
+                    delete_batches=args.delete_batches
+                )
+            
+            if codes_keys and num_weights != len(codes_keys):
+                print(f"⚠️  Warning: Position weights count ({num_weights}) != codes count ({len(codes_keys)})")
+            else:
+                if codes_keys:
+                    print(f"✅ Converted {num_weights} position_weights samples (matches codes count)")
+                else:
+                    print(f"✅ Converted {num_weights} position_weights samples")
+                
+        except Exception as e:
+            print(f"❌ Error converting position_weights: {e}")
+            import traceback
+            traceback.print_exc()
+            return
+        
+        print("\n" + "=" * 80)
+        print("✅ All done!")
+        print("=" * 80)
+        return
     
     # 检查模式
     if args.mixed_mode:

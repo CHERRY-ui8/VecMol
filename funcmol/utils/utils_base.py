@@ -2,6 +2,7 @@ import getpass
 import lightning as L
 from omegaconf import OmegaConf
 import os
+import sys
 import torch
 # from wandb.integration.lightning.fabric import WandbLogger
 from lightning.fabric.strategies import DDPStrategy
@@ -10,7 +11,7 @@ import subprocess
 import tempfile
 import numpy as np
 
-from funcmol.utils.constants import PADDING_INDEX
+from funcmol.utils.constants import PADDING_INDEX, BOND_LENGTHS_PM
 
 
 def setup_fabric(config: dict, find_unused_parameters=False) -> L.Fabric:
@@ -387,7 +388,7 @@ def get_atom_max_valency(atomic_num):
     """获取原子的最大价态"""
     return MAX_VALENCY.get(atomic_num, 4)  # 默认 4
 
-def _calculate_hydrogen_positions_3d(atom_pos, existing_bond_vectors, num_h, bond_length=1.0):
+def _calculate_hydrogen_positions_3d(atom_pos, existing_bond_vectors, num_h, atom_symbol='C', bond_length=None):
     """
     计算H原子在3D空间中的位置，考虑已有键的方向和合理的键角
     
@@ -395,11 +396,30 @@ def _calculate_hydrogen_positions_3d(atom_pos, existing_bond_vectors, num_h, bon
         atom_pos: 重原子的位置 (Point3D)
         existing_bond_vectors: 已有键的方向向量列表（归一化的3D向量）
         num_h: 需要添加的H数量
-        bond_length: H原子到重原子的距离（默认1.0 Å）
+        atom_symbol: 重原子的元素符号（用于获取标准键长）
+        bond_length: H原子到重原子的距离（单位：Å）。如果为None，则根据原子类型从BOND_LENGTHS_PM获取标准键长
         
     Returns:
-        H原子位置的列表，每个元素是 [x, y, z] 数组
+        H原子位置的列表，每个元素是 [x, y, z] 数组。如果计算失败，返回空列表（调用者需要处理）
     """
+    # 根据原子类型获取标准键长
+    if bond_length is None:
+        # 从BOND_LENGTHS_PM获取标准键长（单位：pm，需要转换为Å）
+        if atom_symbol in BOND_LENGTHS_PM and 'H' in BOND_LENGTHS_PM[atom_symbol]:
+            bond_length = BOND_LENGTHS_PM[atom_symbol]['H'] / 100.0  # pm转Å
+        else:
+            # 如果没有找到标准键长，使用默认值（根据原子类型）
+            default_bond_lengths = {
+                'C': 1.09,  # C-H
+                'N': 1.01,  # N-H
+                'O': 0.96,  # O-H
+                'S': 1.34,  # S-H
+                'P': 1.44,  # P-H (144 pm)
+                'F': 0.92,  # F-H
+                'Cl': 1.27, # Cl-H
+                'Br': 1.41, # Br-H
+            }
+            bond_length = default_bond_lengths.get(atom_symbol, 1.0)  # 默认1.0 Å
     # 使用文件顶部已导入的numpy
     atom_center = np.array([atom_pos.x, atom_pos.y, atom_pos.z])
     h_positions = []
@@ -619,14 +639,20 @@ def add_hydrogens_manually_from_sdf(sdf_content):
     2. 对每个重原子计算当前价态（键级之和）和最大价态
     3. 如果当前价态 < 最大价态，计算需要添加的 H 数量
     4. 对于没有键的原子（价态=0），直接使用最大价态添加 H
-    5. 在重原子周围均匀分布添加 H 原子（距离约 1.0 Å）
-    6. 转换回 SDF 格式
+    5. 在重原子周围均匀分布添加 H 原子，使用标准键长（根据原子类型）
+       - C-H: 1.09 Å, O-H: 0.96 Å, N-H: 1.01 Å, S-H: 1.34 Å 等
+    6. 使用最大排斥原则计算H原子位置，确保合理的几何构型
+    7. 转换回 SDF 格式
     
     Args:
         sdf_content: SDF 格式字符串（应包含键信息）
         
     Returns:
         添加了 H 的新 SDF 格式字符串，或 None
+        
+    注意：
+    - 所有添加的H原子都会有有效的3D坐标（不会是0,0,0）
+    - 如果坐标计算失败，会使用备用方法（基于最大排斥原则的球面分布）
     """
     try:
         from rdkit import Chem
@@ -642,6 +668,88 @@ def add_hydrogens_manually_from_sdf(sdf_content):
             Chem.SanitizeMol(mol)
         except:
             pass
+        
+        # 在补H之前排除单原子碎片（只有一个原子且没有键的连通分量）
+        # 避免单原子碎片（如Cl、Br）被补H后无法识别
+        # 保存原始分子的conformer（用于后续坐标复制）
+        original_conf = mol.GetConformer() if mol.GetNumConformers() > 0 else None
+        
+        if mol.GetNumBonds() > 0 and mol.GetNumAtoms() > 1:
+            # 获取所有连通分量
+            mol_frags = Chem.rdmolops.GetMolFrags(mol, asMols=True, sanitizeFrags=False)
+            if len(mol_frags) > 1:
+                # 过滤掉单原子碎片（只有一个原子且没有键的连通分量）
+                valid_frags = [frag for frag in mol_frags if frag.GetNumBonds() > 0]
+                if len(valid_frags) > 0:
+                    # 如果只有一个有效片段，使用它
+                    if len(valid_frags) == 1:
+                        # 找到这个有效片段在原始分子中的原子索引
+                        frag_atom_indices = Chem.rdmolops.GetMolFrags(mol, asMols=False)
+                        valid_frag_idx = None
+                        for i, frag in enumerate(mol_frags):
+                            if frag.GetNumBonds() > 0:
+                                valid_frag_idx = i
+                                break
+                        
+                        if valid_frag_idx is not None:
+                            valid_atom_indices = frag_atom_indices[valid_frag_idx]
+                            mol = valid_frags[0]
+                            # 从原始分子复制conformer到新分子
+                            if original_conf is not None:
+                                new_conf = Chem.Conformer(mol.GetNumAtoms())
+                                for new_idx, old_idx in enumerate(valid_atom_indices):
+                                    pos = original_conf.GetAtomPosition(old_idx)
+                                    new_conf.SetAtomPosition(new_idx, pos)
+                                mol.RemoveAllConformers()
+                                mol.AddConformer(new_conf)
+                        else:
+                            mol = valid_frags[0]
+                    else:
+                        # 如果有多个有效片段，合并它们（保留所有有键的片段）
+                        new_mol = Chem.RWMol()
+                        atom_map = {}  # 原始分子中的原子索引 -> 新分子中的原子索引
+                        
+                        # 获取所有有效片段的原子索引
+                        frag_atom_indices = Chem.rdmolops.GetMolFrags(mol, asMols=False)
+                        all_valid_atom_indices = []
+                        for frag, atom_indices in zip(mol_frags, frag_atom_indices):
+                            if frag.GetNumBonds() > 0:
+                                all_valid_atom_indices.extend(atom_indices)
+                        all_valid_atom_indices = sorted(all_valid_atom_indices)
+                        
+                        # 添加所有有效原子
+                        for old_idx in all_valid_atom_indices:
+                            atom = mol.GetAtomWithIdx(old_idx)
+                            new_idx = new_mol.AddAtom(atom)
+                            atom_map[old_idx] = new_idx
+                        
+                        # 添加所有有效片段的键
+                        for frag, atom_indices in zip(mol_frags, frag_atom_indices):
+                            if frag.GetNumBonds() > 0:
+                                frag_atom_map = {old_idx: atom_map[old_idx] for old_idx in atom_indices}
+                                for bond in frag.GetBonds():
+                                    begin_old = bond.GetBeginAtomIdx()
+                                    end_old = bond.GetEndAtomIdx()
+                                    begin_orig = atom_indices[begin_old]
+                                    end_orig = atom_indices[end_old]
+                                    if begin_orig in frag_atom_map and end_orig in frag_atom_map:
+                                        begin_new = frag_atom_map[begin_orig]
+                                        end_new = frag_atom_map[end_orig]
+                                        new_mol.AddBond(begin_new, end_new, bond.GetBondType())
+                        
+                        # 转换为普通分子对象
+                        mol = new_mol.GetMol()
+                        
+                        # 从原始分子复制坐标
+                        if original_conf is not None:
+                            new_conf = Chem.Conformer(mol.GetNumAtoms())
+                            for old_idx, new_idx in atom_map.items():
+                                pos = original_conf.GetAtomPosition(old_idx)
+                                new_conf.SetAtomPosition(new_idx, pos)
+                            mol.AddConformer(new_conf)
+                else:
+                    # 如果没有有效片段（所有片段都是单原子碎片），返回None
+                    return None
         
         # 创建新的分子对象
         new_mol = Chem.RWMol(mol)
@@ -679,17 +787,15 @@ def add_hydrogens_manually_from_sdf(sdf_content):
                 # 所以如果 current_valency + needed_h > max_valency，说明计算有误
                 if current_valency + needed_h <= max_valency:
                     h_to_add.append((atom_idx, needed_h))
-                else:
-                    # 如果计算出的 needed_h 会导致超过最大价态，不添加
-                    print(f"Warning: Atom {atom_idx} ({atom.GetSymbol()}) already has valency {current_valency:.1f}, "
-                          f"cannot add {needed_h} H (would exceed max valency {max_valency})")
         
         if not h_to_add:
             # 没有需要添加的 H，返回原始 SDF
             return sdf_content
         
         # 添加 H 原子
-        h_indices = []
+        # 使用 h_map 记录每个 H 原子与其父原子的对应关系: [(parent_atom_idx, h_idx), ...]
+        h_map = []
+        original_atom_count = new_mol.GetNumAtoms()
         for atom_idx, num_h in h_to_add:
             atom = new_mol.GetAtomWithIdx(atom_idx)
             atom_pos = conf.GetAtomPosition(atom_idx)
@@ -698,13 +804,18 @@ def add_hydrogens_manually_from_sdf(sdf_content):
                 # 创建 H 原子
                 h_atom = Chem.Atom(1)  # H 的原子序数是 1
                 h_idx = new_mol.AddAtom(h_atom)
-                h_indices.append(h_idx)
+                h_map.append((atom_idx, h_idx))  # 记录父原子索引和 H 原子索引
                 
                 # 添加键
                 new_mol.AddBond(atom_idx, h_idx, Chem.BondType.SINGLE)
         
         # 转换为普通分子对象
         new_mol = new_mol.GetMol()
+        
+        # 删除所有旧的conformer（如果有），确保新conformer是ID=0
+        # 这样MolToMolBlock就会使用我们的新conformer
+        while new_mol.GetNumConformers() > 0:
+            new_mol.RemoveConformer(0)
         
         # 添加 conformer 并设置坐标
         new_conf = Chem.Conformer(new_mol.GetNumAtoms())
@@ -714,9 +825,11 @@ def add_hydrogens_manually_from_sdf(sdf_content):
             new_conf.SetAtomPosition(i, pos)
         
         # 为新添加的 H 设置坐标（考虑已有键的方向和合理的键角）
-        h_idx_counter = 0
+        # 使用 h_map 来正确映射每个 H 原子的索引
+        h_map_idx = 0  # 用于遍历 h_map 的索引
         for atom_idx, num_h in h_to_add:
             atom = mol.GetAtomWithIdx(atom_idx)
+            atom_symbol = atom.GetSymbol()
             atom_pos = conf.GetAtomPosition(atom_idx)
             
             # 获取已有键的方向向量
@@ -738,24 +851,121 @@ def add_hydrogens_manually_from_sdf(sdf_content):
             
             # 根据已有键的数量和需要添加的H数量，计算H的位置
             h_positions = _calculate_hydrogen_positions_3d(
-                atom_pos, existing_bond_vectors, num_h, bond_length=1.0
+                atom_pos, existing_bond_vectors, num_h, atom_symbol=atom_symbol
             )
             
-            for i, h_pos_3d in enumerate(h_positions):
-                h_idx = mol.GetNumAtoms() + h_idx_counter
-                h_pos = Point3D(h_pos_3d[0], h_pos_3d[1], h_pos_3d[2])
+            # 如果坐标计算失败（返回空列表），使用备用方法
+            if len(h_positions) < num_h:
+                # 备用方法：基于最大排斥原则，在3D空间中均匀分布H
+                atom_center = np.array([atom_pos.x, atom_pos.y, atom_pos.z])
+                
+                # 获取标准键长
+                if atom_symbol in BOND_LENGTHS_PM and 'H' in BOND_LENGTHS_PM[atom_symbol]:
+                    bond_length = BOND_LENGTHS_PM[atom_symbol]['H'] / 100.0
+                else:
+                    default_bond_lengths = {
+                        'C': 1.09, 'N': 1.01, 'O': 0.96, 'S': 1.34,
+                        'P': 1.44, 'F': 0.92, 'Cl': 1.27, 'Br': 1.41,
+                    }
+                    bond_length = default_bond_lengths.get(atom_symbol, 1.0)
+                
+                # 计算已有键的平均方向（用于确定主要方向）
+                if existing_bond_vectors:
+                    main_direction = np.mean(existing_bond_vectors, axis=0)
+                    main_direction = main_direction / np.linalg.norm(main_direction)
+                else:
+                    main_direction = np.array([1.0, 0.0, 0.0])
+                
+                # 使用球面均匀分布（最大排斥）
+                for i in range(num_h - len(h_positions)):
+                    # 使用黄金角度螺旋分布，确保最大排斥
+                    theta = np.arccos(1 - 2 * (i + 0.5) / num_h)  # 极角
+                    phi = 2 * np.pi * i * 0.618  # 方位角（黄金角度）
+                    h_direction = np.array([
+                        np.sin(theta) * np.cos(phi),
+                        np.sin(theta) * np.sin(phi),
+                        np.cos(theta)
+                    ])
+                    # 如果已有键，稍微偏向已有键的相反方向
+                    if existing_bond_vectors:
+                        h_direction = -0.3 * main_direction + 0.954 * h_direction
+                        h_direction = h_direction / np.linalg.norm(h_direction)
+                    h_pos = atom_center + bond_length * h_direction
+                    h_positions.append(h_pos.tolist())
+            
+            # 确保有足够的坐标
+            if len(h_positions) != num_h:
+                # 如果还是不够，使用简单的备用方法
+                atom_center = np.array([atom_pos.x, atom_pos.y, atom_pos.z])
+                if atom_symbol in BOND_LENGTHS_PM and 'H' in BOND_LENGTHS_PM[atom_symbol]:
+                    bond_length = BOND_LENGTHS_PM[atom_symbol]['H'] / 100.0
+                else:
+                    bond_length = 1.0
+                while len(h_positions) < num_h:
+                    # 简单的均匀分布
+                    angle = 2 * np.pi * len(h_positions) / num_h
+                    h_direction = np.array([np.cos(angle), np.sin(angle), 0.0])
+                    h_pos = atom_center + bond_length * h_direction
+                    h_positions.append(h_pos.tolist())
+            
+            # 确保h_positions的数量等于num_h
+            if len(h_positions) < num_h:
+                # 使用默认位置填充
+                atom_center = np.array([atom_pos.x, atom_pos.y, atom_pos.z])
+                bond_length = 1.0
+                while len(h_positions) < num_h:
+                    angle = 2 * np.pi * len(h_positions) / num_h
+                    h_direction = np.array([np.cos(angle), np.sin(angle), 0.0])
+                    h_pos = atom_center + bond_length * h_direction
+                    h_positions.append(h_pos.tolist())
+            
+            # 设置H原子坐标 - 使用 h_map 中的真实索引
+            # 确保为这个原子的所有H设置坐标
+            for i in range(num_h):
+                if h_map_idx >= len(h_map):
+                    break
+                # 从 h_map 获取真实的 H 原子索引
+                parent_atom_idx_in_map, h_idx = h_map[h_map_idx]
+                # 验证父原子索引是否匹配
+                if parent_atom_idx_in_map != atom_idx:
+                    break
+                
+                # 获取对应的坐标
+                if i < len(h_positions):
+                    h_pos_3d = h_positions[i]
+                else:
+                    # 如果坐标不够，使用默认位置
+                    atom_center = np.array([atom_pos.x, atom_pos.y, atom_pos.z])
+                    angle = 2 * np.pi * i / num_h
+                    h_direction = np.array([np.cos(angle), np.sin(angle), 0.0])
+                    h_pos_3d = (atom_center + 1.0 * h_direction).tolist()
+                
+                h_pos = Point3D(float(h_pos_3d[0]), float(h_pos_3d[1]), float(h_pos_3d[2]))
                 new_conf.SetAtomPosition(h_idx, h_pos)
-                h_idx_counter += 1
+                h_map_idx += 1
         
-        new_mol.AddConformer(new_conf)
+        # 验证所有H原子都被处理了
+        if h_map_idx != len(h_map):
+            # 为剩余的H原子设置默认坐标
+            for remaining_idx in range(h_map_idx, len(h_map)):
+                parent_idx, h_idx = h_map[remaining_idx]
+                parent_pos = conf.GetAtomPosition(parent_idx)
+                # 使用简单的默认位置
+                h_pos = Point3D(parent_pos.x + 1.0, parent_pos.y, parent_pos.z)
+                new_conf.SetAtomPosition(h_idx, h_pos)
         
+        # 添加conformer到分子
+        conf_id = new_mol.AddConformer(new_conf)
+                
         # 转换回 SDF 格式
         # 如果分子无法被kekulize（如某些芳香环），尝试修复键类型后再生成SDF
         sdf_with_h = None
+        
         try:
             # 先尝试sanitize
             Chem.SanitizeMol(new_mol)
-            sdf_with_h = Chem.MolToMolBlock(new_mol)
+            # 显式指定使用conformer ID=0（我们新添加的conformer）
+            sdf_with_h = Chem.MolToMolBlock(new_mol, confId=conf_id)
         except (Chem.rdchem.KekulizeException, Chem.rdchem.AtomValenceException) as e:
             # 如果sanitize失败（kekulization或价态错误），尝试修复键类型
             # 将芳香键改为单键，这可能有助于某些情况
@@ -775,9 +985,12 @@ def add_hydrogens_manually_from_sdf(sdf_content):
                 
                 # 尝试sanitize修复后的分子
                 fixed_mol = editable_mol.GetMol()
+                # 复制conformer到修复后的分子
+                if new_mol.GetNumConformers() > 0:
+                    fixed_mol.AddConformer(new_mol.GetConformer(conf_id))
                 try:
                     Chem.SanitizeMol(fixed_mol)
-                    sdf_with_h = Chem.MolToMolBlock(fixed_mol)
+                    sdf_with_h = Chem.MolToMolBlock(fixed_mol, confId=conf_id if fixed_mol.GetNumConformers() > 0 else -1)
                 except:
                     # 如果修复后还是无法sanitize，尝试直接生成SDF（不sanitize）
                     # 注意：MolToMolBlock可能会抛出异常
@@ -789,7 +1002,7 @@ def add_hydrogens_manually_from_sdf(sdf_content):
             if sdf_with_h is None:
                 try:
                     # 最后尝试：直接生成SDF，即使无法sanitize
-                    sdf_with_h = Chem.MolToMolBlock(new_mol)
+                    sdf_with_h = Chem.MolToMolBlock(new_mol, confId=conf_id)
                 except Exception:
                     # 如果连生成SDF都失败，返回原始SDF（不添加H）
                     # 这样至少不会丢失原始信息
@@ -797,7 +1010,7 @@ def add_hydrogens_manually_from_sdf(sdf_content):
         except Exception:
             # 其他未知错误，尝试直接生成SDF
             try:
-                sdf_with_h = Chem.MolToMolBlock(new_mol)
+                sdf_with_h = Chem.MolToMolBlock(new_mol, confId=conf_id)
             except Exception:
                 # 如果失败，返回原始SDF
                 return sdf_content
@@ -810,7 +1023,6 @@ def add_hydrogens_manually_from_sdf(sdf_content):
         return None
         
     except Exception as e:
-        print(f"Warning: Failed to add hydrogens manually: {e}")
         return None
 
 

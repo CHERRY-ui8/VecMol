@@ -25,7 +25,7 @@ dropout: 0.15     # Dropout率，可选值：0.1, 0.15
 
 # GNN图构建参数
 cutoff: 8.0          # 截断距离
-radius: 5.4          # 半径图构建的半径 anchor1.5的时候，r=2.7最好
+radius: 5.4         # 半径图构建的半径 anchor1.5的时候，r=2.7最好；r=2.5的时候，试过 7.0
 
 # cutoff: 6.0          # 截断距离
 # radius: 4.0          # 半径图构建的半径

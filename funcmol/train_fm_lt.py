@@ -1,12 +1,18 @@
+# ========== 共享服务器线程限制配置（中和配置：80%情况最优）==========
+# 在 import torch 之前设置环境变量，限制底层库的线程数
+import os
+os.environ["OMP_NUM_THREADS"] = "2"
+os.environ["MKL_NUM_THREADS"] = "2"
+os.environ["OPENBLAS_NUM_THREADS"] = "2"
+os.environ["NUMEXPR_NUM_THREADS"] = "2"
+# ==========================================
+
 import sys
 sys.path.append("..")
 
-# Standard libraries
-import os
-
 # Set GPU environment
 # os.environ['CUDA_VISIBLE_DEVICES'] = "1"
-os.environ['CUDA_VISIBLE_DEVICES'] = "6,7"
+os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3,4,5,6"
 # os.environ['CUDA_VISIBLE_DEVICES'] = "0,2,3,4,5"
 
 # Data visualization and processing
@@ -15,6 +21,10 @@ import numpy as np
     
 # PyTorch and related libraries
 import torch
+# 限制 PyTorch 自己的线程数（中和配置：80%情况最优）
+torch.set_num_threads(2)
+torch.set_num_interop_threads(2)
+
 import torch.nn as nn
 import torch.nn.functional as F
 torch.set_float32_matmul_precision('medium')
@@ -1198,8 +1208,8 @@ class FuncmolLightningModule(pl.LightningModule):
         if "best_loss" in checkpoint:
             self.best_loss = checkpoint["best_loss"]
 
-# @hydra.main(config_path="configs", config_name="train_fm_drugs", version_base=None)
-@hydra.main(config_path="configs", config_name="train_fm_qm9", version_base=None)
+@hydra.main(config_path="configs", config_name="train_fm_drugs", version_base=None)
+# @hydra.main(config_path="configs", config_name="train_fm_qm9", version_base=None)
 def main_hydra(config):
     """Entry point for Hydra configuration system"""
     main(config)
@@ -1261,32 +1271,78 @@ def main(config):
     config_nf["debug"] = config["debug"]
     config_nf["dset"]["batch_size"] = config["dset"]["batch_size"]
     
+    # Load checkpoint config if specified (to get codes_dir and grid_size from checkpoint)
+    checkpoint_config = None
+    checkpoint_codes_dir = None
+    checkpoint_code_stats = None
+    if config["reload_model_path"] is not None:
+        try:
+            checkpoint_path = config["reload_model_path"]
+            if os.path.isdir(checkpoint_path):
+                from funcmol.utils.utils_fm import find_checkpoint_path
+                checkpoint_path = find_checkpoint_path(checkpoint_path)
+            
+            print(f">> Loading checkpoint config from: {checkpoint_path}")
+            checkpoint_dict = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+            checkpoint_hparams = checkpoint_dict.get("hyper_parameters", {})
+            if checkpoint_hparams and "config" in checkpoint_hparams:
+                checkpoint_config = checkpoint_hparams["config"]
+                print(f">> Checkpoint config loaded: grid_size={checkpoint_config.get('dset', {}).get('grid_size', 'N/A')}")
+                # Get codes_dir from checkpoint
+                use_augmented_codes_ckpt = checkpoint_config.get("use_augmented_codes", False)
+                if use_augmented_codes_ckpt:
+                    checkpoint_codes_dir = checkpoint_config.get("codes_dir_with_aug")
+                else:
+                    checkpoint_codes_dir = checkpoint_config.get("codes_dir_no_aug") or checkpoint_config.get("codes_dir")
+                if checkpoint_codes_dir:
+                    print(f">> Found codes_dir in checkpoint: {checkpoint_codes_dir}")
+            
+            # Try to load code_stats from checkpoint
+            checkpoint_code_stats = checkpoint_dict.get("code_stats", None)
+            if checkpoint_code_stats:
+                print(f">> Found code_stats in checkpoint:")
+                print(f">>   mean: {checkpoint_code_stats.get('mean', 'N/A')}")
+                print(f">>   std: {checkpoint_code_stats.get('std', 'N/A')}")
+                print(f">>   max_normalized: {checkpoint_code_stats.get('max_normalized', 'N/A')}")
+                print(f">>   min_normalized: {checkpoint_code_stats.get('min_normalized', 'N/A')}")
+                print(f">> Will use code_stats from checkpoint instead of loading from codes directory")
+            else:
+                print(f">> No code_stats found in checkpoint, will load from codes directory or recompute")
+        except Exception as e:
+            print(f">> Warning: Failed to load checkpoint config: {e}")
+            print(">> Will use current config instead")
+    
     # 根据配置选择使用数据增强的codes还是原始codes
     if not config["on_the_fly"]:
         use_augmented_codes = config.get("use_augmented_codes", False)
         
-        # 优先使用新的配置方式（codes_dir_no_aug / codes_dir_with_aug）
-        if use_augmented_codes:
-            codes_dir = config.get("codes_dir_with_aug")
-            if codes_dir is None:
-                raise ValueError(
-                    "use_augmented_codes=True 但未指定 codes_dir_with_aug。\n"
-                    "请在配置文件中设置 codes_dir_with_aug 路径。"
-                )
-            print(f">> 使用数据增强的codes: {codes_dir}")
+        # 如果从checkpoint加载，优先使用checkpoint中的codes_dir
+        if checkpoint_codes_dir is not None:
+            codes_dir = checkpoint_codes_dir
+            print(f">> 使用checkpoint中的codes_dir: {codes_dir}")
         else:
-            codes_dir = config.get("codes_dir_no_aug")
-            if codes_dir is None:
-                # 兼容旧配置：如果codes_dir_no_aug未设置，尝试使用旧的codes_dir
-                codes_dir = config.get("codes_dir")
+            # 优先使用新的配置方式（codes_dir_no_aug / codes_dir_with_aug）
+            if use_augmented_codes:
+                codes_dir = config.get("codes_dir_with_aug")
                 if codes_dir is None:
                     raise ValueError(
-                        "use_augmented_codes=False 但未指定 codes_dir_no_aug 或 codes_dir。\n"
-                        "请在配置文件中设置 codes_dir_no_aug 路径。"
+                        "use_augmented_codes=True 但未指定 codes_dir_with_aug。\n"
+                        "请在配置文件中设置 codes_dir_with_aug 路径。"
                     )
-                print(f">> 使用兼容的codes_dir: {codes_dir}")
+                print(f">> 使用数据增强的codes: {codes_dir}")
             else:
-                print(f">> 使用原始codes（无数据增强）: {codes_dir}")
+                codes_dir = config.get("codes_dir_no_aug")
+                if codes_dir is None:
+                    # 兼容旧配置：如果codes_dir_no_aug未设置，尝试使用旧的codes_dir
+                    codes_dir = config.get("codes_dir")
+                    if codes_dir is None:
+                        raise ValueError(
+                            "use_augmented_codes=False 但未指定 codes_dir_no_aug 或 codes_dir。\n"
+                            "请在配置文件中设置 codes_dir_no_aug 路径。"
+                        )
+                    print(f">> 使用兼容的codes_dir: {codes_dir}")
+                else:
+                    print(f">> 使用原始codes（无数据增强）: {codes_dir}")
         
         # 设置config中的codes_dir，供create_code_loaders使用
         config["codes_dir"] = codes_dir
@@ -1313,11 +1369,17 @@ def main(config):
             # if isinstance(loader_val, list) and len(loader_val) > 0:
             #     loader_val = loader_val[0]
             
-            # Compute codes for normalization
-            _, code_stats = compute_codes(
-                loader_train, enc, config_nf, "train", config["normalize_codes"],
-                code_stats=None
-            )
+            # 优先使用checkpoint中的code_stats（如果存在）
+            if checkpoint_code_stats is not None:
+                print(f">> Using code_stats from checkpoint (resuming training)")
+                code_stats = checkpoint_code_stats
+            else:
+                # Compute codes for normalization
+                print(f">> Computing code_stats from data (new training or checkpoint has no code_stats)")
+                _, code_stats = compute_codes(
+                    loader_train, enc, config_nf, "train", config["normalize_codes"],
+                    code_stats=None
+                )
         else:
             loader_train = create_code_loaders(config, split="train")
             loader_val = create_code_loaders(config, split="val")
@@ -1418,15 +1480,21 @@ def main(config):
             else:
                 print(f">> num_augmentations not specified in config, will auto-infer from codes directory")
             
-            # NOTE: 这里可以通过 max_samples 近似统计，加速大规模 codes 的统计过程
-            # 例如使用前约 20000w 样本来估计 mean/std (20000w个float)
-            code_stats = compute_code_stats_offline(
-                loader_train,
-                "train",
-                config["normalize_codes"],
-                num_augmentations=num_augmentations,
-                max_samples=200000000,
-            )
+            # 优先使用checkpoint中的code_stats（如果存在）
+            if checkpoint_code_stats is not None:
+                print(f">> Using code_stats from checkpoint (resuming training)")
+                code_stats = checkpoint_code_stats
+            else:
+                # NOTE: 这里可以通过 max_samples 近似统计，加速大规模 codes 的统计过程
+                # 例如使用前约 200000w 样本来估计 mean/std (200000w个float)
+                print(f">> Computing code_stats from codes directory (new training or checkpoint has no code_stats)")
+                code_stats = compute_code_stats_offline(
+                    loader_train,
+                    "train",
+                    config["normalize_codes"],
+                    num_augmentations=num_augmentations,
+                    max_samples=None,
+                )
         
         # Check if loaders are empty
         if not loader_train or len(loader_train) == 0:
@@ -1442,8 +1510,21 @@ def main(config):
     # Calculate number of iterations
     config["num_iterations"] = config["num_epochs"] * len(loader_train)
     
+    # Use checkpoint config for model initialization if available, otherwise use current config
+    model_config = checkpoint_config if checkpoint_config is not None else config
+    if checkpoint_config is not None:
+        # Merge checkpoint config with current config (current config takes precedence for non-model params)
+        model_config = config.copy()
+        # Update dset config from checkpoint (especially grid_size and anchor_spacing)
+        if "dset" in checkpoint_config:
+            model_config["dset"] = config["dset"].copy()
+            # Override grid_size and anchor_spacing from checkpoint
+            model_config["dset"]["grid_size"] = checkpoint_config["dset"]["grid_size"]
+            model_config["dset"]["anchor_spacing"] = checkpoint_config["dset"]["anchor_spacing"]
+            print(f">> Using grid_size={model_config['dset']['grid_size']} and anchor_spacing={model_config['dset']['anchor_spacing']} from checkpoint")
+    
     # Initialize Lightning model
-    model = FuncmolLightningModule(config, enc, dec_module, code_stats, 
+    model = FuncmolLightningModule(model_config, enc, dec_module, code_stats, 
                                    field_loader_train=field_loader_train, 
                                    field_loader_val=field_loader_val)
     
@@ -1498,7 +1579,7 @@ def main(config):
         strategy='auto' if num_gpus == 1 else DDPStrategy(find_unused_parameters=True),
         precision="bf16-mixed",
         enable_checkpointing=True,
-        check_val_every_n_epoch=5,  # Validate every 5 epochs
+        check_val_every_n_epoch=1,  # Validate every epoch (save checkpoint every epoch)
         # Use built-in gradient clipping
         gradient_clip_val=config.get("max_grad_norm", 1.0),
         gradient_clip_algorithm="norm",

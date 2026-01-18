@@ -40,11 +40,12 @@ position_weight:
   alpha: 0.5      # 权重系数：weight = 1 + alpha * num_atoms
 
 
-nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_drugs/20260113/lightning_logs/version_1/checkpoints/last.ckpt
+nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_drugs/20260113/lightning_logs/version_0/checkpoints/last.ckpt
 exp_dir: ../exps/funcmol
 exp_name: "fm_${dset.dset_name}/${now:%Y%m%d}" # NOTE: in lightning, no time stamp needed
 dirname: "${exp_dir}/${exp_name}"
-reload_model_path: null
+# reload_model_path: null
+reload_model_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_drugs/20260116/lightning_logs/version_2/checkpoints/model-epoch=09.ckpt
 
 # data params
 smooth_sigma: 0.5
@@ -55,23 +56,23 @@ use_augmented_codes: False  # True: 使用数据增强的codes, False: 使用原
 num_augmentations: 1  # null 或具体数字（如 3, 5, 10 等）
 
 # LMDB配置
-use_sharded_lmdb: True  # 是否使用分片LMDB。null=自动检测（优先使用分片），true=强制使用分片，false=强制使用完整LMDB
+use_sharded_lmdb: true  # 是否使用分片LMDB。null=自动检测（优先使用分片），true=强制使用分片，false=强制使用完整LMDB
 
 codes_dir_no_aug: "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_drugs/20260113/lightning_logs/version_1/checkpoints/code_no_aug/"
-codes_dir_with_aug: "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_drugs/20260113/lightning_logs/version_1/checkpoints/codes_no_shuffle/"
+# codes_dir_with_aug: "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_drugs/20260113/lightning_logs/version_0/checkpoints/codes_no_shuffle/"
 
 # training params
 num_epochs: 5000
 dset:
-  batch_size: 30
-  num_workers: 4
+  batch_size: 24
+  num_workers: 2
 
 ckpt_every_n_epochs: 1  # 每隔多少epoch保存一次ckpt
 decoder:
   code_dim: 384 # 和encoder的code_dim一致
 
 # optim params
-lr: 5e-4 # 1e-3 # 5e-4
+lr: 1e-3 # 1e-3 # 5e-4
 use_lr_schedule: 0
 num_warmup_iter: 4000
 wd: 1e-6

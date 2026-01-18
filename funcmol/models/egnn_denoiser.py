@@ -156,14 +156,23 @@ class GNNDenoiser(nn.Module):
         # 构建图 - 直接在这里实现
         # 使用预创建的网格坐标
         n_grid_actual = self.grid_size ** 3
+        
+        # 检查输入维度是否匹配
+        if n_grid != n_grid_actual:
+            raise ValueError(
+                f"Input grid size mismatch: expected n_grid={n_grid_actual} (grid_size={self.grid_size}^3), "
+                f"but got n_grid={n_grid} from input shape {y.shape}. "
+                f"Please ensure the input tensor has the correct second dimension."
+            )
+        
         grid_coords = self.grid_coords.to(self.device)  # [n_grid, 3]
         
         # 为每个batch复制网格坐标
         grid_coords = grid_coords.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, n_grid, 3]
         grid_coords = grid_coords.reshape(-1, 3)  # [batch_size * n_grid, 3]
         
-        # 创建batch索引
-        grid_batch = torch.arange(batch_size, device=self.device).repeat_interleave(n_grid_actual)
+        # 创建batch索引 - 使用实际的 n_grid 而不是 n_grid_actual
+        grid_batch = torch.arange(batch_size, device=self.device).repeat_interleave(n_grid)
         
         # 使用 radius_graph 构建图
         edge_index = radius_graph(

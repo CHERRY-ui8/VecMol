@@ -33,11 +33,13 @@ class CodeDataset(Dataset):
         codes_dir: str = None,
         num_augmentations = None,  # 数据增强数量，用于查找对应的LMDB文件
         use_sharded_lmdb: bool = None,  # 是否使用分片LMDB。None表示自动检测，True强制使用分片，False强制使用完整LMDB
+        load_position_weights: bool = True,  # 是否加载position_weights文件
     ):
         self.dset_name = dset_name
         self.split = split
         self.codes_dir = os.path.join(codes_dir, self.split)
         self.num_augmentations = num_augmentations
+        self.load_position_weights = load_position_weights  # 保存配置
         
         # 检查是否存在position_weights文件
         self.position_weights = None
@@ -120,10 +122,12 @@ class CodeDataset(Dataset):
         if not lmdb_loaded:
             # 检查是否有多个 codes 文件
             # 查找 codes_aug{num}_XXX.pt 格式的文件
+            # 排除 keys 文件（codes_keys.pt, codes_aug*_keys.pt 等）
             list_codes = [
                 f for f in os.listdir(self.codes_dir)
                 if os.path.isfile(os.path.join(self.codes_dir, f)) and \
-                f.startswith("codes") and f.endswith(".pt")
+                f.startswith("codes") and f.endswith(".pt") and \
+                not f.endswith("_keys.pt")  # 排除 keys 文件
             ]
             
             # 如果提供了num_augmentations 且是 train split，查找对应格式的文件
@@ -251,6 +255,11 @@ class CodeDataset(Dataset):
         print(f"  | Using LMDB database: {lmdb_path}")
         print(f"  | Database contains {len(self.keys)} codes")
         
+        # 如果配置中禁用了position_weights，跳过加载
+        if not self.load_position_weights:
+            print(f"  | Position weights loading disabled, skipping")
+            return
+        
         # 检查是否存在position_weights文件（LMDB格式）
         # 只有 train split 使用数据增强格式（position_weights_aug{num}.lmdb）
         # val/test split 使用默认格式（position_weights.lmdb 或 position_weights_v2.lmdb）
@@ -352,7 +361,11 @@ class CodeDataset(Dataset):
     def __len__(self):
         if hasattr(self, 'use_lmdb') and self.use_lmdb:
             return len(self.keys)
-        return self.curr_codes.shape[0]
+        # 处理 curr_codes 可能是 list 或数组的情况
+        if hasattr(self.curr_codes, 'shape'):
+            return self.curr_codes.shape[0]
+        else:
+            return len(self.curr_codes)
 
     def __getitem__(self, index):
         if hasattr(self, 'use_lmdb') and self.use_lmdb:
@@ -362,6 +375,34 @@ class CodeDataset(Dataset):
                 code = self._getitem_lmdb(index)
         else:
             code = self.curr_codes[index]
+        
+        # 确保 code 是 tensor，如果不是则转换或报错
+        if not isinstance(code, torch.Tensor):
+            if isinstance(code, str):
+                # 如果 code 是字符串，可能是 key 被错误返回了，或者是数据损坏
+                raise TypeError(
+                    f"Expected tensor but got string at index {index}. "
+                    f"This might indicate:\n"
+                    f"  1. Data corruption in LMDB (stored value is string instead of tensor)\n"
+                    f"  2. Key was returned instead of value\n"
+                    f"  3. Wrong data format in codes file\n"
+                    f"Code value (first 200 chars): {code[:200] if len(code) > 200 else code}\n"
+                    f"Code type: {type(code)}"
+                )
+            # 尝试转换为 tensor（适用于 numpy array 等情况）
+            try:
+                if hasattr(code, '__array__'):
+                    # 如果是 numpy array 或其他可转换为 tensor 的类型
+                    code = torch.from_numpy(code.__array__()) if hasattr(code, '__array__') else torch.tensor(code)
+                else:
+                    code = torch.tensor(code)
+            except (TypeError, ValueError, RuntimeError) as e:
+                raise TypeError(
+                    f"Cannot convert code at index {index} to tensor.\n"
+                    f"  Type: {type(code)}\n"
+                    f"  Value preview: {str(code)[:200] if not isinstance(code, (list, dict, torch.Tensor)) else 'complex object'}\n"
+                    f"  Original error: {e}"
+                ) from e
         
         # 如果存在position_weights，一起返回
         if self.use_position_weights:
@@ -497,10 +538,12 @@ class CodeDataset(Dataset):
     def _load_position_weights_files(self):
         """加载position_weights文件（文件格式，非LMDB）"""
         # 查找position_weights文件（支持多个augmentation版本）
+        # 排除 _keys.pt 文件（这些是索引文件，不是权重文件）
         list_weights = [
             f for f in os.listdir(self.codes_dir)
             if os.path.isfile(os.path.join(self.codes_dir, f)) and \
-            f.startswith("position_weights") and f.endswith(".pt")
+            f.startswith("position_weights") and f.endswith(".pt") and \
+            not f.endswith("_keys.pt")
         ]
         
         if list_weights:
@@ -522,13 +565,21 @@ class CodeDataset(Dataset):
                 for weights_file in numbered_weights:
                     weights_path = os.path.join(self.codes_dir, weights_file)
                     weights = torch.load(weights_path, weights_only=False)
+                    # 确保加载的是tensor，而不是list或其他类型
+                    if not isinstance(weights, torch.Tensor):
+                        print(f"  | WARNING: {weights_file} is not a tensor (type: {type(weights)}), skipping")
+                        continue
                     all_weights.append(weights)
                     print(f"  |   - {weights_file}: shape {weights.shape}")
                 
                 # 合并所有augmentation版本
-                self.position_weights = torch.cat(all_weights, dim=0)
-                self.use_position_weights = True
-                print(f"  | Merged position_weights shape: {self.position_weights.shape}")
+                if len(all_weights) > 0:
+                    self.position_weights = torch.cat(all_weights, dim=0)
+                    self.use_position_weights = True
+                    print(f"  | Merged position_weights shape: {self.position_weights.shape}")
+                else:
+                    print(f"  | WARNING: No valid position_weights files found, skipping position weights")
+                    self.use_position_weights = False
                 
                 # 验证长度是否匹配
                 if hasattr(self, 'curr_codes'):
@@ -637,7 +688,91 @@ class CodeDataset(Dataset):
         
         code_path = os.path.join(self.codes_dir, self.list_codes[0])
         print(">> loading codes: ", code_path)
-        self.curr_codes = torch.load(code_path, weights_only=False)
+        
+        # 检查文件名，防止误加载 keys 文件
+        filename = os.path.basename(code_path)
+        if filename.endswith("_keys.pt") or "keys" in filename.lower():
+            raise ValueError(
+                f"ERROR: Attempted to load a KEYS file as CODES file!\n"
+                f"  File: {code_path}\n"
+                f"  Keys files contain string identifiers, not tensor data.\n"
+                f"  Please check your file list and ensure codes files are correctly named.\n"
+                f"  Expected: codes.pt, codes_*.pt, or codes_aug*_*.pt\n"
+                f"  Got: {filename}"
+            )
+        
+        loaded_data = torch.load(code_path, weights_only=False)
+        
+        # 检查加载的数据格式
+        if isinstance(loaded_data, torch.Tensor):
+            # 正常情况：tensor 格式
+            self.curr_codes = loaded_data
+            print(f"  | Loaded codes as tensor: shape {self.curr_codes.shape}")
+        elif isinstance(loaded_data, list):
+            # 可能是旧版本格式：list of tensors
+            if len(loaded_data) > 0 and isinstance(loaded_data[0], torch.Tensor):
+                # 尝试将 list of tensors 转换为单个 tensor
+                try:
+                    self.curr_codes = torch.stack(loaded_data) if len(loaded_data) > 0 else torch.tensor([])
+                    print(f"  | Converted list of {len(loaded_data)} tensors to single tensor: shape {self.curr_codes.shape}")
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Cannot convert list of tensors to single tensor. "
+                        f"This might indicate inconsistent tensor shapes in the list. "
+                        f"Error: {e}\n"
+                        f"Please check the codes file format or regenerate codes files."
+                    ) from e
+            else:
+                # 检查是否是 keys 文件被错误加载
+                first_elem_type = type(loaded_data[0]) if len(loaded_data) > 0 else 'empty list'
+                is_keys_file = (isinstance(loaded_data, list) and 
+                               len(loaded_data) > 0 and 
+                               isinstance(loaded_data[0], str) and
+                               all(isinstance(x, str) for x in loaded_data[:10]))  # 检查前10个元素
+                
+                # 构建详细的错误信息
+                error_msg = f"\n{'='*80}\n"
+                error_msg += f"ERROR: Loaded file contains list of strings, not tensors!\n"
+                error_msg += f"{'='*80}\n"
+                error_msg += f"File path: {code_path}\n"
+                error_msg += f"File size: {os.path.getsize(code_path) / (1024*1024):.2f} MB\n"
+                error_msg += f"List length: {len(loaded_data)}\n"
+                error_msg += f"Element type: {first_elem_type}\n"
+                
+                if len(loaded_data) > 0:
+                    error_msg += f"First few elements: {loaded_data[:5]}\n"
+                
+                if is_keys_file:
+                    error_msg += f"\n⚠️  DIAGNOSIS: This looks like a KEYS file, not a CODES file!\n"
+                    error_msg += f"   Keys files contain string identifiers (e.g., ['0', '1', '2', ...])\n"
+                    error_msg += f"   Codes files should contain tensors.\n\n"
+                    error_msg += f"   Possible causes:\n"
+                    error_msg += f"   1. Wrong file was loaded (keys file instead of codes file)\n"
+                    error_msg += f"   2. File naming issue (codes file was saved with wrong name)\n"
+                    error_msg += f"   3. File corruption or wrong format\n\n"
+                    error_msg += f"   Expected codes file format:\n"
+                    error_msg += f"     - Single tensor: torch.Tensor with shape [N, ...]\n"
+                    error_msg += f"     - Or list of tensors: [torch.Tensor, torch.Tensor, ...]\n\n"
+                    error_msg += f"   Check if you have:\n"
+                    error_msg += f"     - codes.pt or codes_*.pt (should contain tensors)\n"
+                    error_msg += f"     - codes_keys.pt (contains strings, this is what was loaded)\n"
+                else:
+                    error_msg += f"\n⚠️  This file contains unexpected data format.\n"
+                    error_msg += f"   Expected: torch.Tensor or list of torch.Tensor\n"
+                    error_msg += f"   Got: list of {first_elem_type}\n"
+                
+                error_msg += f"{'='*80}\n"
+                raise TypeError(error_msg)
+        else:
+            raise TypeError(
+                f"Unexpected codes format. Expected torch.Tensor or list of torch.Tensor, "
+                f"got: {type(loaded_data)}\n"
+                f"This might indicate:\n"
+                f"  1. Codes file was saved in wrong format\n"
+                f"  2. File corruption\n"
+                f"  3. Wrong file was loaded\n"
+                f"Please check the codes file or regenerate it."
+            )
 
 
 def create_code_loaders(
@@ -717,7 +852,22 @@ def create_code_loaders(
         print(f">> {split} split: using default codes.lmdb format (no augmentation)")
     
     # 从配置中读取是否使用分片LMDB（可选参数）
-    use_sharded_lmdb = config.get("use_sharded_lmdb", None)
+    # 对于 train split：使用配置中的值（如果配置了 True，就使用 True）
+    # 对于 val/test split：强制不使用分片LMDB（设置为 None 或 False），使用完整的 LMDB
+    use_sharded_lmdb_config = config.get("use_sharded_lmdb", None)
+    if split == "train":
+        use_sharded_lmdb = use_sharded_lmdb_config
+    else:
+        # val/test split 不使用分片LMDB，设置为 None 以自动回退到完整LMDB
+        use_sharded_lmdb = None
+        if use_sharded_lmdb_config is True:
+            print(f">> {split} split: use_sharded_lmdb is set to None (auto-detect, will fallback to full LMDB)")
+    
+    # 检查是否应该加载 position_weights
+    position_weight_config = config.get("position_weight", {})
+    position_weight_enabled = position_weight_config.get("enabled", False)
+    # 根据配置决定是否加载 position_weights
+    load_position_weights = position_weight_enabled
     
     dset = CodeDataset(
         dset_name=config["dset"]["dset_name"],
@@ -725,13 +875,16 @@ def create_code_loaders(
         split=split,
         num_augmentations=num_augmentations,
         use_sharded_lmdb=use_sharded_lmdb,
+        load_position_weights=load_position_weights,
     )
 
-    # 如果在配置中显式关闭了 use_augmented_codes，则不使用预计算的 position_weights
+    # 如果在配置中显式关闭了 use_augmented_codes 或 position_weight.enabled=False，则不使用预计算的 position_weights
     # 这样可以避免在没有对应 LMDB / 文件时仍然尝试访问 position_weights_keys 等属性
-    if not config.get("use_augmented_codes", False):
+    if not config.get("use_augmented_codes", False) or not position_weight_enabled:
         if isinstance(dset, CodeDataset):
             dset.use_position_weights = False
+            if not position_weight_enabled:
+                print(f">> Position weights disabled in config, skipping position_weights loading")
 
     # reduce the dataset size for debugging
     if config["debug"] or split in ["val", "test"]:
@@ -741,25 +894,21 @@ def create_code_loaders(
         if len(dset) > len(indexes):
             dset = Subset(dset, indexes)  # Smaller training set for debugging
 
-    # DataLoader配置：默认不使用prefetch_factor和persistent_workers，以匹配旧版本的流畅行为
-    # 这些参数可以通过配置显式启用，但默认禁用以避免潜在的性能问题
+    # DataLoader配置：中和配置（80%情况最优）
+    # num_workers从config文件读取，不在此处限制
     loader_kwargs = {
         "batch_size": min(config["dset"]["batch_size"], len(dset)),
         "num_workers": config["dset"]["num_workers"],
         "shuffle": True if split == "train" else False,
-        "pin_memory": True,
+        "pin_memory": True,  # 中和配置：可以开启
         "drop_last": True,
+        "persistent_workers": True,  # 中和配置：可以开启
+        "prefetch_factor": 2,  # 中和配置：推荐值
     }
     
-    # 只有在配置中显式指定时才添加这些参数
+    # 如果配置中显式指定了prefetch_factor，则使用配置值
     if "prefetch_factor" in config["dset"]:
         loader_kwargs["prefetch_factor"] = config["dset"]["prefetch_factor"]
-    
-    if "persistent_workers" in config["dset"]:
-        loader_kwargs["persistent_workers"] = config["dset"]["persistent_workers"]
-    elif config["dset"]["num_workers"] > 0:
-        # 默认禁用persistent_workers，避免LMDB连接问题
-        loader_kwargs["persistent_workers"] = False
     
     loader = torch.utils.data.DataLoader(dset, **loader_kwargs)
     # fabric.print(f">> {split} set size: {len(dset)}")

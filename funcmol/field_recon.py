@@ -32,9 +32,8 @@ This script can be used for both field type evaluation (stage1) and neural field
 import os
 # 注意：在spawn模式下，子进程会重新执行这个脚本
 # 如果环境变量_WORKER_GPU_ID已设置，说明这是worker子进程，需要先设置CUDA_VISIBLE_DEVICES
-if "_WORKER_GPU_ID" in os.environ:
-    os.environ["CUDA_VISIBLE_DEVICES"] = os.environ["_WORKER_GPU_ID"]
-    del os.environ["_WORKER_GPU_ID"]  # 清理临时环境变量
+from funcmol.utils.misc import setup_worker_gpu_environment
+setup_worker_gpu_environment()
 
 import torch
 import random
@@ -48,6 +47,12 @@ from omegaconf import DictConfig, OmegaConf, ListConfig
 from funcmol.dataset.dataset_field import create_gnf_converter
 from funcmol.utils.utils_nf import load_neural_field
 from funcmol.dataset.dataset_field import FieldDataset
+from funcmol.utils.misc import (
+    parse_gpu_list_from_config,
+    setup_multiprocessing_spawn,
+    create_worker_process_with_gpu,
+    distribute_tasks_to_gpus
+)
 import multiprocessing
 import threading
 
@@ -511,54 +516,15 @@ def main(config: DictConfig) -> None:
     mol_save_dir = output_dir / "molecule"
     mol_save_dir.mkdir(parents=True, exist_ok=True)
     
-    # 检测可用的GPU数量
-    num_gpus = torch.cuda.device_count()
-    
-    # 获取要使用的GPU列表（优先级：配置文件 > 环境变量 > 所有GPU）
-    gpu_list_config = config.get('gpu_list', None)
-    main_cuda_visible = None  # 初始化变量
-    
-    if gpu_list_config is not None:
-        # 从配置文件读取GPU列表
-        # 处理 Hydra 的 ListConfig 类型
-        if isinstance(gpu_list_config, ListConfig):
-            main_gpu_list = [int(gpu) for gpu in OmegaConf.to_container(gpu_list_config, resolve=True)]
-        elif isinstance(gpu_list_config, (list, tuple)):
-            main_gpu_list = [int(gpu) for gpu in gpu_list_config]
-        elif isinstance(gpu_list_config, str):
-            main_gpu_list = [int(x.strip()) for x in gpu_list_config.split(",")]
-        else:
-            main_gpu_list = [int(gpu_list_config)]
-        # 设置环境变量，确保子进程也使用这些GPU
-        main_cuda_visible = ",".join(str(gpu) for gpu in main_gpu_list)
-        os.environ["CUDA_VISIBLE_DEVICES"] = main_cuda_visible
-        print(f"Using GPUs from config: {main_gpu_list}")
-    else:
-        # 获取主进程的CUDA_VISIBLE_DEVICES设置
-        main_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
-        if main_cuda_visible:
-            # 解析主进程可见的GPU列表
-            main_gpu_list = [int(x.strip()) for x in main_cuda_visible.split(",")]
-            print(f"Using GPUs from CUDA_VISIBLE_DEVICES: {main_cuda_visible}, physical GPUs: {main_gpu_list}")
-        else:
-            # 如果没有设置，使用所有GPU
-            main_gpu_list = list(range(num_gpus))
-            print(f"No GPU configuration found, using all {num_gpus} GPUs: {main_gpu_list}")
-    
-    # 更新num_gpus为实际使用的GPU数量
+    # 解析GPU配置（使用共用函数）
+    main_gpu_list, main_cuda_visible = parse_gpu_list_from_config(config, default_use_all=True)
     num_gpus = len(main_gpu_list)
     use_multi_gpu = config.get('use_multi_gpu', True) and num_gpus > 1
     
     if use_multi_gpu:
         print(f"Detected {num_gpus} GPUs, using multi-GPU parallel processing")
-        # 将分子索引分配给不同的GPU（使用逻辑GPU ID 0到num_gpus-1）
-        gpu_assignments = {}
-        for idx, sample_idx in enumerate(sample_indices):
-            logical_gpu_id = idx % num_gpus  # 逻辑GPU ID（0到num_gpus-1）
-            if logical_gpu_id not in gpu_assignments:
-                gpu_assignments[logical_gpu_id] = []
-            gpu_assignments[logical_gpu_id].append(sample_idx)
-        
+        # 将分子索引分配给不同的GPU（使用共用函数）
+        gpu_assignments = distribute_tasks_to_gpus(sample_indices, num_gpus)
         print(f"GPU assignments (logical GPU ID -> sample count): {[(gpu_id, len(indices)) for gpu_id, indices in gpu_assignments.items()]}")
         
         # 准备多进程参数
@@ -585,10 +551,8 @@ def main(config: DictConfig) -> None:
                         nf_pretrained_path, nf_pretrained_path, config_dict
                     ))
         
-        # 使用多进程并行处理
-        # 设置multiprocessing的start method为'spawn'，因为CUDA不支持fork模式
-        if multiprocessing.get_start_method(allow_none=True) != 'spawn':
-            multiprocessing.set_start_method('spawn', force=True)
+        # 使用多进程并行处理（使用共用函数）
+        setup_multiprocessing_spawn()
         
         num_workers_config = config.get('num_workers', num_gpus)
         if num_workers_config is None:
@@ -631,24 +595,16 @@ def main(config: DictConfig) -> None:
         result_queue = Queue()
         processes = []
         
-        # 为每个GPU创建worker进程（使用模块级别的worker_process函数）
+        # 为每个GPU创建worker进程（使用共用函数）
         for logical_gpu_id, tasks in tasks_by_gpu.items():
             physical_gpu_id = main_gpu_list[logical_gpu_id] if main_cuda_visible else logical_gpu_id
-            # 通过环境变量传递GPU ID，这样子进程在重新执行脚本时会先设置CUDA_VISIBLE_DEVICES
-            # 注意：在Python 3.9之前，Process不支持env参数，所以我们需要在worker_process中设置
-            # 但我们可以通过修改os.environ来实现（虽然这不是最佳实践，但在spawn模式下可以工作）
-            original_env = os.environ.get("_WORKER_GPU_ID", None)
-            os.environ["_WORKER_GPU_ID"] = str(physical_gpu_id)
-            try:
-                p = Process(target=worker_process, args=(logical_gpu_id, physical_gpu_id, tasks, result_queue))
-                p.start()
-                processes.append(p)
-            finally:
-                # 恢复原始环境变量（如果存在）
-                if original_env is not None:
-                    os.environ["_WORKER_GPU_ID"] = original_env
-                elif "_WORKER_GPU_ID" in os.environ:
-                    del os.environ["_WORKER_GPU_ID"]
+            p = create_worker_process_with_gpu(
+                worker_func=worker_process,
+                logical_gpu_id=logical_gpu_id,
+                physical_gpu_id=physical_gpu_id,
+                args=(logical_gpu_id, physical_gpu_id, tasks, result_queue)
+            )
+            processes.append(p)
         
         # 收集结果并实时写入CSV（在主进程中，避免多进程写入冲突）
         results = []

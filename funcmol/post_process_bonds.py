@@ -5,25 +5,136 @@ OpenBabel连键后处理脚本
 从包含不带键SDF文件的目录中读取分子，使用OpenBabel添加化学键，
 并保存为带键的SDF文件。
 
+功能：
+1. 使用OpenBabel从原子坐标推断化学键
+2. 可选地自动补齐缺少的H原子（根据价态计算）
+3. 去除没有键连接的孤立原子（如Cl、Br等）
+4. 补H时使用标准键长（根据原子类型：C-H=1.09Å, O-H=0.96Å等）
+
 用法: python post_process_bonds.py
 """
 
 # 硬编码的输入和输出目录
-input_dir = "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20260105/samples/20260105_version_1_last_withbonds/molecule"
-# output_dir = "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251222/samples/20251222_version_0_last_withbonds/molecule"
-output_dir = "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20260105/samples/20260105_version_1_last_withbonds_addH/molecule"
+exp_date = "20260116"
+exp_version = "version_2"
+ckpt_name = "epoch_9"
+dataset_name = "fm_drugs"  # 数据集名称：fm_qm9 或 fm_drugs
+input_dir = f"/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/{dataset_name}/{exp_date}/samples/{exp_date}_{exp_version}_{ckpt_name}/molecule"
+output_dir = f"/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/{dataset_name}/{exp_date}/samples/{exp_date}_{exp_version}_{ckpt_name}_withbonds_addH/molecule"
 add_hydrogens = True # 是否自动补齐缺少的H原子（True: 补齐, False: 不补齐）
+keep_largest_component = False # 是否只保留最大连通分支（True: 只保留最大分支, False: 保留所有有键连接的片段）
+
+# exp_date = "20251225"
+# exp_version = "version_1"
+# ckpt_name = "last"
+# dataset_name = "fm_qm9"  # 数据集名称：fm_qm9 或 fm_drugs
+# input_dir = f"/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/{dataset_name}/{exp_date}/samples/{exp_date}_{exp_version}_{ckpt_name}/molecule"
+# output_dir = f"/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/{dataset_name}/{exp_date}/samples/{exp_date}_{exp_version}_{ckpt_name}_withbonds_addH/molecule"
+# add_hydrogens = True # 是否自动补齐缺少的H原子（True: 补齐, False: 不补齐）
+# keep_largest_component = True # 是否只保留最大连通分支（True: 只保留最大分支, False: 保留所有有键连接的片段）
+
 
 from pathlib import Path
 from tqdm import tqdm
-from funcmol.utils.utils_base import add_bonds_with_openbabel, xyz_to_sdf
+import numpy as np
+from funcmol.utils.utils_base import add_bonds_with_openbabel, xyz_to_sdf, add_hydrogens_manually_from_sdf
 
 # 禁用RDKit警告
 from rdkit import RDLogger
 RDLogger.DisableLog('rdApp.*')
 
 
-def process_sdf_file(input_sdf_path: Path, output_sdf_path: Path, elements: list, add_hydrogens: bool = True) -> bool:
+def remove_isolated_atoms_from_sdf(sdf_content: str) -> str:
+    """
+    从SDF内容中去除没有键连接的孤立原子
+    
+    
+    Args:
+        sdf_content: SDF格式字符串
+        
+    Returns:
+        去除孤立原子后的SDF格式字符串
+    """
+    try:
+        from rdkit import Chem
+        
+        # 解析SDF
+        mol = Chem.MolFromMolBlock(sdf_content, sanitize=False)
+        if mol is None:
+            return sdf_content
+        
+        # 如果没有键，检查是否所有原子都是孤立的
+        if mol.GetNumBonds() == 0:
+            # 如果只有一个原子，保留它（可能是单原子分子）
+            if mol.GetNumAtoms() == 1:
+                return sdf_content
+            # 否则返回空（所有原子都是孤立的）
+            return ""
+        
+        # 找到所有有键连接的原子
+        atoms_with_bonds = set()
+        for bond in mol.GetBonds():
+            atoms_with_bonds.add(bond.GetBeginAtomIdx())
+            atoms_with_bonds.add(bond.GetEndAtomIdx())
+        
+        # 如果所有原子都有键，直接返回
+        if len(atoms_with_bonds) == mol.GetNumAtoms():
+            return sdf_content
+        
+        # 如果没有有效键的原子，返回空
+        if len(atoms_with_bonds) == 0:
+            return ""
+        
+        # 创建新的分子，只包含有键的原子
+        new_mol = Chem.RWMol()
+        
+        # 创建原子索引映射（旧索引 -> 新索引）
+        atom_map = {}
+        for old_idx in sorted(atoms_with_bonds):
+            atom = mol.GetAtomWithIdx(old_idx)
+            new_idx = new_mol.AddAtom(atom)
+            atom_map[old_idx] = new_idx
+        
+        # 添加键（只添加两个原子都在新分子中的键）
+        for bond in mol.GetBonds():
+            begin_old = bond.GetBeginAtomIdx()
+            end_old = bond.GetEndAtomIdx()
+            if begin_old in atom_map and end_old in atom_map:
+                begin_new = atom_map[begin_old]
+                end_new = atom_map[end_old]
+                new_mol.AddBond(begin_new, end_new, bond.GetBondType())
+        
+        # 转换为普通分子对象
+        new_mol = new_mol.GetMol()
+        
+        # 复制坐标
+        if mol.GetNumConformers() > 0:
+            from rdkit.Geometry import Point3D
+            conf = mol.GetConformer()
+            new_conf = Chem.Conformer(new_mol.GetNumAtoms())
+            for old_idx, new_idx in atom_map.items():
+                pos = conf.GetAtomPosition(old_idx)
+                new_conf.SetAtomPosition(new_idx, pos)
+            new_mol.AddConformer(new_conf)
+        
+        # 转换回SDF格式
+        try:
+            sdf_block = Chem.MolToMolBlock(new_mol)
+            if sdf_block:
+                if not sdf_block.strip().endswith("$$$$"):
+                    sdf_block = sdf_block.rstrip() + "\n$$$$\n"
+                return sdf_block
+        except Exception as e:
+            print(f"警告: 转换去除孤立原子后的分子到SDF失败: {e}")
+            return sdf_content
+        
+        return sdf_content
+    except Exception as e:
+        print(f"警告: 去除孤立原子失败: {e}")
+        return sdf_content
+
+
+def process_sdf_file(input_sdf_path: Path, output_sdf_path: Path, elements: list, add_hydrogens: bool = True, keep_largest_component: bool = False) -> bool:
     """
     处理单个SDF文件，添加OpenBabel键
     
@@ -32,6 +143,7 @@ def process_sdf_file(input_sdf_path: Path, output_sdf_path: Path, elements: list
         output_sdf_path: 输出SDF文件路径（带键）
         elements: 元素列表，例如 ["C", "H", "O", "N", "F"]
         add_hydrogens: 是否自动补齐缺少的H原子（True: 补齐, False: 不补齐）
+        keep_largest_component: 是否只保留最大连通分支（True: 只保留最大分支, False: 保留所有有键连接的片段）
         
     Returns:
         bool: 是否成功处理
@@ -70,18 +182,83 @@ def process_sdf_file(input_sdf_path: Path, output_sdf_path: Path, elements: list
                 print(f"警告: 未知元素 {atom_symbol}，跳过")
                 return False
         
-        # 使用OpenBabel添加键
+        # 使用OpenBabel添加键（先不补H，以便在补H之前排除单原子碎片）
         sdf_with_bonds = add_bonds_with_openbabel(
             coords,
             types,
             elements,
             fallback_to_xyz_to_sdf=xyz_to_sdf,
-            add_hydrogens=add_hydrogens
+            add_hydrogens=False  # 先不补H，add_hydrogens_manually_from_sdf内部会排除单原子碎片后再补H
         )
         
         if not sdf_with_bonds:
             print(f"警告: OpenBabel处理失败 {input_sdf_path}")
             return False
+        
+        # 去除孤立原子（没有键连接的原子）
+        sdf_with_bonds = remove_isolated_atoms_from_sdf(sdf_with_bonds)
+        
+        # 如果去除孤立原子后SDF为空，跳过
+        if not sdf_with_bonds or sdf_with_bonds.strip() == "":
+            print(f"警告: 去除孤立原子后分子为空 {input_sdf_path}")
+            return False
+        
+        # 如果启用只保留最大连通分支，提取最大分支（在补H之前完成）
+        if keep_largest_component:
+            try:
+                mol = Chem.MolFromMolBlock(sdf_with_bonds, sanitize=False)
+                if mol is not None and mol.GetNumBonds() > 0:
+                    # 获取所有连通分量
+                    mol_frags = Chem.rdmolops.GetMolFrags(mol, asMols=True, sanitizeFrags=False)
+                    if len(mol_frags) > 0:
+                        # 选择原子数最多的连通分量
+                        largest_mol = max(mol_frags, key=lambda m: m.GetNumAtoms())
+                        # 转换回SDF格式
+                        sdf_block = Chem.MolToMolBlock(largest_mol)
+                        if sdf_block:
+                            if not sdf_block.strip().endswith("$$$$"):
+                                sdf_block = sdf_block.rstrip() + "\n$$$$\n"
+                            sdf_with_bonds = sdf_block
+            except Exception as e:
+                print(f"警告: 提取最大连通分支失败: {e}")
+            
+            # 如果提取最大分支后SDF为空，跳过
+            if not sdf_with_bonds or sdf_with_bonds.strip() == "":
+                print(f"警告: 提取最大连通分支后分子为空 {input_sdf_path}")
+                return False
+        
+        # 补H原子（add_hydrogens_manually_from_sdf内部会在补H之前排除单原子碎片）
+        if add_hydrogens:
+            sdf_with_h = add_hydrogens_manually_from_sdf(sdf_with_bonds)
+            if sdf_with_h is not None:
+                sdf_with_bonds = sdf_with_h
+            else:
+                print(f"警告: 补H失败，继续使用未补H的版本 {input_sdf_path}")
+        
+        # 如果启用只保留最大连通分支，提取最大分支
+        if keep_largest_component:
+            try:
+                from rdkit import Chem
+                mol = Chem.MolFromMolBlock(sdf_with_bonds, sanitize=False)
+                if mol is not None and mol.GetNumBonds() > 0:
+                    # 获取所有连通分量
+                    mol_frags = Chem.rdmolops.GetMolFrags(mol, asMols=True, sanitizeFrags=False)
+                    if len(mol_frags) > 0:
+                        # 选择原子数最多的连通分量
+                        largest_mol = max(mol_frags, key=lambda m: m.GetNumAtoms())
+                        # 转换回SDF格式
+                        sdf_block = Chem.MolToMolBlock(largest_mol)
+                        if sdf_block:
+                            if not sdf_block.strip().endswith("$$$$"):
+                                sdf_block = sdf_block.rstrip() + "\n$$$$\n"
+                            sdf_with_bonds = sdf_block
+            except Exception as e:
+                print(f"警告: 提取最大连通分支失败: {e}")
+            
+            # 如果提取最大分支后SDF为空，跳过
+            if not sdf_with_bonds or sdf_with_bonds.strip() == "":
+                print(f"警告: 提取最大连通分支后分子为空 {input_sdf_path}")
+                return False
         
         # 保存带键的SDF文件
         output_sdf_path.parent.mkdir(parents=True, exist_ok=True)
@@ -99,8 +276,8 @@ def main():
     input_dir_path = Path(input_dir)
     output_dir_path = Path(output_dir)
     
-    # 默认元素列表
-    elements = ['C', 'H', 'O', 'N', 'F']
+    # 默认元素列表（与 drugs 数据集配置一致：C, H, O, N, F, S, Cl, Br）
+    elements = ['C', 'H', 'O', 'N', 'F', 'S', 'Cl', 'Br']
     
     if not input_dir_path.exists():
         print(f"错误: 输入目录不存在: {input_dir_path}")
@@ -123,6 +300,7 @@ def main():
     print(f"输出目录: {output_dir_path}")
     print(f"元素列表: {elements}")
     print(f"自动补齐H原子: {add_hydrogens}")
+    print(f"只保留最大连通分支: {keep_largest_component}")
     print("="*80)
     
     success_count = 0
@@ -136,7 +314,7 @@ def main():
             print(f"跳过: {output_path.name} 已存在")
             continue
         
-        if process_sdf_file(sdf_file, output_path, elements, add_hydrogens=add_hydrogens):
+        if process_sdf_file(sdf_file, output_path, elements, add_hydrogens=add_hydrogens, keep_largest_component=keep_largest_component):
             success_count += 1
     
     print("="*80)

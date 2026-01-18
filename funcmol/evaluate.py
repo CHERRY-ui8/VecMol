@@ -7,18 +7,26 @@ SDF分子评估脚本
 - 如果post_process_bonds.py中add_hydrogens=True，生成的*_obabel.sdf文件包含H原子
 - 本脚本优先加载*_obabel.sdf文件，因此评估的是补H后的分子
 - 键长分布、键角分布、原子种类分布等指标都会受到H原子的影响
+
+评估模式：
+- 默认模式（use_largest_component=False）：只去除孤立原子，保留所有有键连接的片段
+  - 用于计算single_fragment_rate、键长、键角等指标
+- 最大连通分支模式（use_largest_component=True）：提取最大连通分支
+  - 用于计算atoms_per_mol等只考虑最大片段的指标
 """
 
-# 配置参数：实验目录
-exp_dir = "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20260105/samples/20260105_version_1_last_withbonds_addH"
-
+exp_date = "20260116"
+exp_version = "version_2"
+ckpt_name = "epoch_9"
 # 数据集类型：'qm9' 或 'drugs'
-dataset_type = 'qm9'  # 设置为 'drugs' 以启用额外的 drugs 指标
-
+dataset_type = 'drugs'  # 设置为 'drugs' 以启用额外的 drugs 指标
+# 配置参数：实验目录
+exp_dir = f"/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_{dataset_type}/{exp_date}/samples/{exp_date}_{exp_version}_{ckpt_name}_withbonds_addH"
 # 测试集数据路径（用于分布比较）
-test_data_dir = "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/funcmol/dataset/data/qm9"  # QM9测试集数据目录
-# test_data_dir = "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/funcmol/dataset/data/drugs"  # Drugs测试集数据目录
+# test_data_dir = "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/funcmol/dataset/data/qm9"  # QM9测试集数据目录
+test_data_dir = "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/funcmol/dataset/data/drugs"  # Drugs测试集数据目录
 test_data_limit = None  # 限制测试集样本数量（用于加速计算，设为None则不限制）
+use_largest_component = True  # 是否使用最大连通分支模式
 
 import json
 import numpy as np
@@ -103,8 +111,19 @@ ATOM_VALENCY = {
 }
 
 # 原子序数到元素符号的映射
+# 包含 QM9 数据集（H, C, N, O, F）和 drugs 数据集常见元素（S, Cl, Br, P, I, B）
 ATOM_NUM_TO_SYMBOL = {
-    1: 'H', 6: 'C', 7: 'N', 8: 'O', 9: 'F'
+    1: 'H',   # 氢
+    5: 'B',   # 硼
+    6: 'C',   # 碳
+    7: 'N',   # 氮
+    8: 'O',   # 氧
+    9: 'F',   # 氟
+    15: 'P',  # 磷
+    16: 'S',  # 硫
+    17: 'Cl', # 氯
+    35: 'Br', # 溴
+    53: 'I',  # 碘
 }
 
 # 键类型映射
@@ -281,14 +300,110 @@ def extract_largest_connected_component(mol: Chem.Mol) -> Optional[Chem.Mol]:
         return mol  # 没有键，返回原分子
     
     try:
-        mol_frags = Chem.rdmolops.GetMolFrags(mol, asMols=True, sanitizeFrags=False)
-        if len(mol_frags) == 0:
+        # 保存原始conformer信息
+        original_conf = None
+        if mol.GetNumConformers() > 0:
+            original_conf = mol.GetConformer(0)
+        
+        # 获取片段（同时获取原子索引映射）
+        mol_frags_indices = Chem.rdmolops.GetMolFrags(mol, asMols=False)
+        if len(mol_frags_indices) == 0:
             return mol
+        
         # 选择原子数最多的连通分量
-        largest_mol = max(mol_frags, key=lambda m: m.GetNumAtoms())
+        largest_frag_indices = max(mol_frags_indices, key=len)
+        
+        # 获取对应的分子对象
+        mol_frags = Chem.rdmolops.GetMolFrags(mol, asMols=True, sanitizeFrags=False)
+        largest_frag_idx = mol_frags_indices.index(largest_frag_indices)
+        largest_mol = mol_frags[largest_frag_idx]
+        
+        # 如果原始分子有conformer，需要手动复制坐标到新分子
+        if original_conf is not None:
+            new_conf = Chem.Conformer(largest_mol.GetNumAtoms())
+            # 创建原子索引映射（原始分子索引 -> 片段中的索引）
+            atom_map = {old_idx: new_idx for new_idx, old_idx in enumerate(largest_frag_indices)}
+            for new_idx, old_idx in enumerate(largest_frag_indices):
+                pos = original_conf.GetAtomPosition(old_idx)
+                new_conf.SetAtomPosition(new_idx, pos)
+            largest_mol.RemoveAllConformers()
+            largest_mol.AddConformer(new_conf)
+        
         return largest_mol
     except Exception as e:
         print(f"警告: 提取最大连通分支失败: {e}")
+        return mol
+
+
+def remove_isolated_atoms(mol: Chem.Mol) -> Optional[Chem.Mol]:
+    """
+    去除分子中没有键连接的孤立原子，保留所有有键连接的片段
+    
+    Args:
+        mol: RDKit分子对象
+        
+    Returns:
+        去除孤立原子后的分子对象，如果失败返回原分子
+    """
+    if mol is None:
+        return mol
+    
+    try:
+        # 如果没有键，检查是否所有原子都是孤立的
+        if mol.GetNumBonds() == 0:
+            # 如果只有一个原子，保留它（可能是单原子分子）
+            if mol.GetNumAtoms() == 1:
+                return mol
+            # 否则返回None（所有原子都是孤立的）
+            return None
+        
+        # 找到所有有键连接的原子
+        atoms_with_bonds = set()
+        for bond in mol.GetBonds():
+            atoms_with_bonds.add(bond.GetBeginAtomIdx())
+            atoms_with_bonds.add(bond.GetEndAtomIdx())
+        
+        # 如果所有原子都有键，直接返回
+        if len(atoms_with_bonds) == mol.GetNumAtoms():
+            return mol
+        
+        # 创建新的分子，只包含有键的原子
+        from rdkit import Chem
+        from rdkit.Geometry import Point3D
+        
+        new_mol = Chem.RWMol()
+        
+        # 创建原子索引映射（旧索引 -> 新索引）
+        atom_map = {}
+        for old_idx in sorted(atoms_with_bonds):
+            atom = mol.GetAtomWithIdx(old_idx)
+            new_idx = new_mol.AddAtom(atom)
+            atom_map[old_idx] = new_idx
+        
+        # 添加键
+        for bond in mol.GetBonds():
+            begin_old = bond.GetBeginAtomIdx()
+            end_old = bond.GetEndAtomIdx()
+            if begin_old in atom_map and end_old in atom_map:
+                begin_new = atom_map[begin_old]
+                end_new = atom_map[end_old]
+                new_mol.AddBond(begin_new, end_new, bond.GetBondType())
+        
+        # 转换为普通分子对象
+        new_mol = new_mol.GetMol()
+        
+        # 复制坐标
+        if mol.GetNumConformers() > 0:
+            conf = mol.GetConformer()
+            new_conf = Chem.Conformer(new_mol.GetNumAtoms())
+            for old_idx, new_idx in atom_map.items():
+                pos = conf.GetAtomPosition(old_idx)
+                new_conf.SetAtomPosition(new_idx, pos)
+            new_mol.AddConformer(new_conf)
+        
+        return new_mol
+    except Exception as e:
+        print(f"警告: 去除孤立原子失败: {e}")
         return mol
 
 
@@ -482,21 +597,38 @@ def check_single_fragment(mol: Chem.Mol) -> bool:
         return False
 
 
-def compute_strain_energy(mol: Chem.Mol) -> Optional[float]:
+def compute_strain_energy(mol: Chem.Mol, verbose: bool = False) -> Tuple[Optional[float], bool]:
     """
     计算分子的应变能（生成构象的内能与UFF优化后构象的内能之差）
     
     Args:
         mol: RDKit分子对象（需要包含坐标信息）
+        verbose: 是否输出详细的错误信息（用于调试）
         
     Returns:
-        应变能（kcal/mol），如果计算失败返回None
+        (strain_energy, is_abnormal) 元组：
+        - strain_energy: 应变能（kcal/mol），如果计算失败返回None
+        - is_abnormal: 是否为异常值（>10000 kcal/mol或能量绝对值>1e6）
+        
+    注意：
+    - 正常应变能应该在几十到几百kcal/mol范围内
+    - 即使计算出的应变能异常高（>10000 kcal/mol），也会返回该值，但标记为异常
+    - 异常值会在summary文件中单独统计
     """
-    if mol is None or mol.GetNumConformers() == 0:
-        return None
+    if mol is None:
+        if verbose:
+            print("compute_strain_energy: mol is None")
+        return None, False
+    
+    if mol.GetNumConformers() == 0:
+        if verbose:
+            print(f"compute_strain_energy: 分子没有conformer（坐标信息），原子数={mol.GetNumAtoms()}")
+        return None, False
     
     if not DRUGS_METRICS_AVAILABLE:
-        return None
+        if verbose:
+            print("compute_strain_energy: DRUGS_METRICS_AVAILABLE is False")
+        return None, False
     
     try:
         # 复制分子以避免修改原始分子
@@ -516,29 +648,64 @@ def compute_strain_energy(mol: Chem.Mol) -> Optional[float]:
             # 使用 UFF 力场
             ff = AllChem.UFFGetMoleculeForceField(mol_copy, confId=0)
             if ff is None:
-                return None
+                if verbose:
+                    print(f"compute_strain_energy: UFFGetMoleculeForceField 返回 None，原子数={mol_copy.GetNumAtoms()}")
+                return None, False
             original_energy = ff.CalcEnergy()
-        except:
-            return None
+            
+            # 检查原始能量是否异常（通常应该在合理范围内）
+            is_abnormal = abs(original_energy) > 1e6
+        except Exception as e:
+            if verbose:
+                print(f"compute_strain_energy: 计算原始能量时出错: {e}")
+            return None, False
         
         # 优化构象
         try:
             # 使用 UFF 优化
-            AllChem.UFFOptimizeMolecule(mol_copy, confId=0, maxIters=200)
+            opt_result = AllChem.UFFOptimizeMolecule(mol_copy, confId=0, maxIters=200)
+            # opt_result[0] 表示是否收敛（0表示收敛，1表示未收敛）
+            if opt_result[0] != 0:
+                # 优化未收敛，可能结构有问题
+                if verbose:
+                    print(f"compute_strain_energy: UFF优化未收敛（返回码={opt_result[0]}）")
+                pass  # 继续计算，但结果可能不准确
             
             # 计算优化后的能量
             ff_optimized = AllChem.UFFGetMoleculeForceField(mol_copy, confId=0)
             if ff_optimized is None:
-                return None
+                if verbose:
+                    print(f"compute_strain_energy: 优化后UFFGetMoleculeForceField 返回 None")
+                return None, False
             optimized_energy = ff_optimized.CalcEnergy()
+            
+            # 检查优化后能量是否异常
+            if abs(optimized_energy) > 1e6:
+                is_abnormal = True
             
             # 应变能 = 原始能量 - 优化后能量
             strain_energy = original_energy - optimized_energy
-            return strain_energy
-        except:
-            return None
+            
+            # 异常值检测：正常应变能应该在几十到几百kcal/mol范围内
+            # 如果超过10000 kcal/mol，认为是异常值
+            if abs(strain_energy) > 10000.0:
+                is_abnormal = True
+            
+            # 检查是否为NaN或Inf
+            if not np.isfinite(strain_energy):
+                if verbose:
+                    print(f"compute_strain_energy: 应变能不是有限数: {strain_energy}")
+                return None, False
+            
+            return strain_energy, is_abnormal
+        except Exception as e:
+            if verbose:
+                print(f"compute_strain_energy: 优化或计算优化后能量时出错: {e}")
+            return None, False
     except Exception as e:
-        return None
+        if verbose:
+            print(f"compute_strain_energy: 外层异常: {e}")
+        return None, False
 
 
 def compute_ring_sizes(mol: Chem.Mol) -> List[int]:
@@ -887,45 +1054,73 @@ def compute_test_set_distributions(test_molecules: List[Chem.Mol], ds_type: str 
     return result
 
 
-def evaluate_single_molecule(mol: Chem.Mol, molecule_id: str, save_dir: Optional[Path] = None, ds_type: str = 'qm9') -> Dict:
+def evaluate_single_molecule(mol: Chem.Mol, molecule_id: str, save_dir: Optional[Path] = None, ds_type: str = 'qm9', use_largest_component: bool = False) -> Dict:
     """
     评估单个分子
-    如果分子有键信息，会提取最大连通分支进行评估
     
     Args:
         mol: RDKit分子对象
         molecule_id: 分子ID
         save_dir: 保存最大连通分支SDF的目录（可选）
         ds_type: 数据集类型，'qm9' 或 'drugs'
+        use_largest_component: 是否使用最大连通分支模式
+            - False (默认): 只去除孤立原子，保留所有有键连接的片段（用于计算single_fragment_rate、键长、键角等）
+            - True: 提取最大连通分支（用于计算atoms_per_mol等只考虑最大片段的指标）
         
     Returns:
         评估结果字典
     """
-    # 提取最大连通分支（如果分子有键信息）
+    # 记录原始信息
     original_num_atoms = mol.GetNumAtoms() if mol is not None else 0
     original_num_bonds = mol.GetNumBonds() if mol is not None else 0
     num_components = 1
     
+    # 计算片段数量（在去除孤立原子之前）
     if mol is not None and mol.GetNumBonds() > 0:
         try:
             mol_frags = Chem.rdmolops.GetMolFrags(mol, asMols=True, sanitizeFrags=False)
             num_components = len(mol_frags)
-            if num_components > 1:
-                # 选择最大连通分支
-                mol = extract_largest_connected_component(mol)
-                # 保存最大连通分支
-                if save_dir is not None and mol is not None:
-                    save_dir.mkdir(parents=True, exist_ok=True)
-                    largest_cc_path = save_dir / f"{molecule_id}_largest_cc.sdf"
-                    try:
-                        sdf_block = Chem.MolToMolBlock(mol)
-                        with open(largest_cc_path, 'w', encoding='utf-8') as f:
-                            f.write(sdf_block)
-                            f.write("\n$$$$\n")
-                    except Exception as e:
-                        print(f"警告: 保存最大连通分支失败 {largest_cc_path}: {e}")
         except Exception as e:
-            print(f"警告: 提取最大连通分支时出错: {e}")
+            print(f"警告: 计算片段数量时出错: {e}")
+    
+    # 根据模式处理分子
+    if mol is not None:
+        if use_largest_component:
+            # 模式2：提取最大连通分支（原方案）
+            if mol.GetNumBonds() > 0:
+                try:
+                    mol = extract_largest_connected_component(mol)
+                    # 保存最大连通分支
+                    if save_dir is not None and mol is not None:
+                        save_dir.mkdir(parents=True, exist_ok=True)
+                        largest_cc_path = save_dir / f"{molecule_id}_largest_cc.sdf"
+                        try:
+                            sdf_block = Chem.MolToMolBlock(mol)
+                            with open(largest_cc_path, 'w', encoding='utf-8') as f:
+                                f.write(sdf_block)
+                                f.write("\n$$$$\n")
+                        except Exception as e:
+                            print(f"警告: 保存最大连通分支失败 {largest_cc_path}: {e}")
+                except Exception as e:
+                    print(f"警告: 提取最大连通分支时出错: {e}")
+        else:
+            # 模式1（默认）：只去除孤立原子，保留所有有键连接的片段
+            mol = remove_isolated_atoms(mol)
+            if mol is None:
+                # 如果去除孤立原子后分子为空，返回空结果
+                return {
+                    'molecule_id': molecule_id,
+                    'num_atoms': 0,
+                    'num_bonds': 0,
+                    'original_num_atoms': original_num_atoms,
+                    'original_num_bonds': original_num_bonds,
+                    'num_components': num_components,
+                    'stable_atom_pct': 0.0,
+                    'is_stable_mol': False,
+                    'is_valid': False,
+                    'canonical_smiles': None,
+                    'is_unique': False,
+                }
     
     result = {
         'molecule_id': molecule_id,
@@ -967,17 +1162,29 @@ def evaluate_single_molecule(mol: Chem.Mol, molecule_id: str, save_dir: Optional
     
     # Drugs 数据集专用指标
     if ds_type == 'drugs':
-        # Single fragment
+        # Single fragment - 基于去除孤立原子后的分子（保留所有片段）
         result['is_single_fragment'] = check_single_fragment(mol)
         
-        # Strain energy
-        result['strain_energy'] = compute_strain_energy(mol)
+        # Strain energy - 基于当前处理的分子
+        # 注意：如果分子在处理过程中丢失了conformer信息，strain_energy将为None
+        strain_energy, is_abnormal = compute_strain_energy(mol, verbose=False)
+        result['strain_energy'] = strain_energy
+        result['strain_energy_abnormal'] = is_abnormal
         
-        # Ring sizes
+        # Ring sizes - 基于当前处理的分子
         result['ring_sizes'] = compute_ring_sizes(mol)
         
-        # Atoms per molecule (largest fragment)
-        result['atoms_per_mol'] = compute_atoms_per_mol(mol)
+        # Atoms per molecule (largest fragment) - 总是使用最大连通片段
+        # 如果当前不是最大连通分支模式，需要单独计算
+        if use_largest_component:
+            result['atoms_per_mol'] = compute_atoms_per_mol(mol)
+        else:
+            # 需要从原始分子中提取最大连通分支来计算
+            # 这里我们需要重新加载原始分子，但为了简化，我们使用当前分子
+            # 注意：如果当前分子已经是去除孤立原子后的，可能包含多个片段
+            # 所以我们需要提取最大片段
+            largest_mol = extract_largest_connected_component(mol) if mol is not None else None
+            result['atoms_per_mol'] = compute_atoms_per_mol(largest_mol) if largest_mol is not None else 0
         
         # QED
         result['qed'] = compute_qed(mol)
@@ -1132,14 +1339,37 @@ def evaluate_molecules(input_dir: Path, output_csv: Path, ds_type: str = 'qm9') 
             single_frag_pct = 100 * single_frag_count / total_molecules
             print(f"单片段分子数: {single_frag_count} ({single_frag_pct:.2f}%)")
         
-        # Median strain energy
+        # Strain energy statistics
         if 'strain_energy' in df.columns:
             strain_energies = df['strain_energy'].dropna().tolist()
+            num_valid_strain_energy = len(strain_energies)
+            num_total = len(df)
+            num_failed = num_total - num_valid_strain_energy
+            
             if strain_energies:
                 median_strain_energy = np.median(strain_energies)
                 mean_strain_energy = np.mean(strain_energies)
-                print(f"中位应变能: {median_strain_energy:.4f} kcal/mol")
                 print(f"平均应变能: {mean_strain_energy:.4f} kcal/mol")
+                print(f"中位应变能: {median_strain_energy:.4f} kcal/mol")
+                print(f"有效应变能数量: {num_valid_strain_energy}/{num_total} ({100*num_valid_strain_energy/num_total:.1f}%)")
+            else:
+                print("应变能: 无有效数据（所有分子的应变能计算失败）")
+                print(f"失败数量: {num_failed}/{num_total} (100.0%)")
+                print("可能的原因：")
+                print("  1. 分子在处理过程中丢失了conformer（坐标）信息")
+                print("  2. UFF力场无法处理某些原子类型或结构")
+                print("  3. 分子结构不合理导致能量计算失败")
+            
+            # 统计异常值
+            if 'strain_energy_abnormal' in df.columns:
+                abnormal_count = df['strain_energy_abnormal'].sum()
+                abnormal_pct = 100 * abnormal_count / total_molecules if total_molecules > 0 else 0
+                print(f"应变能异常值数量: {abnormal_count} ({abnormal_pct:.2f}%)")
+                if abnormal_count > 0:
+                    abnormal_energies = df[df['strain_energy_abnormal'] == True]['strain_energy'].dropna().tolist()
+                    if abnormal_energies:
+                        print(f"  异常值范围: {min(abnormal_energies):.2f} - {max(abnormal_energies):.2f} kcal/mol")
+                        print(f"  异常值中位数: {np.median(abnormal_energies):.2f} kcal/mol")
         
         # Ring sizes
         if 'ring_sizes' in df.columns:
@@ -1383,14 +1613,45 @@ def evaluate_molecules(input_dir: Path, output_csv: Path, ds_type: str = 'qm9') 
             summary_data['metric'].extend(['single_fragment_count', 'single_fragment_rate'])
             summary_data['value'].extend([single_frag_count, f"{single_frag_pct:.2f}%"])
         
-        # Median strain energy
+        # Strain energy statistics (mean and median)
         if 'strain_energy' in df.columns:
             strain_energies = df['strain_energy'].dropna().tolist()
             if strain_energies:
                 median_strain_energy = np.median(strain_energies)
                 mean_strain_energy = np.mean(strain_energies)
-                summary_data['metric'].extend(['median_strain_energy', 'mean_strain_energy'])
-                summary_data['value'].extend([f"{median_strain_energy:.6f}", f"{mean_strain_energy:.6f}"])
+                summary_data['metric'].extend(['strain_energy_mean', 'strain_energy_median'])
+                summary_data['value'].extend([f"{mean_strain_energy:.6f}", f"{median_strain_energy:.6f}"])
+            else:
+                # 即使没有有效的 strain_energy 值，也记录为 N/A
+                summary_data['metric'].extend(['strain_energy_mean', 'strain_energy_median'])
+                summary_data['value'].extend(['N/A', 'N/A'])
+            
+            # 统计异常值
+            if 'strain_energy_abnormal' in df.columns:
+                abnormal_count = df['strain_energy_abnormal'].sum()
+                abnormal_pct = 100 * abnormal_count / total_molecules if total_molecules > 0 else 0
+                summary_data['metric'].extend(['strain_energy_abnormal_count', 'strain_energy_abnormal_rate'])
+                summary_data['value'].extend([abnormal_count, f"{abnormal_pct:.2f}%"])
+                
+                if abnormal_count > 0:
+                    abnormal_energies = df[df['strain_energy_abnormal'] == True]['strain_energy'].dropna().tolist()
+                    if abnormal_energies:
+                        abnormal_median = np.median(abnormal_energies)
+                        abnormal_mean = np.mean(abnormal_energies)
+                        abnormal_min = min(abnormal_energies)
+                        abnormal_max = max(abnormal_energies)
+                        summary_data['metric'].extend([
+                            'strain_energy_abnormal_median',
+                            'strain_energy_abnormal_mean',
+                            'strain_energy_abnormal_min',
+                            'strain_energy_abnormal_max'
+                        ])
+                        summary_data['value'].extend([
+                            f"{abnormal_median:.6f}",
+                            f"{abnormal_mean:.6f}",
+                            f"{abnormal_min:.6f}",
+                            f"{abnormal_max:.6f}"
+                        ])
         
         # Ring sizes TV
         if tv_ring_sizes is not None:
