@@ -1,6 +1,6 @@
 defaults:
-  - dset: drugs  # 包含必要的数据集配置 qm9, drugs
-  - converter: gnf_converter_drugs  # 包含必要的转换器配置 gnf_converter_qm9, gnf_converter_drugs
+  - dset: qm9  # 包含必要的数据集配置 qm9, drugs
+  - converter: gnf_converter_qm9  # 包含必要的转换器配置 gnf_converter_qm9, gnf_converter_drugs
   - override hydra/job_logging: custom
   - _self_
 
@@ -10,7 +10,7 @@ seed: 1234
 # nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/model-epoch=999.ckpt
 # nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251024/lightning_logs/version_0/checkpoints/model-epoch=409.ckpt
 # nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260116/lightning_logs/version_0/checkpoints/model-epoch=275.ckpt
-nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_drugs/20260113/lightning_logs/version_0/checkpoints/last.ckpt
+nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260120/lightning_logs/version_0/checkpoints/last.ckpt
 
 # debug options
 debug: False
@@ -20,7 +20,7 @@ debug_subset: False
 # dirname 将自动基于 nf_pretrained_path 的目录计算
 
 # overwrite
-split: train # train, val, test
+split: val # train, val, test
 dset:
   data_aug: True
   batch_size: 32

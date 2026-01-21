@@ -6,13 +6,13 @@ import os
 
 # Set GPU environment BEFORE importing torch (must be before any CUDA initialization)
 # TODO: set gpus based on server id
-os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3,4,5,6,7"
+os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3,4,5,6"
 # os.environ['CUDA_VISIBLE_DEVICES'] = "0,2,3,4,5"
 # os.environ['CUDA_VISIBLE_DEVICES'] = "0"
 
 # Data visualization and processing
 import matplotlib.pyplot as plt
-    
+
 # PyTorch and related libraries
 import torch
 import torch.nn as nn
@@ -103,7 +103,8 @@ class NeuralFieldLightningModule(pl.LightningModule):
         # Configuration for use_denoiser_for_codes mode
         if self.use_denoiser_for_codes:
             self.sample_near_atoms_only = finetune_config.get("sample_near_atoms_only", True)
-            self.atom_distance_threshold = finetune_config.get("atom_distance_threshold", 0.5)
+            # atom_distance_threshold 现在从 dset 配置中读取，不再从 finetune_config 读取
+            self.atom_distance_threshold = config.get("dset", {}).get("atom_distance_threshold", 0.5)
             self.use_cosine_loss = finetune_config.get("use_cosine_loss", False)  # 默认使用MSE loss
             self.magnitude_loss_weight = finetune_config.get("magnitude_loss_weight", 0.1)
             self.n_points = finetune_config.get("n_points", None)  # If None, use dset.n_points
@@ -977,7 +978,10 @@ def main(config):
             config["joint_finetune"] = {}
         config["joint_finetune"]["enabled"] = True  # Enable joint_finetune mode for sampling
         config["joint_finetune"]["sample_near_atoms_only"] = finetune_config.get("sample_near_atoms_only", True)
-        config["joint_finetune"]["atom_distance_threshold"] = finetune_config.get("atom_distance_threshold", 0.5)
+        # atom_distance_threshold 现在在 dset 配置中设置，不再在此处设置
+        # 如果 finetune_config 中指定了 atom_distance_threshold，则设置到 dset 中
+        if "atom_distance_threshold" in finetune_config:
+            config["dset"]["atom_distance_threshold"] = finetune_config["atom_distance_threshold"]
         if "n_points" in finetune_config and finetune_config["n_points"] is not None:
             config["joint_finetune"]["n_points"] = finetune_config["n_points"]
         

@@ -65,7 +65,7 @@ method_configs:
 
   tanh:
     n_query_points: 2000 # 1000
-    step_size: 0.05  #  0.02
+    step_size: 0.05
     sig_sf: 0.1
     sig_mag: 2
   

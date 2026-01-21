@@ -11,6 +11,7 @@ from lightning import Fabric
 from torch_geometric.utils import to_dense_batch
 from funcmol.utils.constants import PADDING_INDEX, ELEMENTS_HASH_INV
 from funcmol.utils.gnf_converter import GNFConverter
+from funcmol.utils.utils_base import xyz_to_sdf
 
 # 设置项目根目录
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -474,11 +475,14 @@ def visualize_reconstruction_step(
                 color = ATOM_COLORS.get(atom_type, 'gray')
                 atom_name = atom_names[atom_type] if atom_type < len(atom_names) else f"Type{atom_type}"
                 ax.scatter(coords_np[mask, 0], coords_np[mask, 1], coords_np[mask, 2], 
-                          c=color, marker='o', s=100, 
-                          label=f'Original {atom_name}', alpha=0.7)
+                          c=color, marker='o', s=200, 
+                          edgecolors='black', linewidths=2.5,
+                          label=f'Original {atom_name}', alpha=0.9)
     else:
         ax.scatter(coords_np[:, 0], coords_np[:, 1], coords_np[:, 2], 
-                  c='blue', marker='o', s=100, label='Original', alpha=0.8)
+                  c='blue', marker='o', s=200, 
+                  edgecolors='black', linewidths=2.5,
+                  label='Original', alpha=0.9)
     
     points_np = current_points.detach().cpu().numpy()
     if points_types is not None:
@@ -718,9 +722,38 @@ class GNFVisualizer(MoleculeVisualizer):
             save_path=comparison_path
         )
         
+        # 保存SDF格式的分子文件
+        sdf_path = None
+        if len(final_points) > 0:
+            sdf_path = os.path.join(self.recon_dir, f"{animation_name}.sdf")
+            try:
+                # 构建元素列表（从ELEMENTS_HASH_INV获取）
+                max_atom_type = int(final_types.max().item()) if len(final_types) > 0 else 7
+                element_list = []
+                for i in range(max_atom_type + 1):
+                    element_list.append(ELEMENTS_HASH_INV.get(i, f"X{i}"))
+                
+                # 转换为numpy数组
+                final_coords_np = final_points.detach().cpu().numpy()
+                final_types_np = final_types.detach().cpu().numpy()
+                
+                # 生成SDF字符串并保存
+                sdf_string = xyz_to_sdf(final_coords_np, final_types_np, element_list)
+                if sdf_string:
+                    with open(sdf_path, 'w', encoding='utf-8') as sdf_file:
+                        sdf_file.write(sdf_string)
+                    print(f"SDF文件已保存: {sdf_path}")
+                else:
+                    print(f"警告: 无法生成SDF文件（无有效原子）")
+                    sdf_path = None
+            except Exception as e:
+                print(f"警告: 保存SDF文件时出错: {e}")
+                sdf_path = None
+        
         return {
             'gif_path': gif_path,
             'comparison_path': comparison_path,
+            'sdf_path': sdf_path,
             'metrics_history': metrics_history,
             'final_points': final_points,
             'final_types': final_types,

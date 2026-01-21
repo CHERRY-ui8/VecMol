@@ -476,8 +476,8 @@ def main(config: DictConfig) -> None:
     base_output_dir.mkdir(parents=True, exist_ok=True)
     
     # 提取checkpoint标识并创建独立的子目录
-    # checkpoint_identifier = extract_checkpoint_identifier(fm_path)
-    checkpoint_identifier = "20260116_version_2_epoch_6_new"  # 临时硬编码
+    checkpoint_identifier = extract_checkpoint_identifier(fm_path)
+    # checkpoint_identifier = "20260116_version_2_epoch_9_new"  # 临时硬编码
     output_dir = base_output_dir / "samples" / checkpoint_identifier
     output_dir.mkdir(parents=True, exist_ok=True)
     

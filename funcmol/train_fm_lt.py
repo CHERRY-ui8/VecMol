@@ -18,6 +18,7 @@ os.environ['CUDA_VISIBLE_DEVICES'] = "4,5,6,7"
 # Data visualization and processing
 import matplotlib.pyplot as plt
 import numpy as np
+import pickle
     
 # PyTorch and related libraries
 import torch
@@ -58,6 +59,7 @@ from funcmol.utils.utils_nf import (
 from funcmol.dataset.dataset_code import create_code_loaders
 from funcmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
 from funcmol.models.encoder import create_grid_coords
+from funcmol.utils.constants import PADDING_INDEX
 
 
 def plot_loss_curve(train_losses, val_losses, save_path, title_suffix=""):
@@ -119,7 +121,8 @@ class FuncmolLightningModule(pl.LightningModule):
         
         # New configuration for enhanced joint fine-tuning
         self.num_timesteps_for_decoder = joint_finetune_config.get("num_timesteps_for_decoder", 50)
-        self.atom_distance_threshold = joint_finetune_config.get("atom_distance_threshold", 0.5)
+        # atom_distance_threshold 现在从 dset 配置中读取，不再从 joint_finetune 读取
+        self.atom_distance_threshold = config.get("dset", {}).get("atom_distance_threshold", 0.5)
         self.magnitude_loss_weight = joint_finetune_config.get("magnitude_loss_weight", 0.1)
         self.use_cosine_loss = joint_finetune_config.get("use_cosine_loss", False)  # 默认使用MSE loss
         
@@ -138,6 +141,24 @@ class FuncmolLightningModule(pl.LightningModule):
                 print(f"Using MSE loss for decoder training")
             print(f"Multi-timestep decoder training: using first {self.num_timesteps_for_decoder} small timesteps (t=0,1,...,{self.num_timesteps_for_decoder-1}) for slight noise perturbation, then denoising")
             print(f"Query points filtering: keeping points within {self.atom_distance_threshold}Å of atoms")
+
+        # Field loss finetune configuration (decoder frozen)
+        field_loss_finetune_config = config.get("field_loss_finetune", {})
+        self.field_loss_finetune_enabled = field_loss_finetune_config.get("enabled", False)
+        self.field_loss_weight = field_loss_finetune_config.get("field_loss_weight", 1.0)
+        self.num_timesteps_for_field_loss = field_loss_finetune_config.get("num_timesteps_for_field_loss", 5)
+        
+        # Get atom_distance_scale from config (for exp decay weighting)
+        # Check if it's in loss_weighting config (from neural field training) or use default
+        loss_weighting_config = config.get("loss_weighting", {})
+        self.field_loss_atom_distance_scale = loss_weighting_config.get("atom_distance_scale", 0.5)
+        
+        if self.field_loss_finetune_enabled:
+            print(f"Field loss finetune enabled: field_loss_weight={self.field_loss_weight}")
+            print(f"Decoder will remain frozen (not updated)")
+            print(f"Field loss: each sample independently samples a timestep from [0, {self.num_timesteps_for_field_loss})")
+            print(f"Using MSE loss with exp decay weighting (atom_distance_scale={self.field_loss_atom_distance_scale})")
+            print(f"Query points sampling: using dataset's _get_xs method (mix of grid and neighbor points)")
 
         self._freeze_nf()
         
@@ -166,6 +187,7 @@ class FuncmolLightningModule(pl.LightningModule):
             print("Encoder frozen (always frozen)")
         
         # Freeze or unfreeze decoder based on joint fine-tuning configuration
+        # Note: field_loss_finetune keeps decoder frozen (only provides supervision signal)
         if self.dec_module is not None:
             if self.joint_finetune_enabled:
                 # Unfreeze decoder for joint fine-tuning
@@ -173,10 +195,14 @@ class FuncmolLightningModule(pl.LightningModule):
                     param.requires_grad = True
                 print("Decoder unfrozen for joint fine-tuning")
             else:
-                # Freeze decoder (default behavior)
+                # Freeze decoder (default behavior, also for field_loss_finetune)
                 for param in self.dec_module.parameters():
                     param.requires_grad = False
-                print("Decoder frozen")
+                self.dec_module.eval()  # Set to eval mode when frozen
+                if self.field_loss_finetune_enabled:
+                    print("Decoder frozen (field loss finetune mode - decoder provides supervision only)")
+                else:
+                    print("Decoder frozen")
         
     def _process_batch(self, batch):
         """
@@ -465,6 +491,47 @@ class FuncmolLightningModule(pl.LightningModule):
         multi_timestep_codes = torch.stack(all_denoised_codes, dim=1)
         
         return multi_timestep_codes
+    
+    def _get_predicted_codes_from_diffusion(self, x_0):
+        """
+        Get predicted codes from diffusion model by adding noise and then denoising.
+        This is used for field loss finetune to compare predicted codes with ground truth codes.
+        
+        Randomly samples a timestep for each sample in the batch from [0, num_timesteps_for_field_loss)
+        to avoid OOM when num_timesteps_for_field_loss is large. Each sample has its own independent timestep.
+        
+        Args:
+            x_0: Ground truth codes [B, n_grid, code_dim]
+            
+        Returns:
+            predicted_codes: [B, n_grid, code_dim] - predicted codes, each sample uses its own randomly sampled timestep
+        """
+        from funcmol.models.ddpm import q_sample, p_sample_x0
+        
+        device = x_0.device
+        B = x_0.shape[0]
+        diffusion_consts = self.funcmol.diffusion_consts
+        
+        # Randomly sample a timestep for each sample in the batch from [0, num_timesteps_for_field_loss)
+        # This allows using large num_timesteps_for_field_loss without OOM
+        # Each sample has its own independent timestep, similar to denoiser loss sampling
+        t = torch.randint(0, self.num_timesteps_for_field_loss, (B,), device=device).long()
+        
+        # Add noise to x_0 to get x_t (forward diffusion)
+        # Each sample uses its own timestep t[i]
+        noise = torch.randn_like(x_0)
+        x_t = q_sample(x_0, t, diffusion_consts, noise)
+        
+        # Denoise using the model (predict x0)
+        # Note: We need gradients for field loss, so don't use torch.no_grad()
+        if self.funcmol.diffusion_method == "new_x0":
+            # Model predicts x0 directly
+            predicted_x0 = self.funcmol.net(x_t, t)
+        else:
+            # For "new" method, we need to use p_sample_x0 to get denoised codes
+            predicted_x0 = p_sample_x0(self.funcmol.net, x_t, t, diffusion_consts, clip_denoised=False)
+        
+        return predicted_x0
     
     def _filter_query_points_near_atoms(self, query_points, atom_coords, target_field):
         """
@@ -786,6 +853,196 @@ class FuncmolLightningModule(pl.LightningModule):
         
         return decoder_loss
     
+    def _compute_field_loss_finetune(self, x_0, batch, batch_idx, is_training=True):
+        """
+        Compute field loss for field loss finetune (decoder frozen mode).
+        Compares fields generated from diffusion-predicted codes vs ground truth codes.
+        Uses dataset's _get_xs method to sample query points (mix of grid and neighbor points).
+        
+        Args:
+            x_0: Ground truth codes [B, n_grid, code_dim]
+            batch: Data batch (PyTorch Geometric Batch if on_the_fly=True, or codes tensor if False)
+            batch_idx: Batch index in DataLoader
+            is_training: Whether this is training step (True) or validation step (False)
+            
+        Returns:
+            field_loss: Scalar tensor with field loss, or None if computation fails
+        """
+        if not self.field_loss_finetune_enabled:
+            return None
+        
+        device = x_0.device
+        B = x_0.shape[0]
+        
+        # Get predicted codes from diffusion
+        # Now returns single timestep codes [B, n_grid, code_dim] (randomly sampled from [0, num_timesteps_for_field_loss))
+        predicted_codes = self._get_predicted_codes_from_diffusion(x_0)  # [B, n_grid, code_dim]
+        
+        # Get field dataset to access _get_xs method
+        field_dataset = self._field_dataset_train if is_training else self._field_dataset_val
+        
+        if field_dataset is None:
+            print("[WARNING] Field dataset not available for field loss computation")
+            return None
+        
+        try:
+            # Collect query points and atom coordinates using dataset's _get_xs method
+            all_query_points = []
+            all_atom_coords = []  # Store atom coordinates for weight computation
+            
+            if self.config["on_the_fly"]:
+                # on_the_fly=True: batch contains molecule data (PyTorch Geometric Batch)
+                if not hasattr(batch, 'pos') or not hasattr(batch, 'x'):
+                    print("[WARNING] Batch does not contain pos or x, skipping field loss")
+                    return None
+                
+                # Extract atom coordinates and types for each molecule in batch
+                atom_coords = batch.pos  # [N_total_atoms, 3]
+                atom_types = batch.x  # [N_total_atoms]
+                batch_idx_atoms = batch.batch  # [N_total_atoms]
+                
+                for b in range(B):
+                    # Get atoms for this molecule
+                    mask = batch_idx_atoms == b
+                    coords_b = atom_coords[mask]  # [n_atoms_b, 3]
+                    atoms_channel_b = atom_types[mask]  # [n_atoms_b]
+                    
+                    # Store atom coordinates for weight computation
+                    all_atom_coords.append(coords_b.to(device))
+                    
+                    # Construct sample dict for _get_xs method
+                    sample = {
+                        "coords": coords_b,
+                        "atoms_channel": atoms_channel_b
+                    }
+                    
+                    # Use dataset's _get_xs method to sample query points
+                    query_points_b, _ = field_dataset._get_xs(sample)  # [n_points, 3]
+                    all_query_points.append(query_points_b.to(device))
+            else:
+                # on_the_fly=False: need to get data from field dataset
+                if batch_idx is None:
+                    print("[WARNING] batch_idx is required for field loss in on_the_fly=False mode")
+                    return None
+                
+                # Calculate dataset indices for this batch
+                batch_size = self.config["dset"]["batch_size"]
+                start_idx = batch_idx * batch_size
+                end_idx = start_idx + B
+                
+                # Get augmentation info for modulo mapping
+                num_augmentations = self.num_augmentations_train if is_training else self.num_augmentations_val
+                field_dataset_size = self.field_dataset_size_train if is_training else self.field_dataset_size_val
+                
+                for code_idx in range(start_idx, end_idx):
+                    # Map codes index to field dataset index using modulo
+                    if num_augmentations is not None and num_augmentations > 1 and field_dataset_size is not None:
+                        field_idx = code_idx % field_dataset_size
+                    else:
+                        field_idx = code_idx
+                    
+                    if field_idx >= len(field_dataset):
+                        print(f"[WARNING] Field index {field_idx} out of range (dataset size: {len(field_dataset)})")
+                        return None
+                    
+                    try:
+                        # Get raw sample from dataset (before preprocessing)
+                        # We need to access the raw data to call _get_xs
+                        if hasattr(field_dataset, 'use_lmdb') and field_dataset.use_lmdb:
+                            # LMDB mode: need to get raw sample
+                            idx = field_dataset.field_idxs[field_idx].item()
+                            key = field_dataset.keys[idx]
+                            if isinstance(key, str):
+                                key = key.encode('utf-8')
+                            with field_dataset.db.begin() as txn:
+                                sample_raw = pickle.loads(txn.get(key))
+                        else:
+                            # Traditional mode: get from data list
+                            idx = field_dataset.field_idxs[field_idx].item()
+                            sample_raw = field_dataset.data[idx]
+                        
+                        # Preprocess molecule (handles rotation and centering)
+                        sample = field_dataset._preprocess_molecule(sample_raw)
+                        
+                        # Extract atom coordinates for weight computation
+                        mask = sample["atoms_channel"] != PADDING_INDEX
+                        coords = sample["coords"][mask]  # [n_atoms, 3]
+                        all_atom_coords.append(coords.to(device))
+                        
+                        # Use dataset's _get_xs method to sample query points
+                        # This will use the same sampling strategy as dataset (mix of grid and neighbor points)
+                        query_points, _ = field_dataset._get_xs(sample)  # [n_points, 3]
+                        all_query_points.append(query_points.to(device))
+                        
+                    except Exception as e:
+                        print(f"[WARNING] Failed to get query points for field index {field_idx}: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        return None
+            
+            if len(all_query_points) != B:
+                print(f"[WARNING] Expected {B} molecules, got {len(all_query_points)}")
+                return None
+            
+            # Stack query points
+            query_points = torch.stack(all_query_points, dim=0)  # [B, n_points, 3]
+            n_points = query_points.shape[1]
+            
+            # Compute loss weights based on distance to nearest atom (exp decay)
+            # weights: [B, n_points]
+            weights = torch.ones(B, n_points, device=device)
+            for b in range(B):
+                sample_query_points = query_points[b]  # [n_points, 3]
+                sample_atoms = all_atom_coords[b]  # [n_atoms, 3]
+                
+                if len(sample_atoms) == 0:
+                    continue
+                
+                # Compute distance to nearest atom for each query point
+                distances = torch.cdist(sample_query_points, sample_atoms)  # [n_points, n_atoms]
+                min_distances = distances.min(dim=-1)[0]  # [n_points] - distance to nearest atom
+                
+                # Convert distance to weight: closer atoms = higher weight
+                # Use exponential decay: weight = exp(-distance / scale)
+                sample_weights = torch.exp(-min_distances / self.field_loss_atom_distance_scale)
+                weights[b] = sample_weights
+            
+        except Exception as e:
+            print(f"[WARNING] Failed to compute field loss: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+        
+        # Compute field loss for the single randomly sampled timestep
+        # Generate fields using decoder
+        # Ground truth field from ground truth codes (no gradients needed)
+        with torch.no_grad():
+            gt_field = self.dec_module(query_points, x_0)  # [B, n_points, n_atom_types, 3]
+        
+        # Predicted field from diffusion-predicted codes (need gradients for this)
+        pred_field = self.dec_module(query_points, predicted_codes)  # [B, n_points, n_atom_types, 3]
+        
+        # Ensure shapes match
+        if pred_field.shape != gt_field.shape:
+            pred_field = pred_field.view(B, n_points, -1, 3)
+            gt_field = gt_field.view(B, n_points, -1, 3)
+            if pred_field.shape != gt_field.shape:
+                print(f"[WARNING] Shape mismatch: pred_field {pred_field.shape} vs gt_field {gt_field.shape}")
+                return None
+        
+        # Compute element-wise MSE loss
+        elementwise_loss = (pred_field - gt_field) ** 2  # [B, n_points, n_atom_types, 3]
+        # Average over atom_types and spatial dimensions, keep batch and point dimensions
+        pointwise_loss = elementwise_loss.mean(dim=(-2, -1))  # [B, n_points]
+        
+        # Apply weights (exp decay based on distance to nearest atom)
+        weighted_loss = pointwise_loss * weights  # [B, n_points]
+        
+        # Average over batch and points
+        field_loss = weighted_loss.mean()
+        
+        return field_loss
+    
     def training_step(self, batch, batch_idx):
         """Training step logic"""
         # 添加调试信息
@@ -854,6 +1111,19 @@ class FuncmolLightningModule(pl.LightningModule):
         else:
             # Standard training: only denoiser loss
             total_loss = denoiser_loss
+        
+        # Compute field loss if field loss finetune is enabled
+        if self.field_loss_finetune_enabled:
+            # codes here is ground truth codes (x_0)
+            field_loss = self._compute_field_loss_finetune(codes, batch, batch_idx, is_training=True)
+            if field_loss is not None:
+                total_loss = total_loss + self.field_loss_weight * field_loss
+                # Log field loss separately
+                self.log('train_field_loss', field_loss, batch_size=len(batch),
+                         on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
+            else:
+                # If field loss computation failed, continue with existing total_loss
+                print("[WARNING] Field loss computation failed, continuing without field loss")
         
         # Update EMA model
         self.funcmol_ema.update(self.funcmol)
@@ -969,6 +1239,19 @@ class FuncmolLightningModule(pl.LightningModule):
         else:
             # Standard validation: only denoiser loss
             total_loss = denoiser_loss
+        
+        # Compute field loss if field loss finetune is enabled
+        if self.field_loss_finetune_enabled:
+            # codes here is ground truth codes (x_0)
+            field_loss = self._compute_field_loss_finetune(codes, batch, batch_idx, is_training=False)
+            if field_loss is not None:
+                total_loss = total_loss + self.field_loss_weight * field_loss
+                # Log field loss separately
+                self.log('val_field_loss', field_loss, batch_size=len(batch),
+                         on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
+            else:
+                # If field loss computation failed, continue with existing total_loss
+                pass  # Don't print warning in validation to avoid spam
         
         # Log metrics
         self.log('val_loss', total_loss, batch_size=len(batch),
@@ -1208,8 +1491,8 @@ class FuncmolLightningModule(pl.LightningModule):
         if "best_loss" in checkpoint:
             self.best_loss = checkpoint["best_loss"]
 
-@hydra.main(config_path="configs", config_name="train_fm_drugs", version_base=None)
-# @hydra.main(config_path="configs", config_name="train_fm_qm9", version_base=None)
+# @hydra.main(config_path="configs", config_name="train_fm_drugs", version_base=None)
+@hydra.main(config_path="configs", config_name="train_fm_qm9", version_base=None)
 def main_hydra(config):
     """Entry point for Hydra configuration system"""
     main(config)
@@ -1316,33 +1599,41 @@ def main(config):
     if not config["on_the_fly"]:
         use_augmented_codes = config.get("use_augmented_codes", False)
         
-        # 如果从checkpoint加载，优先使用checkpoint中的codes_dir
-        if checkpoint_codes_dir is not None:
-            codes_dir = checkpoint_codes_dir
-            print(f">> 使用checkpoint中的codes_dir: {codes_dir}")
-        else:
-            # 优先使用新的配置方式（codes_dir_no_aug / codes_dir_with_aug）
-            if use_augmented_codes:
-                codes_dir = config.get("codes_dir_with_aug")
-                if codes_dir is None:
+        # 优先使用配置文件中的设置（如果明确指定了）
+        # 只有当配置文件中没有明确设置时，才使用checkpoint中的codes_dir
+        if use_augmented_codes:
+            codes_dir = config.get("codes_dir_with_aug")
+            if codes_dir is None:
+                # 如果配置文件中没有设置，尝试使用checkpoint中的
+                if checkpoint_codes_dir is not None:
+                    codes_dir = checkpoint_codes_dir
+                    print(f">> 使用checkpoint中的codes_dir: {codes_dir}")
+                else:
                     raise ValueError(
                         "use_augmented_codes=True 但未指定 codes_dir_with_aug。\n"
                         "请在配置文件中设置 codes_dir_with_aug 路径。"
                     )
-                print(f">> 使用数据增强的codes: {codes_dir}")
             else:
-                codes_dir = config.get("codes_dir_no_aug")
+                print(f">> 使用数据增强的codes: {codes_dir}")
+        else:
+            codes_dir = config.get("codes_dir_no_aug")
+            if codes_dir is None:
+                # 如果配置文件中没有设置，尝试使用旧的codes_dir或checkpoint中的
+                codes_dir = config.get("codes_dir")
                 if codes_dir is None:
-                    # 兼容旧配置：如果codes_dir_no_aug未设置，尝试使用旧的codes_dir
-                    codes_dir = config.get("codes_dir")
-                    if codes_dir is None:
+                    # 最后尝试使用checkpoint中的
+                    if checkpoint_codes_dir is not None:
+                        codes_dir = checkpoint_codes_dir
+                        print(f">> 使用checkpoint中的codes_dir: {codes_dir}")
+                    else:
                         raise ValueError(
                             "use_augmented_codes=False 但未指定 codes_dir_no_aug 或 codes_dir。\n"
                             "请在配置文件中设置 codes_dir_no_aug 路径。"
                         )
-                    print(f">> 使用兼容的codes_dir: {codes_dir}")
                 else:
-                    print(f">> 使用原始codes（无数据增强）: {codes_dir}")
+                    print(f">> 使用兼容的codes_dir: {codes_dir}")
+            else:
+                print(f">> 使用原始codes（无数据增强）: {codes_dir}")
         
         # 设置config中的codes_dir，供create_code_loaders使用
         config["codes_dir"] = codes_dir
@@ -1404,11 +1695,23 @@ def main(config):
             loader_train = create_code_loaders(config, split="train")
             loader_val = create_code_loaders(config, split="val")
             
-            # If position weighting is enabled, also create field loaders to get atom coordinates
+            # Check if field loaders are needed (for position weighting or field loss finetune)
             position_weight_config = config.get("position_weight", {})
-            if position_weight_config.get("enabled", False):
-                print(">> Position weighting enabled for on_the_fly=False mode")
-                print(">> Creating field loaders to get atom coordinates...")
+            field_loss_finetune_config = config.get("field_loss_finetune", {})
+            need_field_loaders = (
+                position_weight_config.get("enabled", False) or 
+                field_loss_finetune_config.get("enabled", False)
+            )
+            
+            if need_field_loaders:
+                reason = []
+                if position_weight_config.get("enabled", False):
+                    reason.append("position weighting")
+                if field_loss_finetune_config.get("enabled", False):
+                    reason.append("field loss finetune")
+                reason_str = " and ".join(reason)
+                print(f">> {reason_str.capitalize()} enabled for on_the_fly=False mode")
+                print(">> Creating field loaders...")
                 try:
                     gnf_converter = create_gnf_converter(config)
                     field_loader_train = create_field_loaders(config, gnf_converter, split="train")
@@ -1434,7 +1737,7 @@ def main(config):
                             print(f">>   Using modulo mapping: codes[i] -> field[i % {len_field_train}]")
                         else:
                             print(f">> WARNING: Codes dataset length ({len_codes_train}) is not a multiple of field dataset length ({len_field_train})")
-                            print(f">>   Cannot use modulo mapping for position weighting")
+                            print(f">>   Cannot use modulo mapping")
                             num_augmentations_train = None
                     
                     if len_codes_train == len_field_train:
@@ -1466,7 +1769,7 @@ def main(config):
                         num_augmentations_val = None
                     
                     print(">> Field loaders created successfully")
-                    print(">> Position weighting will use index-based mapping (codes and molecules have matching order)")
+                    print(">> Will use index-based mapping (codes and molecules have matching order)")
                     
                     # Store num_augmentations and field dataset sizes in config for later use in model
                     config["num_augmentations_train"] = num_augmentations_train
@@ -1476,17 +1779,14 @@ def main(config):
                     if 'len_field_val' in locals():
                         config["field_dataset_size_val"] = len_field_val
                 except Exception as e:
-                    print(f">> Warning: Failed to create field loaders for position weighting: {e}")
-                    print(">> Position weighting will be disabled for on_the_fly=False mode")
-                    print(">> Consider using on_the_fly=True mode for position weighting support")
+                    print(f">> Warning: Failed to create field loaders: {e}")
+                    if position_weight_config.get("enabled", False):
+                        print(">> Position weighting will be disabled for on_the_fly=False mode")
+                    if field_loss_finetune_config.get("enabled", False):
+                        print(">> Field loss finetune will be disabled (field dataset not available)")
+                    print(">> Consider using on_the_fly=True mode")
                     import traceback
                     traceback.print_exc()
-            
-            # # Handle cases where loaders are returned as lists
-            # if isinstance(loader_train, list) and len(loader_train) > 0:
-            #     loader_train = loader_train[0]
-            # if isinstance(loader_val, list) and len(loader_val) > 0:
-            #     loader_val = loader_val[0]
             
             # 获取数据增强数量（如果使用数据增强的codes）
             # 优先使用配置中明确指定的 num_augmentations

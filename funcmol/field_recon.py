@@ -137,6 +137,8 @@ def process_single_molecule(args):
         
         # 在子进程中重新创建数据集（因为dataset对象不能序列化）
         default_converter = create_gnf_converter(full_config_dict)
+        # 从dset配置中读取atom_distance_threshold，如果没有则使用默认值0.5
+        atom_distance_threshold = full_config_dict.get("dset", {}).get("atom_distance_threshold", 0.5)
         dataset = FieldDataset(
             gnf_converter=default_converter,
             dset_name=dset_name,
@@ -150,6 +152,7 @@ def process_single_molecule(args):
             sample_full_grid=config.dset.get('sample_full_grid', False),
             debug_one_mol=config.get('debug_one_mol', False),
             debug_subset=config.dset.get('debug_subset', False),
+            atom_distance_threshold=atom_distance_threshold,
         )
         
         # 确保LMDB连接在子进程中正确建立（spawn模式下需要）
@@ -408,6 +411,8 @@ def main(config: DictConfig) -> None:
     default_converter = create_gnf_converter(config_dict)
     
     # Load dataset using OmegaConf - much more elegant!
+    # 从dset配置中读取atom_distance_threshold，如果没有则使用默认值0.5
+    atom_distance_threshold = config_dict.get("dset", {}).get("atom_distance_threshold", 0.5)
     dataset = FieldDataset(
         gnf_converter=default_converter,
         dset_name=config.dset.dset_name,
@@ -421,6 +426,7 @@ def main(config: DictConfig) -> None:
         sample_full_grid=config.dset.get('sample_full_grid', False),
         debug_one_mol=config.get('debug_one_mol', False),
         debug_subset=config.get('debug_subset', False),
+        atom_distance_threshold=atom_distance_threshold,
     )
     field_methods = config.get('field_methods', ['gaussian_mag', 'tanh'])
     

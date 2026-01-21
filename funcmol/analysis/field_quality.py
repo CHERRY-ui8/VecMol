@@ -152,6 +152,8 @@ def main(config: DictConfig) -> None:
         # PROJECT_ROOT 指向 funcmol 目录，所以直接拼接 dataset/data
         data_dir = str(PROJECT_ROOT / data_dir)
     
+    # 从dset配置中读取atom_distance_threshold，如果没有则使用默认值0.5
+    atom_distance_threshold = config_dict.get("dset", {}).get("atom_distance_threshold", 0.5)
     dataset = FieldDataset(
         gnf_converter=converter,
         dset_name=config_dict.get("dset", {}).get("dset_name", "qm9"),
@@ -164,6 +166,7 @@ def main(config: DictConfig) -> None:
         grid_dim=config_dict.get("dset", {}).get("grid_dim", 32),
         sample_full_grid=config.get("sample_full_grid", False),
         targeted_sampling_ratio=0,  # 评估时只从格点采样，不采样邻近点
+        atom_distance_threshold=atom_distance_threshold,
     )
     
     # 限制评估的样本数量

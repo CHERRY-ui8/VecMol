@@ -87,7 +87,9 @@ class FieldDataset(Dataset):
             dtype=torch.float32
         ) * self.resolution  # Scale by resolution to get real distances
         
-        self.targeted_sampling_ratio = targeted_sampling_ratio if split == "train" else 0
+        # Allow targeted_sampling_ratio in validation/test to enable neighbor point sampling
+        # Previously it was forced to 0 for non-train splits, but now we allow it for better evaluation
+        self.targeted_sampling_ratio = targeted_sampling_ratio
         self.sample_near_atoms_only = sample_near_atoms_only
         self.atom_distance_threshold = atom_distance_threshold
         
@@ -637,7 +639,8 @@ def create_field_loaders(
     # 检查是否启用joint fine-tuning的"只采样原子附近"模式
     joint_finetune_config = config.get("joint_finetune", {})
     sample_near_atoms_only = joint_finetune_config.get("enabled", False) and joint_finetune_config.get("sample_near_atoms_only", False)
-    atom_distance_threshold = joint_finetune_config.get("atom_distance_threshold", 0.5)
+    # 从dset配置中读取atom_distance_threshold，如果没有则使用默认值0.5
+    atom_distance_threshold = config["dset"].get("atom_distance_threshold", 0.5)
     
     # 如果joint fine-tuning启用且指定了n_points，则使用指定的值，否则使用默认的dset.n_points
     n_points = config["dset"]["n_points"]
