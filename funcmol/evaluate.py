@@ -15,16 +15,16 @@ SDF分子评估脚本
   - 用于计算atoms_per_mol等只考虑最大片段的指标
 """
 
-exp_date = "20260116"
-exp_version = "version_2"
-ckpt_name = "epoch_9"
+exp_date = "20260117"
+exp_version = "version_0"
+ckpt_name = "epoch_269"
 # 数据集类型：'qm9' 或 'drugs'
-dataset_type = 'drugs'  # 设置为 'drugs' 以启用额外的 drugs 指标
+dataset_type = 'qm9'  # 设置为 'drugs' 以启用额外的 drugs 指标
 # 配置参数：实验目录
-exp_dir = f"/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_{dataset_type}/{exp_date}/samples/{exp_date}_{exp_version}_{ckpt_name}_withbonds_addH"
+exp_dir = f"/data/huayuchen/Neurl-voxel/exps/funcmol/fm_{dataset_type}/{exp_date}/samples/{exp_date}_{exp_version}_{ckpt_name}_withbonds_addH_improved"
 # 测试集数据路径（用于分布比较）
-# test_data_dir = "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/funcmol/dataset/data/qm9"  # QM9测试集数据目录
-test_data_dir = "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/funcmol/dataset/data/drugs"  # Drugs测试集数据目录
+# test_data_dir = "/data/huayuchen/Neurl-voxel/funcmol/dataset/data/qm9"  # QM9测试集数据目录
+test_data_dir = "/data/huayuchen/Neurl-voxel/funcmol/dataset/data/drugs"  # Drugs测试集数据目录
 test_data_limit = None  # 限制测试集样本数量（用于加速计算，设为None则不限制）
 use_largest_component = True  # 是否使用最大连通分支模式
 
@@ -1422,6 +1422,17 @@ def evaluate_molecules(input_dir: Path, output_csv: Path, ds_type: str = 'qm9') 
     tv_ring_sizes = None
     tv_atoms_per_mol = None
     
+    # 初始化测试集分布统计变量（用于保存到summary）
+    test_valency_dist_normalized = None
+    test_atom_dist_normalized = None
+    test_bond_dist_normalized = None
+    test_bond_length_mean = None
+    test_bond_length_median = None
+    test_bond_length_std = None
+    test_bond_angle_mean = None
+    test_bond_angle_median = None
+    test_bond_angle_std = None
+    
     # 加载测试集并计算分布比较
     print("\n" + "="*80)
     print("分布比较（生成 vs 测试集）")
@@ -1447,6 +1458,29 @@ def evaluate_molecules(input_dir: Path, output_csv: Path, ds_type: str = 'qm9') 
         if len(test_molecules) > 0:
             # 计算测试集分布
             test_distributions = compute_test_set_distributions(test_molecules, ds_type=ds_type)
+            
+            # 计算测试集分布统计（用于保存到summary）
+            if test_distributions['valencies']:
+                test_valency_counter = Counter(test_distributions['valencies'])
+                test_valency_dist_normalized = {str(k): v/len(test_distributions['valencies']) for k, v in test_valency_counter.items()}
+            
+            if test_distributions['atom_types']:
+                test_atom_counter = Counter(test_distributions['atom_types'])
+                test_atom_dist_normalized = {k: v/len(test_distributions['atom_types']) for k, v in test_atom_counter.items()}
+            
+            if test_distributions['bond_types']:
+                test_bond_counter = Counter(test_distributions['bond_types'])
+                test_bond_dist_normalized = {k: v/len(test_distributions['bond_types']) for k, v in test_bond_counter.items()}
+            
+            if test_distributions['bond_lengths']:
+                test_bond_length_mean = np.mean(test_distributions['bond_lengths'])
+                test_bond_length_median = np.median(test_distributions['bond_lengths'])
+                test_bond_length_std = np.std(test_distributions['bond_lengths'])
+            
+            if test_distributions['bond_angles']:
+                test_bond_angle_mean = np.mean(test_distributions['bond_angles'])
+                test_bond_angle_median = np.median(test_distributions['bond_angles'])
+                test_bond_angle_std = np.std(test_distributions['bond_angles'])
             
             # Valency W₁
             if all_valencies and test_distributions['valencies']:
@@ -1581,6 +1615,43 @@ def evaluate_molecules(input_dir: Path, output_csv: Path, ds_type: str = 'qm9') 
             f"{np.mean(all_bond_angles):.2f}",
             f"{np.median(all_bond_angles):.2f}",
             f"{np.std(all_bond_angles):.2f}"
+        ])
+    
+    # 添加测试集（参考数据集）的分布统计
+    if test_valency_dist_normalized is not None:
+        summary_data['metric'].append('test_valency_distribution')
+        summary_data['value'].append(json.dumps(test_valency_dist_normalized))
+    
+    if test_atom_dist_normalized is not None:
+        summary_data['metric'].append('test_atom_type_distribution')
+        summary_data['value'].append(json.dumps(test_atom_dist_normalized))
+    
+    if test_bond_dist_normalized is not None:
+        summary_data['metric'].append('test_bond_type_distribution')
+        summary_data['value'].append(json.dumps(test_bond_dist_normalized))
+    
+    if test_bond_length_mean is not None:
+        summary_data['metric'].extend([
+            'test_bond_length_mean',
+            'test_bond_length_median',
+            'test_bond_length_std'
+        ])
+        summary_data['value'].extend([
+            f"{test_bond_length_mean:.4f}",
+            f"{test_bond_length_median:.4f}",
+            f"{test_bond_length_std:.4f}"
+        ])
+    
+    if test_bond_angle_mean is not None:
+        summary_data['metric'].extend([
+            'test_bond_angle_mean',
+            'test_bond_angle_median',
+            'test_bond_angle_std'
+        ])
+        summary_data['value'].extend([
+            f"{test_bond_angle_mean:.2f}",
+            f"{test_bond_angle_median:.2f}",
+            f"{test_bond_angle_std:.2f}"
         ])
     
     # 添加分布比较指标

@@ -1026,6 +1026,388 @@ def add_hydrogens_manually_from_sdf(sdf_content):
         return None
 
 
+# 双键标准键长（单位：pm）
+BONDS2_PM = {
+    'C': {'C': 134, 'N': 129, 'O': 120, 'S': 160},
+    'N': {'C': 129, 'N': 125, 'O': 121},
+    'O': {'C': 120, 'N': 121, 'O': 121, 'P': 150},
+    'P': {'O': 150, 'S': 186},
+    'S': {'P': 186}
+}
+
+# 三键标准键长（单位：pm）
+BONDS3_PM = {
+    'C': {'C': 120, 'N': 116, 'O': 113},
+    'N': {'C': 116, 'N': 110},
+    'O': {'C': 113}
+}
+
+# 键判断容差（单位：pm）
+BOND_MARGIN1 = 40  # 单键容差
+BOND_MARGIN2 = 20  # 双键容差
+BOND_MARGIN3 = 12  # 三键容差
+
+
+def fix_missing_bonds_from_sdf(sdf_content, bond_length_ratio=1.3, max_iterations=10):
+    """
+    修复缺失的化学键：在OpenBabel处理之后、补H之前，遍历所有价态未饱和的原子，
+    检查最近的原子，如果距离不超过标准键长的指定比例，就添加化学键。
+    
+    Args:
+        sdf_content: SDF格式字符串（应包含键信息）
+        bond_length_ratio: 标准键长的比例阈值（默认1.3，即距离≤标准键长×1.3时添加键）
+        max_iterations: 最大迭代次数（避免无限循环）
+        
+    Returns:
+        修复后的SDF格式字符串，或None（如果失败）
+    """
+    try:
+        from rdkit import Chem
+        from rdkit.Geometry import Point3D
+        import numpy as np
+        
+        # 解析SDF
+        mol = Chem.MolFromMolBlock(sdf_content, sanitize=False)
+        if mol is None:
+            return None
+        
+        # 检查是否有conformer（用于坐标计算）
+        if mol.GetNumConformers() == 0:
+            return sdf_content  # 没有坐标，无法计算距离
+        
+        # 迭代修复缺失的键
+        for iteration in range(max_iterations):
+            bonds_added = 0
+            bonds_upgraded = 0
+            
+            # 重新获取conformer（因为分子可能已改变）
+            if mol.GetNumConformers() == 0:
+                break
+            conf = mol.GetConformer()
+            
+            # 第一步：升级已有单键为双键（在添加缺失键之前）
+            # 遍历所有单键，检查是否可以升级为双键
+            bonds_to_upgrade = []
+            for bond in mol.GetBonds():
+                if bond.GetBondType() != Chem.BondType.SINGLE:
+                    continue  # 只考虑单键
+                
+                begin_idx = bond.GetBeginAtomIdx()
+                end_idx = bond.GetEndAtomIdx()
+                begin_atom = mol.GetAtomWithIdx(begin_idx)
+                end_atom = mol.GetAtomWithIdx(end_idx)
+                begin_symbol = begin_atom.GetSymbol()
+                end_symbol = end_atom.GetSymbol()
+                
+                # 检查两个原子的价态是否都未饱和
+                begin_valency = calculate_atom_valency(mol, begin_idx)
+                end_valency = calculate_atom_valency(mol, end_idx)
+                begin_max_valency = get_atom_max_valency(begin_atom.GetAtomicNum())
+                end_max_valency = get_atom_max_valency(end_atom.GetAtomicNum())
+                
+                # 如果升级为双键，新价态 = 当前价态 - 1 + 2 = 当前价态 + 1
+                begin_new_valency = begin_valency + 1
+                end_new_valency = end_valency + 1
+                
+                # 检查升级后价态是否超限
+                if begin_new_valency > begin_max_valency or end_new_valency > end_max_valency:
+                    continue  # 升级后价态超限，跳过
+                
+                # 检查是否有双键的标准键长数据
+                standard_bond2_pm = None
+                if begin_symbol in BONDS2_PM and end_symbol in BONDS2_PM[begin_symbol]:
+                    standard_bond2_pm = BONDS2_PM[begin_symbol][end_symbol]
+                elif end_symbol in BONDS2_PM and begin_symbol in BONDS2_PM[end_symbol]:
+                    standard_bond2_pm = BONDS2_PM[end_symbol][begin_symbol]
+                
+                if standard_bond2_pm is None:
+                    continue  # 没有双键标准键长数据，跳过
+                
+                # 计算距离
+                begin_pos = conf.GetAtomPosition(begin_idx)
+                end_pos = conf.GetAtomPosition(end_idx)
+                begin_pos_array = np.array([begin_pos.x, begin_pos.y, begin_pos.z])
+                end_pos_array = np.array([end_pos.x, end_pos.y, end_pos.z])
+                distance = np.linalg.norm(end_pos_array - begin_pos_array)
+                distance_pm = distance * 100.0
+                
+                # 检查距离是否在双键的容差范围内
+                threshold2_pm = standard_bond2_pm * bond_length_ratio
+                if distance_pm <= threshold2_pm:
+                    # 计算相对偏差
+                    relative_deviation = abs(distance_pm - standard_bond2_pm) / standard_bond2_pm
+                    bonds_to_upgrade.append((begin_idx, end_idx, distance_pm, standard_bond2_pm, relative_deviation))
+            
+            # 按相对偏差排序，优先升级距离最接近标准双键键长的
+            bonds_to_upgrade.sort(key=lambda x: x[4])
+            
+            # 升级单键为双键
+            for begin_idx, end_idx, distance_pm, standard_bond2_pm, _ in bonds_to_upgrade:
+                try:
+                    rw_mol = Chem.RWMol(mol)
+                    # 找到对应的键
+                    bond = rw_mol.GetBondBetweenAtoms(begin_idx, end_idx)
+                    if bond is not None and bond.GetBondType() == Chem.BondType.SINGLE:
+                        # 删除旧键
+                        rw_mol.RemoveBond(begin_idx, end_idx)
+                        # 添加双键
+                        rw_mol.AddBond(begin_idx, end_idx, Chem.BondType.DOUBLE)
+                        mol = rw_mol.GetMol()
+                        bonds_upgraded += 1
+                except Exception as e:
+                    # 如果升级失败，继续
+                    continue
+            
+            # 第二步：添加缺失的键（原有逻辑）
+            # 找到所有价态未饱和的原子
+            unsaturated_atoms = []
+            for atom_idx in range(mol.GetNumAtoms()):
+                atom = mol.GetAtomWithIdx(atom_idx)
+                atomic_num = atom.GetAtomicNum()
+                current_valency = calculate_atom_valency(mol, atom_idx)
+                max_valency = get_atom_max_valency(atomic_num)
+                
+                if current_valency < max_valency:
+                    unsaturated_atoms.append(atom_idx)
+            
+            if not unsaturated_atoms and bonds_upgraded == 0:
+                break  # 所有原子都已饱和且没有键需要升级，无需继续
+            
+            # 按未连通片段大小排序：小的片段优先处理
+            # 获取所有连通分量
+            try:
+                frags = Chem.rdmolops.GetMolFrags(mol, asMols=False)
+                # frags 是一个列表，每个元素是一个连通分量中的原子索引列表
+                
+                # 为每个原子找到它所在的连通分量大小
+                atom_to_frag_size = {}
+                for frag in frags:
+                    frag_size = len(frag)
+                    for atom_idx in frag:
+                        atom_to_frag_size[atom_idx] = frag_size
+                
+                # 按连通分量大小排序，然后按原子索引排序（保持稳定性）
+                unsaturated_atoms.sort(key=lambda idx: (atom_to_frag_size.get(idx, float('inf')), idx))
+            except Exception:
+                # 如果获取连通分量失败，保持原有顺序
+                pass
+            
+            # 对每个价态未饱和的原子，尝试添加缺失的键
+            for atom_idx in unsaturated_atoms:
+                atom = mol.GetAtomWithIdx(atom_idx)
+                atom_symbol = atom.GetSymbol()
+                atomic_num = atom.GetAtomicNum()
+                current_valency = calculate_atom_valency(mol, atom_idx)
+                max_valency = get_atom_max_valency(atomic_num)
+                
+                # 获取已连接的原子索引
+                connected_atoms = set()
+                for bond in atom.GetBonds():
+                    other_idx = bond.GetOtherAtomIdx(atom_idx)
+                    connected_atoms.add(other_idx)
+                
+                # 获取原子坐标
+                pos1 = conf.GetAtomPosition(atom_idx)
+                pos1_array = np.array([pos1.x, pos1.y, pos1.z])
+                
+                # 找到最近的未连接且价态未饱和的原子
+                nearest_atom_idx = None
+                nearest_distance = float('inf')
+                
+                for other_idx in range(mol.GetNumAtoms()):
+                    if other_idx == atom_idx or other_idx in connected_atoms:
+                        continue
+                    
+                    other_atom = mol.GetAtomWithIdx(other_idx)
+                    other_symbol = other_atom.GetSymbol()
+                    other_atomic_num = other_atom.GetAtomicNum()
+                    
+                    # 只考虑重原子之间的键，以及重原子与H之间的键
+                    if atomic_num == 1 and other_atomic_num == 1:
+                        continue  # 不考虑H-H键
+                    
+                    # 检查目标原子的价态：如果已经饱和，跳过（至少需要能添加一个单键）
+                    other_current_valency = calculate_atom_valency(mol, other_idx)
+                    other_max_valency = get_atom_max_valency(other_atomic_num)
+                    if other_current_valency >= other_max_valency:
+                        continue  # 目标原子已价态饱和，跳过
+                    
+                    # 检查：如果两个原子都是孤立原子（都没有其他键），且距离异常近（<0.1Å），跳过
+                    # 这可能是坐标错误导致的，不应该连接
+                    if current_valency == 0 and other_current_valency == 0:
+                        pos2 = conf.GetAtomPosition(other_idx)
+                        pos2_array = np.array([pos2.x, pos2.y, pos2.z])
+                        distance = np.linalg.norm(pos2_array - pos1_array)
+                        if distance < 0.1:  # 距离小于0.1Å，很可能是坐标错误
+                            continue  # 跳过这种异常近的孤立原子对
+                    
+                    # 计算距离
+                    pos2 = conf.GetAtomPosition(other_idx)
+                    pos2_array = np.array([pos2.x, pos2.y, pos2.z])
+                    distance = np.linalg.norm(pos2_array - pos1_array)
+                    
+                    # 获取标准键长（单键）
+                    standard_bond_length_pm = None
+                    if atom_symbol in BOND_LENGTHS_PM and other_symbol in BOND_LENGTHS_PM[atom_symbol]:
+                        standard_bond_length_pm = BOND_LENGTHS_PM[atom_symbol][other_symbol]
+                    elif other_symbol in BOND_LENGTHS_PM and atom_symbol in BOND_LENGTHS_PM[other_symbol]:
+                        standard_bond_length_pm = BOND_LENGTHS_PM[other_symbol][atom_symbol]
+                    
+                    if standard_bond_length_pm is None:
+                        # 如果没有标准键长数据，使用默认阈值（2.0 Å）
+                        if distance <= 2.0 * bond_length_ratio:
+                            if distance < nearest_distance:
+                                nearest_distance = distance
+                                nearest_atom_idx = other_idx
+                        continue
+                    
+                    standard_bond_length_angstrom = standard_bond_length_pm / 100.0
+                    threshold = standard_bond_length_angstrom * bond_length_ratio
+                    
+                    if distance <= threshold and distance < nearest_distance:
+                        nearest_distance = distance
+                        nearest_atom_idx = other_idx
+                
+                # 如果找到最近的原子，尝试添加键
+                # 注意：此时目标原子的价态已经检查过（未饱和），但需要再次检查以确保在迭代过程中没有变化
+                if nearest_atom_idx is not None:
+                    other_atom = mol.GetAtomWithIdx(nearest_atom_idx)
+                    other_symbol = other_atom.GetSymbol()
+                    other_atomic_num = other_atom.GetAtomicNum()
+                    other_current_valency = calculate_atom_valency(mol, nearest_atom_idx)
+                    other_max_valency = get_atom_max_valency(other_atomic_num)
+                    
+                    # 再次检查价态（可能在迭代过程中已变化）
+                    if other_current_valency >= other_max_valency:
+                        continue  # 目标原子已价态饱和，跳过
+                    
+                    # 根据距离判断候选键类型
+                    # 注意：这里应该使用 bond_length_ratio 来判断，而不是固定的容差
+                    candidate_bonds = []
+                    distance_pm = nearest_distance * 100.0  # 转换为pm
+                    
+                    # 检查三键
+                    if (atom_symbol in BONDS3_PM and other_symbol in BONDS3_PM[atom_symbol]) or \
+                       (other_symbol in BONDS3_PM and atom_symbol in BONDS3_PM[other_symbol]):
+                        standard_bond3_pm = BONDS3_PM.get(atom_symbol, {}).get(other_symbol) or \
+                                           BONDS3_PM.get(other_symbol, {}).get(atom_symbol)
+                        if standard_bond3_pm is not None:
+                            # 使用 bond_length_ratio 而不是固定容差
+                            threshold3_pm = standard_bond3_pm * bond_length_ratio
+                            if distance_pm < threshold3_pm:
+                                relative_deviation = abs(distance_pm - standard_bond3_pm) / standard_bond3_pm
+                                candidate_bonds.append((3, standard_bond3_pm, relative_deviation))
+                    
+                    # 检查双键
+                    if (atom_symbol in BONDS2_PM and other_symbol in BONDS2_PM[atom_symbol]) or \
+                       (other_symbol in BONDS2_PM and atom_symbol in BONDS2_PM[other_symbol]):
+                        standard_bond2_pm = BONDS2_PM.get(atom_symbol, {}).get(other_symbol) or \
+                                           BONDS2_PM.get(other_symbol, {}).get(atom_symbol)
+                        if standard_bond2_pm is not None:
+                            # 使用 bond_length_ratio 而不是固定容差
+                            threshold2_pm = standard_bond2_pm * bond_length_ratio
+                            if distance_pm < threshold2_pm:
+                                relative_deviation = abs(distance_pm - standard_bond2_pm) / standard_bond2_pm
+                                candidate_bonds.append((2, standard_bond2_pm, relative_deviation))
+                    
+                    # 检查单键
+                    if atom_symbol in BOND_LENGTHS_PM and other_symbol in BOND_LENGTHS_PM[atom_symbol]:
+                        standard_bond1_pm = BOND_LENGTHS_PM[atom_symbol][other_symbol]
+                    elif other_symbol in BOND_LENGTHS_PM and atom_symbol in BOND_LENGTHS_PM[other_symbol]:
+                        standard_bond1_pm = BOND_LENGTHS_PM[other_symbol][atom_symbol]
+                    else:
+                        standard_bond1_pm = None
+                    
+                    if standard_bond1_pm is not None:
+                        # 使用 bond_length_ratio 而不是固定容差
+                        threshold1_pm = standard_bond1_pm * bond_length_ratio
+                        if distance_pm < threshold1_pm:
+                            relative_deviation = abs(distance_pm - standard_bond1_pm) / standard_bond1_pm
+                            candidate_bonds.append((1, standard_bond1_pm, relative_deviation))
+                    
+                    # 如果没有候选键，跳过
+                    if not candidate_bonds:
+                        continue
+                    
+                    # 按相对偏差排序候选键类型
+                    candidate_bonds.sort(key=lambda x: x[2])
+                    
+                    # 根据价态约束筛选合适的键类型（从键级高到低）
+                    selected_bond_order = None
+                    for bond_order, _, _ in reversed(candidate_bonds):  # 从高到低（三键→双键→单键）
+                        new_valency_i = current_valency + bond_order
+                        new_valency_j = other_current_valency + bond_order
+                        
+                        if new_valency_i <= max_valency and new_valency_j <= other_max_valency:
+                            selected_bond_order = bond_order
+                            break
+                    
+                    # 如果所有候选键类型都不满足价态约束，选择单键（最保守）
+                    if selected_bond_order is None:
+                        selected_bond_order = 1
+                        # 但还是要检查单键是否满足价态约束
+                        new_valency_i = current_valency + 1
+                        new_valency_j = other_current_valency + 1
+                        if new_valency_i > max_valency or new_valency_j > other_max_valency:
+                            continue  # 即使单键也不满足，跳过
+                    
+                    # 添加键
+                    try:
+                        rw_mol = Chem.RWMol(mol)
+                        if selected_bond_order == 1:
+                            bond_type = Chem.BondType.SINGLE
+                        elif selected_bond_order == 2:
+                            bond_type = Chem.BondType.DOUBLE
+                        elif selected_bond_order == 3:
+                            bond_type = Chem.BondType.TRIPLE
+                        else:
+                            bond_type = Chem.BondType.SINGLE
+                        
+                        rw_mol.AddBond(atom_idx, nearest_atom_idx, bond_type)
+                        mol = rw_mol.GetMol()
+                        bonds_added += 1
+                    except Exception as e:
+                        # 如果添加键失败（例如键已存在），继续
+                        continue
+            
+            # 如果本次迭代没有添加任何键且没有升级任何键，停止迭代
+            if bonds_added == 0 and bonds_upgraded == 0:
+                break
+            # 调试信息：打印添加和升级的键数
+            if iteration == 0 and (bonds_added > 0 or bonds_upgraded > 0):
+                import warnings
+                if bonds_upgraded > 0:
+                    warnings.warn(f"fix_missing_bonds_from_sdf: 第1次迭代升级了 {bonds_upgraded} 个键为双键")
+                if bonds_added > 0:
+                    warnings.warn(f"fix_missing_bonds_from_sdf: 第1次迭代添加了 {bonds_added} 个键")
+        
+        # 转换回SDF格式
+        try:
+            sdf_block = Chem.MolToMolBlock(mol)
+            if sdf_block:
+                if not sdf_block.strip().endswith("$$$$"):
+                    sdf_block = sdf_block.rstrip() + "\n$$$$\n"
+                return sdf_block
+            else:
+                # 如果生成SDF失败，返回原始SDF
+                import warnings
+                warnings.warn("fix_missing_bonds_from_sdf: MolToMolBlock 返回空字符串，返回原始SDF")
+                return sdf_content
+        except Exception as e:
+            # 如果转换失败，返回原始SDF
+            import warnings
+            warnings.warn(f"fix_missing_bonds_from_sdf: 转换SDF时出现异常: {e}，返回原始SDF")
+            return sdf_content
+        
+        return sdf_content
+        
+    except Exception as e:
+        # 如果出现任何错误，返回原始SDF
+        import warnings
+        warnings.warn(f"fix_missing_bonds_from_sdf 出现异常: {e}，返回原始SDF")
+        return sdf_content
+
+
 def xyz_to_sdf(coords, atom_type, ele_list):
     """
     Convert atomic coordinates and types to SDF format string (without bonds).

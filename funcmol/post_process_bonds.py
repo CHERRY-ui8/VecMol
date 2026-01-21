@@ -15,29 +15,35 @@ OpenBabel连键后处理脚本
 """
 
 # 硬编码的输入和输出目录
-exp_date = "20260116"
-exp_version = "version_2"
-ckpt_name = "epoch_9"
-dataset_name = "fm_drugs"  # 数据集名称：fm_qm9 或 fm_drugs
-input_dir = f"/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/{dataset_name}/{exp_date}/samples/{exp_date}_{exp_version}_{ckpt_name}/molecule"
-output_dir = f"/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/{dataset_name}/{exp_date}/samples/{exp_date}_{exp_version}_{ckpt_name}_withbonds_addH/molecule"
-add_hydrogens = True # 是否自动补齐缺少的H原子（True: 补齐, False: 不补齐）
-keep_largest_component = False # 是否只保留最大连通分支（True: 只保留最大分支, False: 保留所有有键连接的片段）
-
-# exp_date = "20251225"
-# exp_version = "version_1"
-# ckpt_name = "last"
-# dataset_name = "fm_qm9"  # 数据集名称：fm_qm9 或 fm_drugs
-# input_dir = f"/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/{dataset_name}/{exp_date}/samples/{exp_date}_{exp_version}_{ckpt_name}/molecule"
-# output_dir = f"/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/{dataset_name}/{exp_date}/samples/{exp_date}_{exp_version}_{ckpt_name}_withbonds_addH/molecule"
+# exp_date = "20260116"
+# exp_version = "version_2"
+# ckpt_name = "epoch_9"
+# dataset_name = "fm_drugs"  # 数据集名称：fm_qm9 或 fm_drugs
+# input_dir = f"/data/huayuchen/Neurl-voxel/exps/funcmol/{dataset_name}/{exp_date}/samples/{exp_date}_{exp_version}_{ckpt_name}/molecule"
+# output_dir = f"/data/huayuchen/Neurl-voxel/exps/funcmol/{dataset_name}/{exp_date}/samples/{exp_date}_{exp_version}_{ckpt_name}_withbonds_addH/molecule"
 # add_hydrogens = True # 是否自动补齐缺少的H原子（True: 补齐, False: 不补齐）
-# keep_largest_component = True # 是否只保留最大连通分支（True: 只保留最大分支, False: 保留所有有键连接的片段）
+# keep_largest_component = False # 是否只保留最大连通分支（True: 只保留最大分支, False: 保留所有有键连接的片段）
 
+exp_date = "20260117"
+exp_version = "version_0"
+ckpt_name = "epoch_269"
+dataset_name = "fm_qm9"  # 数据集名称：fm_qm9 或 fm_drugs
+# input_dir = '/data/huayuchen/Neurl-voxel/exps/funcmol/fm_drugs/20260116/samples/20260116_version_2_epoch_9_better_converge/molecule'
+input_dir = f"/data/huayuchen/Neurl-voxel/exps/funcmol/{dataset_name}/{exp_date}/samples/{exp_date}_{exp_version}_{ckpt_name}/molecule"
+# output_dir = '/data/huayuchen/Neurl-voxel/exps/funcmol/fm_drugs/20260116/samples/20260116_version_2_epoch_9_better_converge_withbonds_addH_fix_2.0_from_small_frag/molecule'
+output_dir = f"/data/huayuchen/Neurl-voxel/exps/funcmol/{dataset_name}/{exp_date}/samples/{exp_date}_{exp_version}_{ckpt_name}_withbonds_addH_improved/molecule"
+add_hydrogens = True # 是否自动补齐缺少的H原子（True: 补齐, False: 不补齐）
+keep_largest_component = True # 是否只保留最大连通分支（True: 只保留最大分支, False: 保留所有有键连接的片段）
+fix_missing_bonds = True # 是否使用fix_missing_bonds_from_sdf修复缺失的键（True: 使用, False: 直接补H）
+bond_length_ratio = 1.5 # 键修复时的标准键长比例阈值（距离≤标准键长×此值时添加键）
 
+import sys
 from pathlib import Path
+# 添加项目根目录到 Python 路径，以便导入 funcmol 模块
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
 from tqdm import tqdm
-import numpy as np
-from funcmol.utils.utils_base import add_bonds_with_openbabel, xyz_to_sdf, add_hydrogens_manually_from_sdf
+from funcmol.utils.utils_base import add_bonds_with_openbabel, xyz_to_sdf, add_hydrogens_manually_from_sdf, fix_missing_bonds_from_sdf
 
 # 禁用RDKit警告
 from rdkit import RDLogger
@@ -134,7 +140,7 @@ def remove_isolated_atoms_from_sdf(sdf_content: str) -> str:
         return sdf_content
 
 
-def process_sdf_file(input_sdf_path: Path, output_sdf_path: Path, elements: list, add_hydrogens: bool = True, keep_largest_component: bool = False) -> bool:
+def process_sdf_file(input_sdf_path: Path, output_sdf_path: Path, elements: list, add_hydrogens: bool = True, keep_largest_component: bool = False, fix_missing_bonds: bool = True, bond_length_ratio: float = 1.5) -> bool:
     """
     处理单个SDF文件，添加OpenBabel键
     
@@ -144,6 +150,8 @@ def process_sdf_file(input_sdf_path: Path, output_sdf_path: Path, elements: list
         elements: 元素列表，例如 ["C", "H", "O", "N", "F"]
         add_hydrogens: 是否自动补齐缺少的H原子（True: 补齐, False: 不补齐）
         keep_largest_component: 是否只保留最大连通分支（True: 只保留最大分支, False: 保留所有有键连接的片段）
+        fix_missing_bonds: 是否使用fix_missing_bonds_from_sdf修复缺失的键（True: 使用, False: 直接补H）
+        bond_length_ratio: 键修复时的标准键长比例阈值（距离≤标准键长×此值时添加键）
         
     Returns:
         bool: 是否成功处理
@@ -227,6 +235,32 @@ def process_sdf_file(input_sdf_path: Path, output_sdf_path: Path, elements: list
                 print(f"警告: 提取最大连通分支后分子为空 {input_sdf_path}")
                 return False
         
+        # 修复缺失的键（在补H之前）
+        if fix_missing_bonds:
+            from rdkit import Chem
+            mol_before_fix = Chem.MolFromMolBlock(sdf_with_bonds, sanitize=False)
+            n_bonds_before_fix = mol_before_fix.GetNumBonds() if mol_before_fix else 0
+            
+            sdf_fixed = fix_missing_bonds_from_sdf(sdf_with_bonds, bond_length_ratio=bond_length_ratio)
+            if sdf_fixed is not None:
+                mol_after_fix = Chem.MolFromMolBlock(sdf_fixed, sanitize=False)
+                n_bonds_after_fix = mol_after_fix.GetNumBonds() if mol_after_fix else 0
+                if n_bonds_after_fix != n_bonds_before_fix:
+                    diff = n_bonds_after_fix - n_bonds_before_fix
+                    if diff > 0:
+                        print(f"键修复: 添加了 {diff} 个键 (bond_length_ratio={bond_length_ratio})")
+                    else:
+                        print(f"键修复: 键数变化 {diff} (可能升级了单键为双键) (bond_length_ratio={bond_length_ratio})")
+                sdf_with_bonds = sdf_fixed
+            
+            # 修复键后，再次去除孤立原子（可能修复过程中连接了不应该连接的孤立原子）
+            sdf_with_bonds = remove_isolated_atoms_from_sdf(sdf_with_bonds)
+            
+            # 如果去除孤立原子后SDF为空，跳过
+            if not sdf_with_bonds or sdf_with_bonds.strip() == "":
+                print(f"警告: 修复键后去除孤立原子，分子为空 {input_sdf_path}")
+                return False
+        
         # 补H原子（add_hydrogens_manually_from_sdf内部会在补H之前排除单原子碎片）
         if add_hydrogens:
             sdf_with_h = add_hydrogens_manually_from_sdf(sdf_with_bonds)
@@ -301,6 +335,9 @@ def main():
     print(f"元素列表: {elements}")
     print(f"自动补齐H原子: {add_hydrogens}")
     print(f"只保留最大连通分支: {keep_largest_component}")
+    print(f"修复缺失的键: {fix_missing_bonds}")
+    if fix_missing_bonds:
+        print(f"键修复比例阈值: {bond_length_ratio}")
     print("="*80)
     
     success_count = 0
@@ -314,7 +351,7 @@ def main():
             print(f"跳过: {output_path.name} 已存在")
             continue
         
-        if process_sdf_file(sdf_file, output_path, elements, add_hydrogens=add_hydrogens, keep_largest_component=keep_largest_component):
+        if process_sdf_file(sdf_file, output_path, elements, add_hydrogens=add_hydrogens, keep_largest_component=keep_largest_component, fix_missing_bonds=fix_missing_bonds, bond_length_ratio=bond_length_ratio):
             success_count += 1
     
     print("="*80)
