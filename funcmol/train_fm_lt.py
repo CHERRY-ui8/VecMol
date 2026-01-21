@@ -1105,10 +1105,12 @@ class FuncmolLightningModule(pl.LightningModule):
         self.funcmol_ema.update(self.funcmol)
         
         # Log metrics
+        # on_step=True: log every N steps (controlled by Trainer's log_every_n_steps=200)
+        # on_epoch=True: also log at the end of each epoch (for epoch-level statistics)
         self.log('train_loss', total_loss, batch_size=len(batch),
-                 on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+                 on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log('train_denoiser_loss', denoiser_loss, batch_size=len(batch),
-                 on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
+                 on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
         
         # Store loss for plotting
         self.train_losses.append(total_loss.item())
@@ -1163,10 +1165,12 @@ class FuncmolLightningModule(pl.LightningModule):
         self.funcmol_ema.update(self.funcmol)
         
         # Log metrics
+        # on_step=True: log every N steps (controlled by Trainer's log_every_n_steps=200)
+        # on_epoch=True: also log at the end of each epoch (for epoch-level statistics)
         self.log('train_loss', total_loss, batch_size=len(batch),
-                 on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+                 on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log('train_denoiser_loss', denoiser_loss, batch_size=len(batch),
-                 on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
+                 on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
         
         # Store loss for plotting
         self.train_losses.append(total_loss.item())
@@ -1896,6 +1900,7 @@ def main(config):
         precision="bf16-mixed",
         enable_checkpointing=True,
         check_val_every_n_epoch=1,  # Validate every epoch (save checkpoint every epoch)
+        log_every_n_steps=200,  # Log metrics every N training steps (in addition to epoch-level logging)
         # Use built-in gradient clipping
         gradient_clip_val=config.get("max_grad_norm", 1.0),
         gradient_clip_algorithm="norm",
