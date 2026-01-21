@@ -12,7 +12,7 @@ sys.path.append("..")
 
 # Set GPU environment
 # os.environ['CUDA_VISIBLE_DEVICES'] = "1"
-os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3,4,5,6"
+os.environ['CUDA_VISIBLE_DEVICES'] = "4,5,6,7"
 # os.environ['CUDA_VISIBLE_DEVICES'] = "0,2,3,4,5"
 
 # Data visualization and processing
@@ -213,7 +213,7 @@ class FuncmolLightningModule(pl.LightningModule):
         
         if self.config["on_the_fly"]:
             with torch.no_grad():
-                codes, _ = infer_codes_occs_batch(
+                codes = infer_codes_occs_batch(
                     batch, self.enc, self.config, to_cpu=False,
                     code_stats=self.code_stats if self.config["normalize_codes"] else None
                 )
@@ -1374,12 +1374,32 @@ def main(config):
                 print(f">> Using code_stats from checkpoint (resuming training)")
                 code_stats = checkpoint_code_stats
             else:
-                # Compute codes for normalization
-                print(f">> Computing code_stats from data (new training or checkpoint has no code_stats)")
-                _, code_stats = compute_codes(
-                    loader_train, enc, config_nf, "train", config["normalize_codes"],
-                    code_stats=None
-                )
+                # 尝试从指定路径加载code_stats
+                code_stats_path = config.get("code_stats_path", None)
+                if code_stats_path is not None and os.path.exists(code_stats_path):
+                    try:
+                        print(f">> Loading code_stats from specified path: {code_stats_path}")
+                        code_stats = torch.load(code_stats_path, map_location='cpu', weights_only=False)
+                        print(f">> Successfully loaded code_stats from file:")
+                        print(f">>   mean: {code_stats.get('mean', 'N/A')}")
+                        print(f">>   std: {code_stats.get('std', 'N/A')}")
+                        print(f">>   max_normalized: {code_stats.get('max_normalized', 'N/A')}")
+                        print(f">>   min_normalized: {code_stats.get('min_normalized', 'N/A')}")
+                    except Exception as e:
+                        print(f">> Warning: Failed to load code_stats from {code_stats_path}: {e}")
+                        print(f">> Will compute code_stats from data instead")
+                        code_stats = None
+                else:
+                    code_stats = None
+                
+                # 如果仍未加载到code_stats，则重新计算
+                if code_stats is None:
+                    # Compute codes for normalization
+                    print(f">> Computing code_stats from data (new training or checkpoint has no code_stats)")
+                    _, code_stats = compute_codes(
+                        loader_train, enc, config_nf, "train", config["normalize_codes"],
+                        code_stats=None
+                    )
         else:
             loader_train = create_code_loaders(config, split="train")
             loader_val = create_code_loaders(config, split="val")
@@ -1485,16 +1505,36 @@ def main(config):
                 print(f">> Using code_stats from checkpoint (resuming training)")
                 code_stats = checkpoint_code_stats
             else:
-                # NOTE: 这里可以通过 max_samples 近似统计，加速大规模 codes 的统计过程
-                # 例如使用前约 200000w 样本来估计 mean/std (200000w个float)
-                print(f">> Computing code_stats from codes directory (new training or checkpoint has no code_stats)")
-                code_stats = compute_code_stats_offline(
-                    loader_train,
-                    "train",
-                    config["normalize_codes"],
-                    num_augmentations=num_augmentations,
-                    max_samples=None,
-                )
+                # 尝试从指定路径加载code_stats
+                code_stats_path = config.get("code_stats_path", None)
+                if code_stats_path is not None and os.path.exists(code_stats_path):
+                    try:
+                        print(f">> Loading code_stats from specified path: {code_stats_path}")
+                        code_stats = torch.load(code_stats_path, map_location='cpu', weights_only=False)
+                        print(f">> Successfully loaded code_stats from file:")
+                        print(f">>   mean: {code_stats.get('mean', 'N/A')}")
+                        print(f">>   std: {code_stats.get('std', 'N/A')}")
+                        print(f">>   max_normalized: {code_stats.get('max_normalized', 'N/A')}")
+                        print(f">>   min_normalized: {code_stats.get('min_normalized', 'N/A')}")
+                    except Exception as e:
+                        print(f">> Warning: Failed to load code_stats from {code_stats_path}: {e}")
+                        print(f">> Will compute code_stats from codes directory instead")
+                        code_stats = None
+                else:
+                    code_stats = None
+                
+                # 如果仍未加载到code_stats，则重新计算
+                if code_stats is None:
+                    # NOTE: 这里可以通过 max_samples 近似统计，加速大规模 codes 的统计过程
+                    # 例如使用前约 200000w 样本来估计 mean/std (200000w个float)
+                    print(f">> Computing code_stats from codes directory (new training or checkpoint has no code_stats)")
+                    code_stats = compute_code_stats_offline(
+                        loader_train,
+                        "train",
+                        config["normalize_codes"],
+                        num_augmentations=num_augmentations,
+                        max_samples=None,
+                    )
         
         # Check if loaders are empty
         if not loader_train or len(loader_train) == 0:
