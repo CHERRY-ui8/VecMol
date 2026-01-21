@@ -57,7 +57,6 @@ class FieldDataset(Dataset):
         cubes_around: int = 3,
         debug_one_mol: bool = False,
         debug_subset: bool = False,
-        sample_near_atoms_only: bool = False,  # 是否只采样原子附近的点（用于joint fine-tuning）
         atom_distance_threshold: float = 0.5,  # 只采样距离原子多少Å内的点（单位：Å）
     ):
         if elements is None:
@@ -90,7 +89,6 @@ class FieldDataset(Dataset):
         # Allow targeted_sampling_ratio in validation/test to enable neighbor point sampling
         # Previously it was forced to 0 for non-train splits, but now we allow it for better evaluation
         self.targeted_sampling_ratio = targeted_sampling_ratio
-        self.sample_near_atoms_only = sample_near_atoms_only
         self.atom_distance_threshold = atom_distance_threshold
         
         # 根据数据加载方式设置field_idxs
@@ -409,34 +407,21 @@ class FieldDataset(Dataset):
             # targeted_sampling_ratio 表示 grid点数量 : 邻近点数量 的比例
             # 例如 targeted_sampling_ratio = 2 表示 grid点:邻近点 = 2:1
             # 例如 targeted_sampling_ratio = 0.5 表示 grid点:邻近点 = 1:2
+            # 如果 targeted_sampling_ratio = 0，则只采样grid点
+            # 如果 targeted_sampling_ratio 很大（接近无穷），则只采样邻近点
             
-            if self.sample_near_atoms_only:
-                # 只采样原子附近的点：在阈值范围内，使用向量化球体均匀采样
-                n_points = self.n_points
-                num_atoms = coords.size(0)
-                
-                # 1. 随机选择基准原子索引（一次性生成所有索引）
-                atom_indices = torch.randint(0, num_atoms, (n_points,), device=device)
-                atom_centers = coords[atom_indices]  # [n_points, 3]
-                
-                # 2. 生成均匀分布的球内随机偏移
-                vec = torch.randn(n_points, 3, device=device)
-                direction = vec / (torch.norm(vec, dim=-1, keepdim=True) + 1e-8)  # [n_points, 3]
-                r = torch.rand(n_points, 1, device=device).pow(1.0/3.0) * self.atom_distance_threshold
-                offsets = direction * r  # [n_points, 3]
-                
-                # 3. 相加得到最终坐标
-                query_points = atom_centers + offsets  # [n_points, 3]
-                point_types = torch.ones(n_points, dtype=torch.long, device=device)  # 全部是邻近点
-                return query_points, point_types
+            # 根据targeted_sampling_ratio计算grid点和邻近点的数量
+            # 设 grid点数量 = n_grid, 邻近点数量 = n_neighbor
+            # targeted_sampling_ratio = n_grid / n_neighbor
+            # n_grid + n_neighbor = n_points
+            # 解得: n_neighbor = n_points / (1 + targeted_sampling_ratio)
+            #      n_grid = n_points - n_neighbor
+            
+            if self.targeted_sampling_ratio == 0:
+                # 只采样grid点
+                n_neighbor = 0
+                n_grid = self.n_points
             else:
-                # 根据targeted_sampling_ratio计算grid点和邻近点的数量
-                # 设 grid点数量 = n_grid, 邻近点数量 = n_neighbor
-                # targeted_sampling_ratio = n_grid / n_neighbor
-                # n_grid + n_neighbor = n_points
-                # 解得: n_neighbor = n_points / (1 + targeted_sampling_ratio)
-                #      n_grid = n_points - n_neighbor
-                
                 n_neighbor = int(self.n_points / (1 + self.targeted_sampling_ratio))
                 n_grid = self.n_points - n_neighbor
                 
@@ -636,19 +621,28 @@ def create_field_loaders(
         DataLoader: Configured DataLoader for the specified dataset split.
     """
 
-    # 检查是否启用joint fine-tuning的"只采样原子附近"模式
+    # 如果joint fine-tuning启用，从joint_finetune配置中读取采样参数，否则使用dset中的默认值
     joint_finetune_config = config.get("joint_finetune", {})
-    sample_near_atoms_only = joint_finetune_config.get("enabled", False) and joint_finetune_config.get("sample_near_atoms_only", False)
-    # 从dset配置中读取atom_distance_threshold，如果没有则使用默认值0.5
-    atom_distance_threshold = config["dset"].get("atom_distance_threshold", 0.5)
+    joint_finetune_enabled = joint_finetune_config.get("enabled", False)
     
     # 如果joint fine-tuning启用且指定了n_points，则使用指定的值，否则使用默认的dset.n_points
     n_points = config["dset"]["n_points"]
-    if joint_finetune_config.get("enabled", False) and "n_points" in joint_finetune_config:
+    if joint_finetune_enabled and "n_points" in joint_finetune_config:
         n_points = joint_finetune_config["n_points"]
     
     # 从配置中读取targeted_sampling_ratio（grid点和邻近点的比例）
-    targeted_sampling_ratio = config["dset"].get("targeted_sampling_ratio", 2)
+    # 优先使用joint_finetune中的配置，如果没有则使用dset中的配置
+    if joint_finetune_enabled and "targeted_sampling_ratio" in joint_finetune_config and joint_finetune_config["targeted_sampling_ratio"] is not None:
+        targeted_sampling_ratio = joint_finetune_config["targeted_sampling_ratio"]
+    else:
+        targeted_sampling_ratio = config["dset"].get("targeted_sampling_ratio", 2)
+    
+    # 从配置中读取atom_distance_threshold
+    # 优先使用joint_finetune中的配置，如果没有则使用dset中的配置
+    if joint_finetune_enabled and "atom_distance_threshold" in joint_finetune_config and joint_finetune_config["atom_distance_threshold"] is not None:
+        atom_distance_threshold = joint_finetune_config["atom_distance_threshold"]
+    else:
+        atom_distance_threshold = config["dset"].get("atom_distance_threshold", 0.5)
     
     dset = FieldDataset(
         gnf_converter=gnf_converter,  # 传入GNFConverter实例
@@ -663,9 +657,8 @@ def create_field_loaders(
         sample_full_grid=sample_full_grid,
         debug_one_mol=config.get("debug_one_mol", False),
         debug_subset=config.get("debug_subset", False),
-        sample_near_atoms_only=sample_near_atoms_only,
         atom_distance_threshold=atom_distance_threshold,
-        targeted_sampling_ratio=targeted_sampling_ratio,  # 添加targeted_sampling_ratio参数
+        targeted_sampling_ratio=targeted_sampling_ratio,
     )
 
     if config.get("debug_one_mol", False):

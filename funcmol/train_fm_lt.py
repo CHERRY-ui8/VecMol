@@ -121,10 +121,21 @@ class FuncmolLightningModule(pl.LightningModule):
         
         # New configuration for enhanced joint fine-tuning
         self.num_timesteps_for_decoder = joint_finetune_config.get("num_timesteps_for_decoder", 50)
-        # atom_distance_threshold 现在从 dset 配置中读取，不再从 joint_finetune 读取
-        self.atom_distance_threshold = config.get("dset", {}).get("atom_distance_threshold", 0.5)
+        # atom_distance_threshold: 优先从 joint_finetune 读取，否则从 dset 读取
+        if "atom_distance_threshold" in joint_finetune_config and joint_finetune_config["atom_distance_threshold"] is not None:
+            self.atom_distance_threshold = joint_finetune_config["atom_distance_threshold"]
+        else:
+            self.atom_distance_threshold = config.get("dset", {}).get("atom_distance_threshold", 0.5)
         self.magnitude_loss_weight = joint_finetune_config.get("magnitude_loss_weight", 0.1)
         self.use_cosine_loss = joint_finetune_config.get("use_cosine_loss", False)  # 默认使用MSE loss
+        
+        # atom_distance_scale: 用于 loss weighting 的指数衰减
+        # 优先从 joint_finetune 读取，否则从 loss_weighting 读取，最后使用默认值
+        if "atom_distance_scale" in joint_finetune_config and joint_finetune_config["atom_distance_scale"] is not None:
+            self.atom_distance_scale = joint_finetune_config["atom_distance_scale"]
+        else:
+            loss_weighting_config = config.get("loss_weighting", {})
+            self.atom_distance_scale = loss_weighting_config.get("atom_distance_scale", 0.5)
         
         # Set up decoder loss function for joint fine-tuning
         if self.joint_finetune_enabled:
@@ -139,8 +150,8 @@ class FuncmolLightningModule(pl.LightningModule):
                 print(f"Using cosine distance + magnitude loss (magnitude_weight={self.magnitude_loss_weight})")
             else:
                 print(f"Using MSE loss for decoder training")
-            print(f"Multi-timestep decoder training: using first {self.num_timesteps_for_decoder} small timesteps (t=0,1,...,{self.num_timesteps_for_decoder-1}) for slight noise perturbation, then denoising")
-            print(f"Query points filtering: keeping points within {self.atom_distance_threshold}Å of atoms")
+            print(f"Decoder training: randomly sampling one timestep from [0, {self.num_timesteps_for_decoder}) for slight noise perturbation, then denoising")
+            print(f"Query points sampling: targeted_sampling_ratio from config, atom_distance_threshold={self.atom_distance_threshold}Å, atom_distance_scale={self.atom_distance_scale}")
 
         # Field loss finetune configuration (decoder frozen)
         field_loss_finetune_config = config.get("field_loss_finetune", {})
@@ -440,19 +451,20 @@ class FuncmolLightningModule(pl.LightningModule):
     
     def _get_multi_timestep_codes(self, x_0):
         """
-        Get slightly perturbed and denoised codes by adding noise to the last N small timesteps, then denoising.
-        This ensures codes are only slightly perturbed (using small timesteps like t=0,1,2,3,4),
+        Get slightly perturbed and denoised codes by randomly sampling one timestep from [0, num_timesteps_for_decoder),
+        adding noise, then denoising. This ensures codes are only slightly perturbed (using small timesteps),
         and after denoising, the codes should be close to the original x_0, so decoder can 
         still generate fields similar to ground truth.
+        
+        Randomly samples a timestep for each sample in the batch from [0, num_timesteps_for_decoder)
+        to avoid OOM when num_timesteps_for_decoder is large. Each sample has its own independent timestep.
         
         Args:
             x_0: Ground truth codes [B, n_grid, code_dim]
             
         Returns:
-            multi_timestep_codes: [B, n_timesteps, n_grid, code_dim] tensor containing 
-                denoised codes for each timestep. These are codes that were slightly perturbed 
-                (using small timesteps like t=0,1,2,3,4) and then denoised, so they should be 
-                close to the original x_0.
+            denoised_codes: [B, n_grid, code_dim] tensor containing denoised codes.
+                Each sample uses its own randomly sampled timestep from [0, num_timesteps_for_decoder).
         """
         from funcmol.models.ddpm import q_sample, p_sample_x0
         
@@ -460,37 +472,26 @@ class FuncmolLightningModule(pl.LightningModule):
         B = x_0.shape[0]
         diffusion_consts = self.funcmol.diffusion_consts
         
-        # Use the last N small timesteps (e.g., t=0,1,2,3,4 for num_timesteps_for_decoder=5)
-        # These are timesteps close to 0, where noise is minimal, ensuring only slight perturbation
-        timesteps_list = list(range(0, self.num_timesteps_for_decoder))
+        # Randomly sample a timestep for each sample in the batch from [0, num_timesteps_for_decoder)
+        # This allows using large num_timesteps_for_decoder without OOM
+        # Each sample has its own independent timestep, similar to denoiser loss sampling
+        t = torch.randint(0, self.num_timesteps_for_decoder, (B,), device=device).long()
         
-        # Collect denoised codes for each timestep (add noise, then denoise)
-        all_denoised_codes = []
+        # Add noise to x_0 to get x_t (forward diffusion)
+        # Each sample uses its own timestep t[i]
+        noise = torch.randn_like(x_0)
+        x_t = q_sample(x_0, t, diffusion_consts, noise)
         
-        for t_val in timesteps_list:
-            # Create timestep tensor for this value
-            t = torch.full((B,), t_val, device=device, dtype=torch.long)
-            
-            # Add noise to x_0 to get x_t (forward diffusion with small timestep)
-            noise = torch.randn_like(x_0)
-            x_t = q_sample(x_0, t, diffusion_consts, noise)
-            
-            # Denoise using the model (predict x0)
-            if self.funcmol.diffusion_method == "new_x0":
-                # Model predicts x0 directly
-                with torch.no_grad():
-                    predicted_x0 = self.funcmol.net(x_t, t)
-            else:
-                # For "new" method, we need to use p_sample_x0 to get denoised codes
-                with torch.no_grad():
-                    predicted_x0 = p_sample_x0(self.funcmol.net, x_t, t, diffusion_consts, clip_denoised=False)
-            
-            all_denoised_codes.append(predicted_x0)
+        # Denoise using the model (predict x0)
+        # Note: We need gradients for decoder loss, so don't use torch.no_grad()
+        if self.funcmol.diffusion_method == "new_x0":
+            # Model predicts x0 directly
+            predicted_x0 = self.funcmol.net(x_t, t)
+        else:
+            # For "new" method, we need to use p_sample_x0 to get denoised codes
+            predicted_x0 = p_sample_x0(self.funcmol.net, x_t, t, diffusion_consts, clip_denoised=False)
         
-        # Stack all timesteps: [B, n_timesteps, n_grid, code_dim]
-        multi_timestep_codes = torch.stack(all_denoised_codes, dim=1)
-        
-        return multi_timestep_codes
+        return predicted_x0
     
     def _get_predicted_codes_from_diffusion(self, x_0):
         """
@@ -632,10 +633,11 @@ class FuncmolLightningModule(pl.LightningModule):
     def _compute_decoder_loss(self, codes, batch, batch_idx, is_training=True):
         """
         Compute decoder reconstruction loss for joint fine-tuning.
-        Supports multi-timestep codes, query point filtering, and cosine+magnitude loss.
+        Uses single timestep codes (randomly sampled from [0, num_timesteps_for_decoder)),
+        query point filtering, and cosine+magnitude loss.
         
         Args:
-            codes: Codes tensor [B, n_grid, code_dim] or [B, n_timesteps, n_grid, code_dim] (multi-timestep codes)
+            codes: Codes tensor [B, n_grid, code_dim] (single timestep codes, randomly sampled)
             batch: Data batch (PyTorch Geometric Batch if on_the_fly=True, or codes tensor if False)
             batch_idx: Batch index in DataLoader
             is_training: Whether this is training step (True) or validation step (False)
@@ -647,16 +649,8 @@ class FuncmolLightningModule(pl.LightningModule):
             return None
         
         device = codes.device
-        # Handle multi-timestep codes: [B, n_timesteps, n_grid, code_dim] or single timestep: [B, n_grid, code_dim]
-        if codes.dim() == 4:
-            # Multi-timestep codes
-            B, n_timesteps, _, _ = codes.shape
-            use_multi_timestep = True
-        else:
-            # Single timestep codes
-            B = codes.shape[0]
-            n_timesteps = 1
-            use_multi_timestep = False
+        # codes is now always [B, n_grid, code_dim] (single timestep, randomly sampled)
+        B = codes.shape[0]
         
         n_points = self.config["dset"]["n_points"]
         n_atom_types = self.config["dset"]["n_channels"]
@@ -796,60 +790,42 @@ class FuncmolLightningModule(pl.LightningModule):
                 traceback.print_exc()
                 return None
         
-        # Use query points directly (already filtered during dataset sampling if sample_near_atoms_only=True)
+        # Use query points directly (already sampled according to targeted_sampling_ratio)
         # No need to filter again
         filtered_query_points = query_points
         filtered_target_field = target_field
         n_filtered = filtered_query_points.shape[1]  # n_points
-        # Create a mask of all True (all points are valid since they're already filtered during sampling)
+        # Create a mask of all True (all points are valid)
         padded_valid_mask = torch.ones(B, n_filtered, dtype=torch.bool, device=device)
         
-        # Compute loss for each timestep (if multi-timestep) and average
-        all_timestep_losses = []
-        
-        for t_idx in range(n_timesteps):
-            # Get codes for this timestep
-            if use_multi_timestep:
-                timestep_codes = codes[:, t_idx, :, :]  # [B, n_grid, code_dim]
-            else:
-                timestep_codes = codes  # [B, n_grid, code_dim]
-            
-            # Generate predicted field using decoder
-            try:
-                pred_field = self.dec_module(filtered_query_points, timestep_codes)  # [B, n_filtered, n_atom_types, 3]
-            except Exception as e:
-                print(f"[WARNING] Failed to generate field from decoder for timestep {t_idx}: {e}")
-                continue
-            
-            # Ensure shapes match
-            if pred_field.shape != filtered_target_field.shape:
-                pred_field = pred_field.view(B, n_filtered, n_atom_types, 3)
-                if pred_field.shape != filtered_target_field.shape:
-                    print(f"[WARNING] Shape mismatch after reshape: pred_field {pred_field.shape} vs target_field {filtered_target_field.shape}")
-                    continue
-            
-            # Apply mask to ignore padded points
-            padded_valid_mask_expanded = padded_valid_mask.unsqueeze(-1).unsqueeze(-1)  # [B, n_filtered, 1, 1]
-            pred_field = pred_field * padded_valid_mask_expanded
-            filtered_target_field_masked = filtered_target_field * padded_valid_mask_expanded
-            
-            # Compute loss using utility function
-            timestep_loss = compute_decoder_field_loss(
-                pred_field,
-                filtered_target_field,
-                use_cosine_loss=self.use_cosine_loss,
-                magnitude_loss_weight=self.magnitude_loss_weight,
-                valid_mask=padded_valid_mask
-            )
-            
-            all_timestep_losses.append(timestep_loss)
-        
-        if len(all_timestep_losses) == 0:
-            print("[WARNING] No valid timestep losses computed")
+        # Generate predicted field using decoder
+        # codes is [B, n_grid, code_dim] (single timestep, randomly sampled)
+        try:
+            pred_field = self.dec_module(filtered_query_points, codes)  # [B, n_filtered, n_atom_types, 3]
+        except Exception as e:
+            print(f"[WARNING] Failed to generate field from decoder: {e}")
             return None
         
-        # Average over all timesteps
-        decoder_loss = torch.stack(all_timestep_losses).mean()
+        # Ensure shapes match
+        if pred_field.shape != filtered_target_field.shape:
+            pred_field = pred_field.view(B, n_filtered, n_atom_types, 3)
+            if pred_field.shape != filtered_target_field.shape:
+                print(f"[WARNING] Shape mismatch after reshape: pred_field {pred_field.shape} vs target_field {filtered_target_field.shape}")
+                return None
+        
+        # Apply mask to ignore padded points
+        padded_valid_mask_expanded = padded_valid_mask.unsqueeze(-1).unsqueeze(-1)  # [B, n_filtered, 1, 1]
+        pred_field = pred_field * padded_valid_mask_expanded
+        filtered_target_field_masked = filtered_target_field * padded_valid_mask_expanded
+        
+        # Compute loss using utility function
+        decoder_loss = compute_decoder_field_loss(
+            pred_field,
+            filtered_target_field,
+            use_cosine_loss=self.use_cosine_loss,
+            magnitude_loss_weight=self.magnitude_loss_weight,
+            valid_mask=padded_valid_mask
+        )
         
         return decoder_loss
     
@@ -1094,11 +1070,11 @@ class FuncmolLightningModule(pl.LightningModule):
         
         # Compute decoder loss if joint fine-tuning is enabled
         if self.joint_finetune_enabled:
-            # Get multi-timestep codes for decoder training
-            multi_timestep_codes = self._get_multi_timestep_codes(codes)  # [B, n_timesteps, n_grid, code_dim]
+            # Get single-timestep codes for decoder training (randomly sampled from [0, num_timesteps_for_decoder))
+            single_timestep_codes = self._get_multi_timestep_codes(codes)  # [B, n_grid, code_dim]
             
-            # Compute decoder loss using multi-timestep codes
-            decoder_loss = self._compute_decoder_loss(multi_timestep_codes, batch, batch_idx, is_training=True)
+            # Compute decoder loss using single-timestep codes
+            decoder_loss = self._compute_decoder_loss(single_timestep_codes, batch, batch_idx, is_training=True)
             if decoder_loss is not None:
                 total_loss = denoiser_loss + self.decoder_loss_weight * decoder_loss
                 # Log decoder loss separately
@@ -1222,11 +1198,11 @@ class FuncmolLightningModule(pl.LightningModule):
         
         # Compute decoder loss if joint fine-tuning is enabled
         if self.joint_finetune_enabled:
-            # Get multi-timestep codes for decoder training
-            multi_timestep_codes = self._get_multi_timestep_codes(codes)  # [B, n_timesteps, n_grid, code_dim]
+            # Get single-timestep codes for decoder training (randomly sampled from [0, num_timesteps_for_decoder))
+            single_timestep_codes = self._get_multi_timestep_codes(codes)  # [B, n_grid, code_dim]
             
-            # Compute decoder loss using multi-timestep codes
-            decoder_loss = self._compute_decoder_loss(multi_timestep_codes, batch, batch_idx, is_training=False)
+            # Compute decoder loss using single-timestep codes
+            decoder_loss = self._compute_decoder_loss(single_timestep_codes, batch, batch_idx, is_training=False)
             if decoder_loss is not None:
                 # Both denoiser and decoder are trained, combine losses
                 total_loss = denoiser_loss + self.decoder_loss_weight * decoder_loss
@@ -1290,11 +1266,11 @@ class FuncmolLightningModule(pl.LightningModule):
         
         # Compute decoder loss if joint fine-tuning is enabled
         if self.joint_finetune_enabled:
-            # Get multi-timestep codes for decoder training
-            multi_timestep_codes = self._get_multi_timestep_codes(codes)  # [B, n_timesteps, n_grid, code_dim]
+            # Get single-timestep codes for decoder training (randomly sampled from [0, num_timesteps_for_decoder))
+            single_timestep_codes = self._get_multi_timestep_codes(codes)  # [B, n_grid, code_dim]
             
-            # Compute decoder loss using multi-timestep codes
-            decoder_loss = self._compute_decoder_loss(multi_timestep_codes, batch, batch_idx, is_training=False)
+            # Compute decoder loss using single-timestep codes
+            decoder_loss = self._compute_decoder_loss(single_timestep_codes, batch, batch_idx, is_training=False)
             if decoder_loss is not None:
                 # Both denoiser and decoder are trained, combine losses
                 total_loss = denoiser_loss + self.decoder_loss_weight * decoder_loss

@@ -11,9 +11,9 @@ from funcmol.models.funcmol import create_funcmol
 import hydra
 import torch
 import traceback
-from funcmol.utils.utils_fm import load_checkpoint_fm
+from funcmol.utils.utils_fm import load_checkpoint_fm, find_checkpoint_path
 from funcmol.dataset.dataset_field import create_gnf_converter
-from funcmol.utils.utils_nf import load_neural_field
+from funcmol.utils.utils_nf import load_neural_field, create_neural_field
 from funcmol.utils.utils_base import xyz_to_sdf
 from funcmol.utils.misc import (
     parse_gpu_list_from_config,
@@ -86,9 +86,40 @@ def gpu_worker_process(
         funcmol = funcmol.cuda()
         funcmol.eval()
         
-        if nf_pretrained_path is None:
-            raise ValueError("nf_pretrained_path must be specified for denoiser mode")
-        _encoder, decoder = load_neural_field(nf_pretrained_path, config_dict)
+        # 尝试从 fm_pretrained_path 的 checkpoint 中加载 decoder_state_dict
+        # 如果 joint_finetune 启用了，decoder 应该保存在 diffusion checkpoint 中
+        decoder = None
+        try:
+            checkpoint_path = find_checkpoint_path(fm_pretrained_path)
+            lightning_checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+            
+            if "decoder_state_dict" in lightning_checkpoint:
+                print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id}] Found decoder_state_dict in diffusion checkpoint, loading from there...")
+                # 从 checkpoint 中获取 config（优先使用 checkpoint 中的 config，如果没有则使用传入的 config）
+                decoder_config = lightning_checkpoint.get("hyper_parameters", config_dict)
+                if decoder_config is None:
+                    decoder_config = config_dict
+                
+                # 创建 decoder 模型
+                _, decoder = create_neural_field(decoder_config)
+                
+                # 加载 decoder state dict
+                decoder_state_dict = lightning_checkpoint["decoder_state_dict"]
+                # 处理 _orig_mod. 前缀（如果存在）
+                new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in decoder_state_dict.items()}
+                decoder.load_state_dict(new_state_dict, strict=True)
+                print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id}] Successfully loaded decoder from diffusion checkpoint")
+        except Exception as e:
+            print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id}] Failed to load decoder from diffusion checkpoint: {e}")
+            print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id}] Falling back to loading decoder from neural field checkpoint...")
+            decoder = None
+        
+        # 如果从 diffusion checkpoint 加载失败，从 neural field checkpoint 加载
+        if decoder is None:
+            if nf_pretrained_path is None:
+                raise ValueError("nf_pretrained_path must be specified when decoder_state_dict is not found in diffusion checkpoint")
+            _encoder, decoder = load_neural_field(nf_pretrained_path, config_dict)
+        
         decoder = decoder.cuda()
         decoder.eval()
         decoder.set_code_stats(code_stats)
@@ -476,8 +507,8 @@ def main(config: DictConfig) -> None:
     base_output_dir.mkdir(parents=True, exist_ok=True)
     
     # 提取checkpoint标识并创建独立的子目录
-    checkpoint_identifier = extract_checkpoint_identifier(fm_path)
-    # checkpoint_identifier = "20260116_version_2_epoch_9_new"  # 临时硬编码
+    # checkpoint_identifier = extract_checkpoint_identifier(fm_path)
+    checkpoint_identifier = "20260120_version_2_last_efficent_converter"  # 临时硬编码
     output_dir = base_output_dir / "samples" / checkpoint_identifier
     output_dir.mkdir(parents=True, exist_ok=True)
     
