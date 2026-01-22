@@ -6,7 +6,7 @@ import os
 
 # Set GPU environment BEFORE importing torch (must be before any CUDA initialization)
 # TODO: set gpus based on server id
-os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3,4,5,6"
+os.environ['CUDA_VISIBLE_DEVICES'] = "0,2,3,4,5"
 # os.environ['CUDA_VISIBLE_DEVICES'] = "0,2,3,4,5"
 # os.environ['CUDA_VISIBLE_DEVICES'] = "0"
 
@@ -81,6 +81,17 @@ class NeuralFieldLightningModule(pl.LightningModule):
             # Use reduction='none' to apply weights element-wise
             self.criterion = nn.MSELoss(reduction='none')
             self.atom_distance_scale = loss_weight_config.get("atom_distance_scale", 1.0)  # 距离衰减尺度
+            # Weighting mode: "exp" (exponential decay) or "inverse_square" (1/distance^2)
+            self.weighting_mode = loss_weight_config.get("mode", "exp")
+            # Epsilon for inverse_square mode to avoid division by zero
+            self.inverse_square_epsilon = loss_weight_config.get("inverse_square_epsilon", 1e-6)
+            
+            if self.weighting_mode == "exp":
+                print(f"Loss weighting enabled: exponential decay mode (exp(-distance / {self.atom_distance_scale}))")
+            elif self.weighting_mode == "inverse_square":
+                print(f"Loss weighting enabled: inverse square mode (1 / (distance^2 + {self.inverse_square_epsilon}))")
+            else:
+                raise ValueError(f"Unknown weighting mode: {self.weighting_mode}. Choose 'exp' or 'inverse_square'")
         else:
             # Standard MSE loss for non-weighted mode
             self.criterion = nn.MSELoss()
@@ -109,6 +120,9 @@ class NeuralFieldLightningModule(pl.LightningModule):
             self.magnitude_loss_weight = finetune_config.get("magnitude_loss_weight", 0.1)
             self.n_points = finetune_config.get("n_points", None)  # If None, use dset.n_points
             self.max_timestep_for_decoder = finetune_config.get("max_timestep_for_decoder", 5)  # 使用很小的timestep范围（0到max_timestep_for_decoder-1）进行轻微加噪
+            # 真实 codes 的使用比例（0.0-1.0），剩余比例使用 denoised codes
+            # 例如：0.5 表示 50% 使用真实 codes，50% 使用 denoised codes
+            self.real_code_ratio = finetune_config.get("real_code_ratio", 0.5)  # 默认 50% 真实 codes，50% denoised codes
             
             print(f"use_denoiser_for_codes mode enabled:")
             print(f"  - sample_near_atoms_only: {self.sample_near_atoms_only}")
@@ -118,7 +132,8 @@ class NeuralFieldLightningModule(pl.LightningModule):
                 print(f"  - magnitude_loss_weight: {self.magnitude_loss_weight}")
             if self.n_points is not None:
                 print(f"  - n_points: {self.n_points}")
-            print(f"  - max_timestep_for_decoder: {self.max_timestep_for_decoder} (using small timesteps t=0 to {self.max_timestep_for_decoder-1} for slight noise perturbation, then denoising)")
+            print(f"  - max_timestep_for_decoder: {self.max_timestep_for_decoder} (randomly sample one timestep from [0, {self.max_timestep_for_decoder}) for slight noise perturbation, then denoising)")
+            print(f"  - real_code_ratio: {self.real_code_ratio} (will mix {self.real_code_ratio*100:.1f}% real codes with {(1-self.real_code_ratio)*100:.1f}% denoised codes)")
         
         if self.use_denoiser_for_codes:
             # Load denoiser model for code generation
@@ -151,9 +166,11 @@ class NeuralFieldLightningModule(pl.LightningModule):
             denoiser_config.setdefault("dset", config.get("dset", {}))
             
             # Create denoiser model
+            print(f">> Creating denoiser model...")
             self.denoiser = create_funcmol(denoiser_config)
             
             # Load denoiser state dict
+            print(f">> Loading denoiser state dict...")
             if "funcmol_state_dict" in checkpoint:
                 state_dict = checkpoint["funcmol_state_dict"]
             elif "state_dict" in checkpoint:
@@ -167,6 +184,11 @@ class NeuralFieldLightningModule(pl.LightningModule):
             self.denoiser.eval()
             for param in self.denoiser.parameters():
                 param.requires_grad = False
+            
+            # CRITICAL: Move denoiser to the same device as the model
+            # In DDP mode, Lightning will handle device placement, but we ensure it's on the correct device
+            # The denoiser will be moved to the correct device when the model is moved
+            print(f">> Denoiser model created and loaded successfully")
             
             # CRITICAL: Load code_stats from denoiser checkpoint for code normalization
             # Denoiser was trained on normalized codes, so we must normalize encoder-generated codes
@@ -265,7 +287,19 @@ class NeuralFieldLightningModule(pl.LightningModule):
         
         device = x_0.device
         B = x_0.shape[0]
+        
+        # CRITICAL: Ensure denoiser is on the same device as x_0
+        # This is especially important in DDP mode where devices might differ
+        if next(self.denoiser.parameters()).device != device:
+            self.denoiser = self.denoiser.to(device)
+        
         diffusion_consts = self.denoiser.diffusion_consts
+        
+        # CRITICAL: Ensure all diffusion constants are on the same device as x_0
+        # This prevents device mismatch errors when indexing with timestep tensor
+        for k, v in diffusion_consts.items():
+            if v.device != device:
+                diffusion_consts[k] = v.to(device)
         
         # Use a small timestep (randomly sample from 0 to max_timestep_for_decoder-1)
         # These are timesteps close to 0, where noise is minimal, ensuring only slight perturbation
@@ -335,21 +369,37 @@ class NeuralFieldLightningModule(pl.LightningModule):
             with torch.no_grad():
                 x_0 = self.enc(batch)  # [B, n_grid, code_dim]
             
+            # Mix real codes (directly from encoder) with denoised codes
+            # For each sample in the batch, randomly decide whether to use real codes or denoised codes
+            B = x_0.shape[0]
+            device = x_0.device
+            
+            # Randomly decide for each sample: True = use real codes, False = use denoised codes
+            use_real_codes = torch.rand(B, device=device) < self.real_code_ratio  # [B] boolean mask
+            
+            # Get denoised codes for all samples (we'll only use them where use_real_codes is False)
             # CRITICAL: Normalize codes before passing to denoiser
             # Denoiser was trained on normalized codes, so encoder-generated codes must be normalized
+            x_0_normalized = x_0.clone()
             if hasattr(self, 'denoiser_code_stats') and self.denoiser_code_stats is not None:
                 from funcmol.utils.utils_nf import normalize_code
                 code_stats = self._prepare_code_stats(self.denoiser_code_stats, x_0.device, x_0.dtype)
-                x_0 = normalize_code(x_0, code_stats)
+                x_0_normalized = normalize_code(x_0, code_stats)
             
-            # Get denoised code from final timestep using denoiser
-            codes = self._get_denoised_code(x_0)  # [B, n_grid, code_dim]
+            # Get denoised code using denoiser (randomly sample one timestep from [0, max_timestep_for_decoder))
+            denoised_codes = self._get_denoised_code(x_0_normalized)  # [B, n_grid, code_dim]
             
             # CRITICAL: Unnormalize codes after denoising (decoder expects unnormalized codes)
             if hasattr(self, 'denoiser_code_stats') and self.denoiser_code_stats is not None:
                 from funcmol.utils.utils_nf import unnormalize_code
-                code_stats = self._prepare_code_stats(self.denoiser_code_stats, codes.device, codes.dtype)
-                codes = unnormalize_code(codes, code_stats)
+                code_stats = self._prepare_code_stats(self.denoiser_code_stats, denoised_codes.device, denoised_codes.dtype)
+                denoised_codes = unnormalize_code(denoised_codes, code_stats)
+            
+            # Mix real codes and denoised codes based on use_real_codes mask
+            # For samples where use_real_codes=True, use x_0 (real codes)
+            # For samples where use_real_codes=False, use denoised_codes
+            use_real_codes_expanded = use_real_codes.view(B, 1, 1)  # [B, 1, 1] for broadcasting
+            codes = torch.where(use_real_codes_expanded, x_0, denoised_codes)  # [B, n_grid, code_dim]
         else:
             # Get codes from encoder
             # In fine-tuning mode, encoder is in eval mode, so use torch.no_grad() for efficiency
@@ -419,8 +469,20 @@ class NeuralFieldLightningModule(pl.LightningModule):
             min_distances = distances.min(dim=-1)[0]  # [n_points] - distance to nearest atom
             
             # Convert distance to weight: closer atoms = higher weight
-            # Use exponential decay: weight = exp(-distance / scale)
-            sample_weights = torch.exp(-min_distances / self.atom_distance_scale)
+            if self.weighting_mode == "exp":
+                # Exponential decay: weight = exp(-distance / scale)
+                sample_weights = torch.exp(-min_distances / self.atom_distance_scale)
+            elif self.weighting_mode == "inverse_square":
+                # Inverse square: weight = 1 / (distance^2 + epsilon)
+                # Add epsilon to avoid division by zero and provide smooth behavior near atoms
+                sample_weights = 1.0 / (min_distances ** 2 + self.inverse_square_epsilon)
+                # Optionally scale by atom_distance_scale for normalization
+                # This allows adjusting the overall magnitude of weights
+                if self.atom_distance_scale != 1.0:
+                    # Normalize by scale^2 to maintain similar magnitude as exp mode
+                    sample_weights = sample_weights * (self.atom_distance_scale ** 2)
+            else:
+                raise ValueError(f"Unknown weighting mode: {self.weighting_mode}")
             
             weights[b] = sample_weights
         
@@ -786,6 +848,11 @@ class NeuralFieldLightningModule(pl.LightningModule):
         # Keep denoiser in eval mode if used
         if self.use_denoiser_for_codes and self.denoiser is not None:
             self.denoiser.eval()
+            # CRITICAL: Ensure denoiser is on the same device as the model
+            # In DDP mode, this ensures all processes have denoiser on correct device
+            device = next(self.dec.parameters()).device
+            if next(self.denoiser.parameters()).device != device:
+                self.denoiser = self.denoiser.to(device)
         
         # Clean up GPU memory
         # if torch.cuda.is_available():
@@ -987,8 +1054,13 @@ def main(config):
         
     # Create data loaders
     try:
+        print(f">> Creating training data loader...")
         loader_train = create_field_loaders(config, data_gnf_converter, split="train")
+        print(f">> Training data loader created successfully")
+        
+        print(f">> Creating validation data loader...")
         loader_val = create_field_loaders(config, data_gnf_converter, split="val")
+        print(f">> Validation data loader created successfully")
         
         # # Handle cases where loaders are returned as lists
         # if loader_train is not None and isinstance(loader_train, list):
@@ -1011,7 +1083,9 @@ def main(config):
     gnf_converter = create_gnf_converter(config)
     
     # Initialize Lightning model
+    print(f">> Initializing Lightning model...")
     model = NeuralFieldLightningModule(config, gnf_converter)
+    print(f">> Lightning model initialized successfully")
     
     # Load checkpoint if specified
     if config["reload_model_path"] is not None:

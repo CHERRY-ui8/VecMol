@@ -1,0 +1,103 @@
+% \section{Related Work}
+% \label{sec:related_work}
+
+% \paragraph{Neural Fields.}
+% Neural fields, also referred to as implicit neural representations (INRs), are coordinate-based neural networks that map coordinates (e.g., pixels on an image or coordinates in 3D Euclidean space) to features (e.g., RGB values or atomic occupancies). The idea of representing data points implicitly as neural networks dates back to the work of \cite{stanley2007compositional}. Recently, these representations have been successfully applied to model continuous signals, including 2D images~\cite{chan2021pi,wang2024neural,du2021learning}, 3D shapes~\cite{chen2019learning,mescheder2019occupancy,Park2019,michalkiewicz2019implicit}, 3D scenes~\cite{sitzmann2019scene,mildenhall2020nerf}, videos~\cite{li2020neural,chen2022videoinr}, and physics simulations~\cite{raissi2019physics,yin2023continuous}, due to their appealing properties such as arbitrary resolution and memory efficiency. Two seminal works overcame the spectral bias of coordinate-based neural networks~\cite{rahaman2019spectral}: Sitzmann \emph{et al.}~\cite{sitzmann2020siren} propose SIREN with periodic activation functions, while Tancik \emph{et al.}~\cite{Tancik2020} introduce positional encoding based on Fourier features. Built on these architectures, multiplicative filter networks (MFNs)~\cite{Fathony2021} represent fields as linear combinations over basis functions. Unlike these approaches that use MFNs or coordinate MLPs, we employ E(n)-equivariant graph neural networks (EGNNs)~\cite{satorras2021n} to ensure geometric equivariance, which is crucial for 3D molecular generation.
+
+% \paragraph{Generative Models of Fields.}
+% Generative models for neural fields were first applied in 3D computer vision. Mescheder \emph{et al.}~\cite{mescheder2019occupancy} learn distributions of shape occupancy fields with VAEs~\cite{kingma2013auto}, while \cite{chen2019learning,dupont2021generative} use GANs~\cite{goodfellow2014generative}. Diffusion models~\cite{ho2020denoising} have also been applied to neural fields~\cite{Dupont2022,Erkoc2023,chou2023diffusion,zhang20233dshape2vecset}. Some work~\cite{Erkoc2023,navon2023equivariant} parameterize neural fields with all network weights, but for complex signals with millions of parameters, it is preferable to use low-dimensional latent codes~\cite{Dupont2022,bauer2023spatial,luigi2023deep,zhou2023neural}. Dupont \emph{et al.}~\cite{Dupont2022} learn latent modulation codes via gradient-based meta learning~\cite{finn2017model}. Similarly, we parameterize neural fields with latent codes, but learn them through stochastic optimization following the auto-encoding framework~\cite{mescheder2019occupancy}, enabling end-to-end training with diffusion models.
+
+% \paragraph{3D Molecule Generation.}
+% Most 3D molecule generation methods represent molecules as point clouds of atoms. Autoregressive approaches~\cite{gebauer2018generating,gebauer2019symmetry,luo2022autoregressive} sample atoms sequentially, while normalizing flows~\cite{kohler2020equivariant,garcia2021n} model the distribution directly. Hoogeboom \emph{et al.}~\cite{hoogeboom2022equivariant} propose EDM, a diffusion model applied to point clouds with E(3) equivariance~\cite{satorras2021n}. Many follow-up works extend EDM~\cite{huang2023mdm,wu2022diffusion,xu2023geometric}, with some improving performance by leveraging molecular graphs and formal charges~\cite{vignac2023midi,hua2024mudiff,peng2023moldiff}. However, GNN-based methods scale quadratically with the number of atoms and have limited expressivity due to message passing~\cite{xu2018powerful,morris2019weisfeiler}. 
+
+% Alternatively, voxel-based approaches~\cite{skalic2019shape,ragoza2020learning} map atomic densities to discrete 3D grids, enabling the use of convolutional networks and transformers. VoxMol~\cite{pinheiro2023d} and its latent version~\cite{nowara24nebula} use walk-jump sampling~\cite{saremi2019neural} and achieve state-of-the-art results on drug-like molecules. However, these methods scale cubically with molecular volume, limiting their application to larger structures.
+
+% Most closely related to our work is FuncMol~\cite{kirchmeyer2025scorebased3dmoleculegeneration}, which also uses neural fields for 3D molecule generation. FuncMol represents molecules as continuous atomic density fields (scalar fields) and employs multiplicative filter networks (MFNs) with walk-jump sampling for generation. While sharing the core idea of continuous field representations, our approach differs in several key aspects: (1) we use vector fields (pointing toward atoms) rather than scalar density fields, enabling more direct gradient-based reconstruction; (2) we employ E(n)-equivariant graph neural networks (EGNNs) instead of MFNs, ensuring geometric equivariance crucial for 3D molecular generation; (3) we use standard DDPM in the latent space rather than walk-jump sampling, providing more stable training and better generation quality; (4) we introduce a composite field definition method (Tanh-based) that achieves superior reconstruction performance. Our approach uses continuous vector fields, which are the natural generalization of discrete grids, achieving similar performance with better scalability.
+
+% \paragraph{Conditional Molecule Generation.}
+% Conditional 3D molecule generation typically builds upon unconditional models. Methods condition on 3D pharmacophores~\cite{skalic2019shape}, protein pockets~\cite{ragoza2022generating,peng2022pocket2mol,guan20233tdiff,pinheiro2024structure}, molecular fragments~\cite{igashov2024equivariant}, or molecular graphs~\cite{xu2022geodiff,jing2022torsional}. Some early approaches~\cite{target2smiles,target2smiles_2} generate SMILES strings conditioned on pockets, but ignore 3D geometric constraints. More recent methods~\cite{deepligbuilder,ligan,AR} generate 3D structures, but often use non-equivariant architectures or inefficient sampling. We are aware of one other work using field-based representations for molecules~\cite{wang2023generating}, but it focuses on conformer generation given molecular graphs, whereas we address unconditional generation. Our approach can be easily adapted to conditional tasks such as structure-based drug design.
+
+% \paragraph{Equivariant Neural Networks.}
+% E(n)-equivariant networks ensure that model outputs transform correctly under rotations and translations. Various architectures achieve equivariance~\cite{cohen2016group,schutt2017quantum,weiler20183d,thomas2018tensor,anderson2019cormorant,fuchs2020se,guan2021energy}, with GNN-based approaches~\cite{klicpera2020directional,satorras2021n} being common for 3D objects. Vector neuron networks~\cite{vector_neuron} extend scalar neurons to 3D vectors, while geometric vector perceptrons~\cite{gvp2} propagate information between scalar and vector features. However, these methods often limit geometric expressiveness to maintain equivariance. Our EGNN-based decoder naturally handles both scalar (node features) and vector (coordinates) representations while maintaining E(n) equivariance, enabling expressive field predictions. 
+
+% \section{Related Work}
+% \label{sec:related_work}
+
+% \paragraph{Continuous neural-field representations for 3D geometry.}
+% Continuous neural fields, also known as implicit neural representations (INRs), model signals as coordinate-to-value mappings and have become a standard tool for representing high-fidelity 3D geometry.
+% Early and influential works include learned signed distance and occupancy fields, such as DeepSDF~\cite{park2019deepsdf} and Occupancy Networks~\cite{mescheder2019occupancy}, as well as neural radiance fields for scene modeling~\cite{mildenhall2020nerf}.
+% Subsequent research has shown that neural fields can be efficiently parameterized using compact latent codes and decoded into continuous spatial signals, enabling scalable representation learning across large datasets~\cite{dupont2022generative,zhang2023functa}.
+% These latent neural-field formulations form the foundation for modern generative models of continuous geometry.
+% In our work, we adopt this paradigm for molecular modeling but extend it in two key directions:
+% (i) we represent molecules using \emph{vector-valued} neural fields encoding directional gradient information rather than scalar densities, and
+% (ii) we employ an E($n$)-equivariant graph neural network decoder to ensure geometric consistency under rotations and translations, which is essential for 3D molecular data~\cite{satorras2021en}.
+
+% \paragraph{Generative modeling in neural-field and voxel latent spaces.}
+% Learning distributions over continuous fields has attracted increasing attention in recent years.
+% Some approaches directly apply generative models to neural fields or their parameters, including diffusion-based formulations for continuous signals~\cite{dupont2022diffusion}.
+% An alternative and widely adopted strategy is to learn compact latent representations of fields and perform generative modeling in the latent space using VAEs or diffusion models~\cite{bauer2023spatial,zhou2023neural}.
+% In the molecular domain, voxel-based atomic density representations provide a closely related perspective.
+% Several works discretize 3D space into voxel grids and represent atoms as continuous density functions centered at atomic positions, where voxel values encode atomic occupancy or density.
+% Notably, structure-based drug design by denoising voxel grids~\cite{ragoza2020learning} and VoxMol~\cite{pinheiro2023voxmol} demonstrate that score-based generative models operating on voxelized molecular densities can achieve strong performance in unconditional 3D molecule generation.
+% These voxelized formulations motivate structured latent field representations: while voxel grids store a single scalar value per spatial location, our method generalizes this idea by learning a \emph{spatial grid of multi-dimensional latent codes}, forming an explicit $[n,n,n,\text{code\_dim}]$ latent field.
+% This design substantially increases expressivity while preserving spatial locality and efficient decoding.
+
+% \paragraph{Equivariant 3D molecular generation.}
+% A large body of work focuses on generating 3D molecules by directly modeling atomic coordinates with architectures that respect Euclidean symmetries.
+% Representative approaches include autoregressive coordinate generators~\cite{gebauer2019symmetry}, normalizing flows~\cite{kohler2020equivariant}, and equivariant diffusion models.
+% Among them, EDM~\cite{hoogeboom2022equivariant} applies E(3)-equivariant diffusion to point clouds of atoms and has become a strong baseline for unconditional 3D molecular generation.
+% These coordinate-based methods generate atom sets directly and often achieve high fidelity, but they operate on discrete atomic representations and typically scale with the number of atoms.
+% In contrast, field-based approaches decouple generative modeling from explicit atom enumeration.
+% Our method learns a generative prior over structured latent fields and reconstructs discrete atomic positions through a differentiable gradient-ascent procedure, offering a complementary trade-off between scalability, symmetry preservation, and reconstruction accuracy.
+
+% \paragraph{Field-based molecular representations and score-based generation.}
+% Recent work has shown that field-based representations are effective for modeling molecular structure.
+% FuncMol~\cite{wang2023funcmol} represents molecules as continuous atomic density fields and applies score-based generative modeling with walk--jump sampling to generate realistic all-atom 3D molecules.
+% Similarly, voxel-based methods such as VoxMol~\cite{pinheiro2023voxmol} leverage discretized density fields and score-based denoising to achieve competitive results.
+% While these approaches primarily model \emph{scalar} density fields, our method focuses on \emph{vector-valued gradient fields} that directly encode directional information toward atomic centers.
+% Moreover, unlike approaches that treat latent codes as global vectors or unstructured modulation parameters, our latent representation preserves explicit 3D spatial structure in the form of a grid of multi-channel codes.
+% We perform standard DDPM-style diffusion in this structured latent field space and decode samples using an equivariant graph neural network, leading to stable training and accurate molecular reconstruction.
+
+\section{Related Work}
+\label{sec:related_work}
+
+\paragraph{Continuous neural-field representations for 3D geometry.}
+Continuous neural fields, often referred to as implicit neural representations (INRs), model signals as continuous mappings from spatial coordinates to field values and have become a widely adopted paradigm for representing high-resolution 3D geometry.
+Early and influential approaches include learned signed distance and occupancy functions, such as DeepSDF~\cite{park2019deepsdf} and Occupancy Networks~\cite{mescheder2019occupancy}, which represent shapes as continuous scalar fields.
+Neural radiance fields further extended this idea to view-dependent scene modeling by jointly encoding geometry and appearance~\cite{mildenhall2020nerf}.
+Subsequent work demonstrated that neural fields can be compactly parameterized using low-dimensional latent codes and decoded into continuous spatial signals, enabling scalable learning across large datasets~\cite{dupont2022functa,zhang2023functa}.
+These latent neural-field formulations provide the foundation for modern generative models of continuous geometry.
+In this work, we adopt this representation paradigm for molecular modeling and extend it in two important directions.
+First, instead of modeling scalar-valued densities, we represent molecules using vector-valued neural fields that encode directional gradient information.
+Second, we employ an E($n$)-equivariant graph neural network as the decoder to ensure consistency under rotations and translations, which is essential for modeling three-dimensional molecular structures~\cite{satorras2021en}.
+
+\paragraph{Generative modeling in neural-field and voxel latent spaces.}
+Learning probabilistic models over continuous fields has received increasing attention in recent years.
+Several approaches directly apply generative models to neural fields or their parameters, including diffusion-based formulations defined over continuous functions~\cite{dupont2022diffusion}.
+An alternative and widely used strategy is to learn compact latent representations of neural fields and perform generative modeling in the latent space using variational autoencoders or diffusion models~\cite{bauer2023spatial,zhou2023neural}.
+In the molecular domain, voxel-based atomic density representations provide a closely related perspective.
+These methods discretize three-dimensional space into regular grids and represent atoms as smooth density functions centered at atomic positions, where voxel values encode atomic occupancy or density.
+Notably, early structure-based drug design approaches based on denoising voxel grids~\cite{ragoza2020learning}, as well as VoxMol~\cite{pinheiro2023voxmol}, show that score-based generative models operating on voxelized molecular densities can achieve strong performance in unconditional 3D molecule generation.
+These voxel-based methods motivate structured latent field representations.
+While voxel grids store a single scalar value at each spatial location, our approach generalizes this idea by learning a spatial grid of multi-dimensional latent codes, forming an explicit [n, n, n, code\_dim] latent field.
+
+This design increases representational capacity while preserving spatial locality and enabling efficient decoding.
+
+\paragraph{Equivariant 3D molecular generation.}
+A substantial body of work focuses on generating three-dimensional molecular structures by directly modeling atomic coordinates with architectures that respect Euclidean symmetries.
+Representative approaches include autoregressive coordinate generation~\cite{gebauer2019symmetry}, equivariant normalizing flows~\cite{kohler2020equivariant}, and diffusion-based models.
+Among these, equivariant diffusion models have emerged as a strong class of methods.
+In particular, EDM~\cite{hoogeboom2022edm} applies E(3)-equivariant diffusion to atomic point clouds and has become a widely used baseline for unconditional 3D molecular generation.
+These coordinate-based approaches directly generate sets of atomic positions and often achieve high structural fidelity.
+However, they operate on discrete atomic representations and typically scale with the number of atoms in the molecule.
+In contrast, field-based approaches decouple generative modeling from explicit atom enumeration.
+Our method learns a generative prior over structured latent fields and reconstructs discrete atomic positions through a differentiable gradient-ascent procedure, offering a complementary trade-off between scalability, symmetry preservation, and reconstruction accuracy.
+
+\paragraph{Field-based molecular representations and score-based generation.}
+Recent studies have shown that field-based representations are effective for modeling molecular structure.
+FuncMol~\cite{wang2023funcmol} represents molecules as continuous atomic density fields and applies score-based generative modeling with walk--jump sampling to generate realistic all-atom three-dimensional molecules.
+Similarly, voxel-based approaches such as VoxMol~\cite{pinheiro2023voxmol} rely on discretized density fields and score-based denoising to achieve competitive performance.
+While these methods primarily focus on modeling scalar-valued density fields, our approach instead models vector-valued gradient fields that explicitly encode directional information toward atomic centers.
+In addition, unlike methods that treat latent codes as global vectors or unstructured modulation parameters, our latent representation preserves explicit three-dimensional spatial structure in the form of a grid of multi-channel latent codes.
+We perform standard DDPM-style diffusion in this structured latent field space and decode generated samples using an equivariant graph neural network, resulting in stable training dynamics and accurate molecular reconstruction.
+

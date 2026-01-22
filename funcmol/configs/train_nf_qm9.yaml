@@ -20,8 +20,8 @@ dirname: "${exp_dir}/${exp_name}"
 # 使用 finetune_decoder 时，需要设置 reload_model_path 指向包含已训练 decoder 权重的 checkpoint
 # 该 checkpoint 会同时加载 encoder 和 decoder 的权重，然后冻结 encoder，只微调 decoder
 # reload_model_path: "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/model-epoch=999.ckpt"
-# reload_model_path: "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260115/lightning_logs/version_0/checkpoints/model-epoch=212.ckpt"
-reload_model_path: null
+reload_model_path: "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260116/lightning_logs/version_0/checkpoints/model-epoch=275.ckpt"
+# reload_model_path: null
 
 auto_resume: True  # 是否自动加载最新的checkpoint继续训练
 
@@ -52,24 +52,25 @@ lr_gamma: 0.5  # 每次衰减为原来的0.5倍（比默认0.1更温和）
 
 
 # Fine-tuning settings: freeze encoder and only train decoder
-# finetune_decoder:
-#   enabled: False  # 是否启用decoder微调模式（冻结encoder，只训练decoder）
-#   freeze_encoder: True  # 是否冻结encoder（在微调模式下自动为True）
-#   # 使用denoiser生成codes（替代encoder）
-#   use_denoiser_for_codes: False  # 是否使用denoiser生成codes（如果为True，需要指定denoiser_checkpoint_path）
-#   denoiser_checkpoint_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251225/lightning_logs/version_1/checkpoints
-#   # 当 use_denoiser_for_codes=False 时，使用 on-the-fly 模式：
-#   # 实时从冻结的 encoder 计算 codes（类似于 diffusion 训练的 on_the_fly=True）
-#   # 微调模式下的特殊精细配置
-#   sample_near_atoms_only: True  # 是否只在采样时采样原子附近的点（微调模式下推荐True）
-#   atom_distance_threshold: 0.5  # 只采样距离原子多少Å内的query points（单位：Å，可以设置较小值如0.3-0.5）
-#   n_points: 300  # query points数量（如果未设置，则使用dset.n_points，默认500）
-#   use_cosine_loss: False  # 是否使用余弦距离loss（False表示使用MSE loss）
-#   magnitude_loss_weight: 0.1  # magnitude loss的权重（用于余弦距离+magnitude loss），只用余弦距离可能数值不稳定
-#   max_timestep_for_decoder: 1  # 使用很小的timestep范围（0到max_timestep_for_decoder-1）进行轻微加噪，然后去噪。这样codes只是经过轻微扰动，去噪后应该接近原始codes，decoder应该能够从这些codes得到和原先ground truth近似的field
-#   code_augmentation:
-#     enabled: False  # 微调模式下自动启用codes扰动
-#     noise_std: 0.003  # 高斯噪声标准差
+finetune_decoder:
+  enabled: True  # 是否启用decoder微调模式（冻结encoder，只训练decoder）
+  freeze_encoder: True  # 是否冻结encoder（在微调模式下自动为True）
+  # 使用denoiser生成codes（替代encoder）
+  use_denoiser_for_codes: True  # 是否使用denoiser生成codes（如果为True，需要指定denoiser_checkpoint_path）
+  denoiser_checkpoint_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20260120/lightning_logs/version_2/checkpoints
+  # 当 use_denoiser_for_codes=False 时，使用 on-the-fly 模式：
+  # 实时从冻结的 encoder 计算 codes（类似于 diffusion 训练的 on_the_fly=True）
+  # 微调模式下的特殊精细配置
+  sample_near_atoms_only: False  # 是否只在采样时采样原子附近的点（微调模式下推荐True）
+  atom_distance_threshold: 1  # 只采样距离原子多少Å内的query points（单位：Å，可以设置较小值如0.3-0.5）
+  n_points: 500  # query points数量（如果未设置，则使用dset.n_points，默认500）
+  use_cosine_loss: False  # 是否使用余弦距离loss（False表示使用MSE loss）
+  magnitude_loss_weight: 1  # magnitude loss的权重（用于余弦距离+magnitude loss），只用余弦距离可能数值不稳定
+  max_timestep_for_decoder: 10  # 每次从[0, max_timestep_for_decoder)中随机均匀采样一个timestep进行轻微加噪，然后去噪。这样codes只是经过轻微扰动，去噪后应该接近原始codes，decoder应该能够从这些codes得到和原先ground truth近似的field
+  real_code_ratio: 0.5  # 真实codes的使用比例（0.0-1.0），剩余比例使用denoised codes。例如：0.5表示50%使用真实codes（直接从encoder编码，不经过diffusion），50%使用denoised codes（经过diffusion去噪）。真实codes和denoised codes会一起随机均匀采样
+  code_augmentation:
+    enabled: False  # 微调模式下自动启用codes扰动
+    noise_std: 0.003  # 高斯噪声标准差
 
 # DEPRECATED: code augmentation for training robustness (仅在非微调模式下、重新训练时使用)
 # code_augmentation:
@@ -79,7 +80,9 @@ lr_gamma: 0.5  # 每次衰减为原来的0.5倍（比默认0.1更温和）
 # Loss weighting: 对更重要的区域（原子附近）加权
 loss_weighting:
   enabled: True  # 是否启用loss加权
-  atom_distance_scale: 1  # 原子距离衰减尺度（越小，距离衰减越快）
+  mode: "inverse_square"  # 权重计算模式："exp" (指数衰减 exp(-distance/scale)) 或 "inverse_square" (负平方反比 1/(distance^2+epsilon))
+  atom_distance_scale: 0.3  # 原子距离衰减尺度（exp模式：越小，距离衰减越快；inverse_square模式：用于权重归一化）
+  inverse_square_epsilon: 1e-3  # inverse_square模式的epsilon值，避免除零（仅在mode="inverse_square"时使用）
   # 分别计算grid点和邻近点的loss时的权重
   grid_loss_weight: 1.0  # grid点loss的权重
   neighbor_loss_weight: 1.0  # 邻近点loss的权重

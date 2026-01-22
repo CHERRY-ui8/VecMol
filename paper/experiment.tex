@@ -1,0 +1,241 @@
+\section{Experiments}
+\label{sec:experiments}
+We now evaluate our model for unconditional generation.
+We start with a description of our experimental setup (\Cref{sec:experiment_setup}), then present our results on two popular small molecule datasets (\Cref{sec:results_qm9,sec:results_geom}).
+
+\subsection{Experimental setup}
+\label{sec:experiment_setup}
+
+\paragraph{Datasets.}
+We evaluate \textsc{VecMol} on two datasets: \emph{QM9}~\cite{wu2018moleculenet} and \emph{GEOM-drugs}~\cite{Axelrod2022}.
+QM9 contains an enumeration of all possible molecules up to 9 heavy atoms (29 including hydrogens) satisfying some constraints~\cite{ramakrishnan2014quantum}.  
+GEOM-drugs contains multiple conformations for 430K drug-sized molecules (computed with semi-empirical density functional theory), with an average of 44 heavy atoms per molecule.
+We model hydrogen explicitly and consider 5 chemical elements for QM9 (C, H, O, N, F) and 8 for GEOM-drugs (C, H, O, N, F, S, Cl and Br), ignoring the P, I and B elements that occur extremely rarely. 
+We use a split of 100K/20K/13K molecules for QM9 and 1.1M/146K/146K on GEOM-drugs for train, validation and test, respectively. We use the same pre-processing and splits in~\cite{vignac2023midi} for QM9 and GEOM-drugs.
+
+\paragraph{Implementation details.} 
+Our main model, \emph{\textsc{VecMol}}, follows the auto-encoding approach described in~\Cref{sec:methods}. 
+The codes $z$ are computed with an encoder that takes as input molecular graphs and outputs latent codes defined on a regular 3D grid of anchor points.
+For QM9, we use a \emph{medium} configuration with latent dimensionality $d=256$ and grid size $L=5$ with anchor spacing of 3.0~\AA.
+For GEOM-drugs, we use a \emph{large} configuration with latent dimensionality $d=384$ and grid size $L=9$ with anchor spacing of 2.5~\AA.
+The encoder is a GNN with 6 layers and hidden dimension 256 for QM9, and 8 layers with hidden dimension 384 for GEOM-drugs.
+The decoder is an EGNN-based neural field with 5 layers and hidden dimension 256 for QM9, and 6 layers with hidden dimension 384 for GEOM-drugs.
+We augment the training set by applying random rotations on the three Euler angles.
+The weights of the latent code encoder and neural field decoder are trained jointly.
+
+For generation, we train a diffusion model in the latent space of vector fields.
+The denoiser is an EGNN with 10 layers and hidden dimension 512 for both datasets.
+We use a radius-based graph construction where the diffusion radius is set to 2.7 times the anchor spacing for both datasets, ensuring consistent connectivity patterns in the latent space despite different anchor spacings used on the two datasets.
+We employ a cosine noise schedule with 1000 diffusion steps, using $\beta_{\text{start}} = 0.0001$ and $\beta_{\text{end}} = 0.02$.
+We normalize the codes to have zero mean and unit variance.
+We use an $x_0$-prediction objective in latent space, which we found to be more stable than noise prediction for our bounded latent manifold.
+See~\Cref{app:impl} for more details on the implementation.
+
+\paragraph{Baselines.} 
+We compare \textsc{VecMol} to three state-of-the-art approaches. \emph{EDM}~\cite{hoogeboom2022equivariant} and \emph{GeoLDM}~\cite{xu2023geometric} are diffusion models operating on point clouds (the latter is a latent-space extension of the former). 
+\emph{VoxMol}~\cite{pinheiro2023d} is a voxel-based generative model that uses neural empirical Bayes, similar to our generative approach. 
+\emph{FuncMol}~\cite{schneuing2022structure} is a field-based method that represents molecules as neural fields.
+All of the methods generate molecules as a set of atom types and their coordinates. 
+EDM and GeoLDM apply diffusion directly to point clouds, while VoxMol, FuncMol and \textsc{VecMol} rely on an additional (cheap) post-processing step to extract atomic coordinates from voxel grids or modulation codes, respectively.
+We follow previous work~\cite{ragoza2020learning, vignac2023midi, pinheiro2023d, guan20233tdiff, schneuing2022structure}, and use standard cheminformatics software (OpenBabel~\cite{oboyle2011obabel}) to determine the molecule's atomic bonds given their atomic coordinates.
+The same post-processing is applied to all models for fairness of comparison.
+
+{\bf Metrics}. We consider several metrics used in previous work~\cite{pinheiro2023d} to benchmark unconditional molecule generation for the standard QM9 and GEOM-drugs datasets:
+\emph{stable mol} and \emph{stable atom}, the percentage of stable molecules and atoms (as defined in~\cite{hoogeboom2022equivariant});
+\emph{validity}, the percentage of generated molecules that passes RDKit~\cite{landrum2016RDKit}'s sanitization filter; 
+\emph{uniqueness}, the proportion of valid molecules that have different canonical SMILES;
+\emph{valency W$_1$}, the Wasserstein distance between the distribution of valencies in the generated and test set;
+\emph{atoms TV} and \emph{bonds TV}, the total variation between the distribution of atom types and bond types;
+\emph{bond length W$_1$} and \emph{bond angle W$_1$}, the Wasserstein distance between the distribution of bond and lengths. 
+We also report the \emph{average sampling time per molecule}. In the case of our method, this time includes the diffusion sampling steps, the rendering, peak detection and bond inference.
+
+To further investigate the quality of molecular conformations and other molecular properties on GEOM-drugs, we consider some additional metrics. These include:
+\emph{single fragment}, the percentage of molecules that contains only a single fragment;
+\emph{median strain energy}~\cite{harris2023benchmarking}, the difference between the internal energy of the generated molecule's pose and a relaxed pose of the molecule using RDKit's Universal Force Field ~\cite{rappe1992uff}, computed over all molecules;
+\emph{ring size TV}, the total variation between the empirical distribution of ring sizes (\ie number of heavy atoms in rings) in generated and test sets;
+\emph{number of atoms/mol TV}, the total variation between the empirical distribution of number of atoms per molecule in generated and test sets (in the case of molecules with multiple fragments, we consider only the largest fragment);
+\emph{QED, SA and logp}, measure the drug-likeness score~\cite{bickerton2012quantifying}, the synthesizability score~\cite{ertl2009estimation} and the lipophilic efficiency, respectively (computed with RDKit).
+
+\paragraph{Ablations.}
+In \Cref{app:autoencoder} we report reconstruction quality of the training molecules, demonstrating that the neural field autoencoder achieves high-fidelity reconstruction with low RMSD.
+\Cref{app:diffusion} presents ablation studies for the diffusion model, including an analysis of the EGNN radius parameter and its impact on generative performance (\Cref{sec:egnn_radius_ablation}).
+\Cref{sec:field_analysis} provides detailed analysis of the gradient field formulation and its design rationale.
+Finally, the latent noise robustness analysis in \Cref{app:autoencoder} shows that our field-based decoder is robust to noise, making it an ideal choice for generative modeling.
+
+\subsection{Generation Results}
+
+We evaluate the generative performance of \textsc{VecMol} on QM9 and GEOM-drugs
+and compare against representative point-cloud diffusion models and voxel- or
+field-based baselines.
+All results are reported for 10,000 generated molecules per model
+using the standard evaluation protocol described in
+\Cref{sec:experiment_setup}.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% QM9
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\subsection{Results on QM9.}
+\label{sec:results_qm9}
+Table~\ref{tab:qm9_results} reports generation results on QM9.
+As noted in prior work~\cite{vignac2021top,hoogeboom2022equivariant},
+QM9 is not fully suited for unconditional molecular generation,
+as the space of valid molecules is largely enumerated.
+Nevertheless, we report results on this dataset for completeness
+and to facilitate comparison with existing methods.
+
+Overall, \textsc{VecMol} achieves competitive validity and stability
+compared to voxel-based approaches such as VoxMol,
+while remaining below state-of-the-art point-cloud diffusion models
+in terms of distributional coverage.
+These results indicate that diffusion in the proposed latent
+vector-field space is feasible and produces chemically meaningful samples,
+even on small molecules where point-cloud methods are particularly strong.
+
+\begin{table*}[t!]
+\caption{QM9 generation results w.r.t.\ the test set for 10,000 samples per model.
+$\uparrow$/$\downarrow$ indicate that higher/lower is better.
+The row \textit{data} corresponds to randomly sampled molecules from the
+validation set.}
+\label{tab:qm9_results}
+\vspace{0.6em}
+\centering
+\begin{tabular}{lccccccccc|c}
+\toprule
+ & stable & stable & valid & unique & valency & atom & bond & bond & bond & time \\
+ & mol $\%_\uparrow$ & atom $\%_\uparrow$ & $\%_\uparrow$ & $\%_\uparrow$
+ & ${W_{1}}_\downarrow$ & $\mathrm{TV}_\downarrow$
+ & $\mathrm{TV}_\downarrow$ & len ${W_{1}}_\downarrow$
+ & ang ${W_{1}}_\downarrow$ & s/mol$_\downarrow$ \\
+\midrule
+\emph{data}
+& 98.7 & 99.8 & 98.9 & 99.9
+& .001 & .003 & .000 & .000 & .120 & -- \\
+\midrule
+EDM
+& 97.9 & 99.8 & 99.0 & 98.5
+& .011 & .021 & .002 & .001 & .440 & 0.54 \\
+GeoLDM
+& 97.5 & 99.9 & 100. & 98.0
+& .005 & .017 & .003 & .007 & .435 & 0.65 \\
+VoxMol
+& 89.3 & 99.2 & 98.7 & 92.1
+& .023 & .029 & .009 & .003 & 1.96 & 0.83 \\
+FuncMol
+& 89.2 & 99.0 & 100. & 92.8
+& .021 & .012 & .006 & .005 & 1.56 & 0.05 \\
+\midrule
+\textsc{VecMol} (Ours)
+& [XX.X] & [XX.X] & [XX.X] & [XX.X]
+& [X.XXX] & [X.XXX] & [X.XXX] & [X.XXX] & [X.XX] & [XX.X] \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% GEOM-drugs
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\subsection{Results on GEOM-drugs.}
+\label{sec:results_geom}
+GEOM-drugs constitutes a substantially more challenging benchmark,
+with larger molecular sizes, more diverse functional groups,
+and significantly richer conformational variability.
+Table~\ref{tab:geom_results_standard} reports standard generation metrics
+on this dataset.
+In addition to point-cloud diffusion baselines, we include
+\textbf{FuncMol} as a reference field-based method.
+
+\textsc{VecMol} consistently outperforms point-cloud diffusion models
+in terms of molecular stability and geometric consistency.
+While its sampling efficiency does not exceed that of FuncMol,
+the results demonstrate that latent diffusion over continuous
+vector-field representations provides a favorable trade-off
+between generation quality and structural stability
+in a high-dimensional molecular space.
+
+\begin{table*}[t!]
+\caption{GEOM-drugs generation results (standard metrics) w.r.t.\ the test set
+for 10,000 samples per model.
+$\uparrow$/$\downarrow$ indicate that higher/lower is better.
+The row \textit{data} corresponds to randomly sampled molecules from the
+validation set.}
+\label{tab:geom_results_standard}
+\vspace{0.6em}
+\centering
+\begin{tabular}{lccccccccc|c}
+\toprule
+ & stable & stable & valid & unique & valency & atom & bond & bond & bond & time \\
+ & mol $\%_\uparrow$ & atom $\%_\uparrow$ & $\%_\uparrow$ & $\%_\uparrow$
+ & ${W_{1}}_\downarrow$ & $\mathrm{TV}_\downarrow$
+ & $\mathrm{TV}_\downarrow$ & len ${W_{1}}_\downarrow$
+ & ang ${W_{1}}_\downarrow$ & s/mol$_\downarrow$ \\
+\midrule
+\emph{data}
+& 99.9 & 99.9 & 99.8 & 100.0
+& .001 & .001 & .025 & .000 & .05 & -- \\
+\midrule
+EDM
+& 40.3 & 97.8 & 87.8 & 99.9
+& .285 & .212 & .048 & .002 & 6.42 & 9.35 \\
+GeoLDM
+& 57.9 & 98.7 & 100. & 100.
+& .197 & .099 & .024 & .009 & 2.96 & 8.96 \\
+VoxMol
+& 75.0 & 98.1 & 93.4 & 99.6
+& .254 & .033 & .024 & .002 & 0.64 & 7.55 \\
+FuncMol
+& 69.7 & 98.8 & 100 & 95.3
+& .245 & .109 & .052 & .003 & 2.49 & 0.29 \\
+\midrule
+\textsc{VecMol} (Ours)
+& 62.6 & 97.0 & 82.6 & 100.
+& .322 & .103 & .269 & .088 & 11.32 & - \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% GEOM-drugs additional metrics
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\subsection{Additional metrics on GEOM-drugs.}
+Beyond standard validity and stability metrics,
+we further evaluate generated molecules using additional indicators
+that capture fragmentation, strain energy, and chemical realism.
+These metrics are summarized in Table~\ref{tab:geom_results_additional}.
+
+\begin{table*}[t!]
+\caption{GEOM-drugs generation results (additional metrics)
+w.r.t.\ the test set for 10,000 samples per model.
+$\uparrow$/$\downarrow$ indicate that higher/lower is better.
+The row \textit{data} corresponds to randomly sampled molecules
+from the validation set.}
+\label{tab:geom_results_additional}
+\vspace{0.6em}
+\centering
+\begin{tabular}{lccccccc}
+\toprule
+ & single & median & ring sz & atms/mol & QED & SA & logP \\
+ & frag $\%_\uparrow$ & energy$_\downarrow$
+ & $\mathrm{TV}_\downarrow$ & $\mathrm{TV}_\downarrow$
+ & $\uparrow$ & $\uparrow$ & $\uparrow$ \\
+\midrule
+\emph{data}
+& 100. & 54.5 & .011 & .000 & .658 & .832 & 2.95 \\
+\midrule
+EDM
+& 42.2 & 951.3 & .976 & .604 & .472 & .514 & 1.11 \\
+GeoLDM
+& 51.6 & 461.5 & .644 & .469 & .497 & .593 & 1.05 \\
+VoxMol
+& 82.6 & 69.2 & .264 & .636 & .659 & .762 & 2.73 \\
+FuncMol
+& 70.5 & 109.7 & .427 & 1.05 & .713 & .811 & 3.09 \\
+\midrule
+\textsc{VecMol} (Ours)
+& 14.1 &  & [X.XXX] & [X.XXX]
+& [X.XXX] & [X.XXX] & [X.XX] \\
+\bottomrule
+\end{tabular}
+\end{table*}

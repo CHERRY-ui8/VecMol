@@ -12,8 +12,8 @@ sys.path.append("..")
 
 # Set GPU environment
 # os.environ['CUDA_VISIBLE_DEVICES'] = "1"
-os.environ['CUDA_VISIBLE_DEVICES'] = "4,5,6,7"
-# os.environ['CUDA_VISIBLE_DEVICES'] = "0,2,3,4,5"
+# os.environ['CUDA_VISIBLE_DEVICES'] = "4,5,6,7"
+os.environ['CUDA_VISIBLE_DEVICES'] = "0,2,3,4,5"
 
 # Data visualization and processing
 import matplotlib.pyplot as plt
@@ -1079,7 +1079,7 @@ class FuncmolLightningModule(pl.LightningModule):
                 total_loss = denoiser_loss + self.decoder_loss_weight * decoder_loss
                 # Log decoder loss separately
                 self.log('train_decoder_loss', decoder_loss, batch_size=len(batch),
-                         on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
+                         on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
             else:
                 # If decoder loss computation failed, use only denoiser loss
                 print("[WARNING] Decoder loss computation failed, using only denoiser loss")
@@ -1152,7 +1152,7 @@ class FuncmolLightningModule(pl.LightningModule):
                 total_loss = denoiser_loss + self.decoder_loss_weight * decoder_loss
                 # Log decoder loss separately
                 self.log('train_decoder_loss', decoder_loss, batch_size=len(batch),
-                         on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
+                         on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
             else:
                 # If decoder loss computation failed, use only denoiser loss
                 print("[WARNING] Decoder loss computation failed, using only denoiser loss")
@@ -1678,9 +1678,12 @@ def main(config):
             # Check if field loaders are needed (for position weighting or field loss finetune)
             position_weight_config = config.get("position_weight", {})
             field_loss_finetune_config = config.get("field_loss_finetune", {})
+            joint_finetune_config = config.get("joint_finetune", {})
+            joint_finetune_enabled = joint_finetune_config.get("enabled", False)
             need_field_loaders = (
                 position_weight_config.get("enabled", False) or 
-                field_loss_finetune_config.get("enabled", False)
+                field_loss_finetune_config.get("enabled", False) or
+                joint_finetune_enabled
             )
             
             if need_field_loaders:
@@ -1689,6 +1692,8 @@ def main(config):
                     reason.append("position weighting")
                 if field_loss_finetune_config.get("enabled", False):
                     reason.append("field loss finetune")
+                if joint_finetune_enabled:
+                    reason.append("joint finetune")
                 reason_str = " and ".join(reason)
                 print(f">> {reason_str.capitalize()} enabled for on_the_fly=False mode")
                 print(">> Creating field loaders...")
@@ -1749,6 +1754,8 @@ def main(config):
                         num_augmentations_val = None
                     
                     print(">> Field loaders created successfully")
+                    print(f">>   field_loader_train: {field_loader_train is not None}")
+                    print(f">>   field_loader_val: {field_loader_val is not None}")
                     print(">> Will use index-based mapping (codes and molecules have matching order)")
                     
                     # Store num_augmentations and field dataset sizes in config for later use in model
@@ -1764,6 +1771,8 @@ def main(config):
                         print(">> Position weighting will be disabled for on_the_fly=False mode")
                     if field_loss_finetune_config.get("enabled", False):
                         print(">> Field loss finetune will be disabled (field dataset not available)")
+                    if joint_finetune_enabled:
+                        print(">> Joint finetune will be disabled (field dataset not available)")
                     print(">> Consider using on_the_fly=True mode")
                     import traceback
                     traceback.print_exc()
@@ -1844,9 +1853,11 @@ def main(config):
             print(f">> Using grid_size={model_config['dset']['grid_size']} and anchor_spacing={model_config['dset']['anchor_spacing']} from checkpoint")
     
     # Initialize Lightning model
+    print(f">> Initializing model with field_loader_train={field_loader_train is not None}, field_loader_val={field_loader_val is not None}")
     model = FuncmolLightningModule(model_config, enc, dec_module, code_stats, 
                                    field_loader_train=field_loader_train, 
                                    field_loader_val=field_loader_val)
+    print(f">> Model initialized: _field_dataset_train={model._field_dataset_train is not None}, _field_dataset_val={model._field_dataset_val is not None}")
     
     # Load checkpoint if specified
     if config["reload_model_path"] is not None:

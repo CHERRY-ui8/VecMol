@@ -4,27 +4,34 @@
 Figure~\ref{fig:overall_pipeline} provides an overview of the proposed framework. Our approach represents molecules as continuous vector fields defined over three-dimensional space and models their distribution through a two-stage generative process. Given an input molecular structure, we first encode it into a compact latent representation using a neural field autoencoder. The decoder then reconstructs a continuous vector field conditioned on the latent code, from which atomic positions can be recovered at arbitrary spatial resolution. To generate new molecules, we train a denoising diffusion probabilistic model (DDPM) in the latent space and sample novel latent codes, which are subsequently decoded into molecular vector fields and reconstructed into discrete atomic structures.
 
 
-\begin{figure}[t]
+\begin{figure*}[t]
     \centering
     \vspace{-0.8cm}
-    \includegraphics[width=\textwidth]{figures/overall_pipeline.pdf}
-    \vspace{-0.3cm}
+    \includegraphics[width=\textwidth]{figures/overall_pipeline.png}
+    \vspace{-0.4cm}
     \caption{
-    Overview of the proposed molecular neural field framework.
-    The architecture is organized into two rows.
-    
-    \textbf{Top row (from left to right):}
-    (1) An input 3D molecule represented by atomic types and coordinates;
-    (2) a deterministic encoder that converts the molecular graph into a continuous vector field (gradient field);
-    (3) a neural field decoder that reconstructs the molecular structure from the vector field representation.
-    
-    \textbf{Bottom row (from left to right):}
-    (4) the encoded vector field is projected into a latent space;
-    (5) a diffusion model operating in the latent space learns the distribution of molecular fields;
-    (6) generated latent samples are decoded back into vector fields and further reconstructed into valid 3D molecular structures.
+    \textbf{Overview of the proposed molecular neural field framework.}
+    The figure illustrates two complementary pipelines sharing the same neural field decoder and reconstruction module.
+    \textbf{(a) Encoding and reconstruction.}
+    An input molecule, represented by atomic coordinates, is encoded by a neural field encoder $E_\phi$
+    into a grid-based latent field representation $\mathbf{z} \in \mathbb{R}^{L^3 \times d}$.
+    Given a set of spatial query points $Q = \{\mathbf{q}_i\}_{i=1}^m \subset \mathbb{R}^3$,
+    the neural field decoder $D_\psi$ predicts a continuous molecular vector field
+    $\mathbf{V} = D_\psi(Q, \mathbf{z})$.
+    A dedicated reconstruction module then performs gradient-based ascent and merging
+    on the predicted vector field to recover discrete atomic coordinates,
+    yielding a reconstructed molecule(Section~\ref{sec:reconstruction}).
+    \textbf{(b) Generation and reconstruction.}
+    A denoising diffusion probabilistic model is trained in the latent field space.
+    Starting from Gaussian noise $\mathbf{z}_T \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$,
+    the diffusion model iteratively denoises the latent variables to obtain a sampled latent field $\mathbf{z}_0$.
+    The sampled latent field is decoded by the same neural field decoder and converted
+    into a discrete molecular structure using the same reconstruction module.
     }
     \label{fig:overall_pipeline}
-\end{figure}
+\end{figure*}
+
+
 
 
 \subsection{Neural Field Representation}
@@ -62,7 +69,56 @@ on the predicted vector field, followed by clustering of converged points.
 This procedure allows us to reconstruct molecular structures from continuous fields
 without relying on predefined grids or atom counts.
 
-\subsection{Encoder: Molecule-to-Field Encoding}
+\subsection{Field Definition}
+\label{sec:field}
+
+To supervise the neural field, we define a ground-truth vector field
+derived from discrete molecular structures.
+Our field definition explicitly separates direction selection from magnitude control,
+which is crucial for stable optimization and accurate reconstruction.
+
+For a query point $\mathbf{q} \in \mathbb{R}^3$ and atom type $k$,
+let $\mathcal{A}_k = \{\mathbf{a}_j\}_{j=1}^{n_k}$ denote the set of $n_k$ atoms of type $k$ with coordinates $\mathbf{a}_j \in \mathbb{R}^3$.
+We compute distances $d_j = \|\mathbf{q} - \mathbf{a}_j\|$ and direction vectors $\mathbf{d}_j = \mathbf{a}_j - \mathbf{q}$.
+
+Direction selection is performed using softmax weighting over inverse distances:
+\begin{equation}
+w_j^{\text{softmax}} = \frac{\exp(-d_j / \sigma_{\text{sf}})}{\sum_{j'=1}^{n_k} \exp(-d_{j'} / \sigma_{\text{sf}})},
+\end{equation}
+where $\sigma_{\text{sf}} > 0$ is a temperature parameter controlling the locality of direction selection.
+
+Magnitude control is achieved using a bounded, differentiable function:
+\begin{equation}
+w_j^{\text{mag}} = \tanh(d_j / \sigma_{\text{mag}}),
+\end{equation}
+where $\sigma_{\text{mag}} > 0$ controls the saturation point of the magnitude function.
+
+The normalized direction vector is:
+\begin{equation}
+\hat{\mathbf{d}}_j = \frac{\mathbf{d}_j}{\|\mathbf{d}_j\| + \epsilon},
+\end{equation}
+where $\epsilon > 0$ is a small constant for numerical stability.
+
+The ground-truth vector field for atom type $k$ at query point $\mathbf{q}$ is:
+\begin{equation}
+\mathbf{v}_k^*(\mathbf{q}) = \sum_{j=1}^{n_k} w_j^{\text{softmax}} \cdot w_j^{\text{mag}} \cdot \hat{\mathbf{d}}_j.
+\end{equation}
+
+This composite formulation provides several benefits:
+(i) the softmax weighting ensures nearby atoms dominate direction selection while maintaining smoothness,
+(ii) the tanh magnitude function provides bounded, well-conditioned gradients that prevent numerical instability,
+(iii) the separation of direction and magnitude allows independent control of field properties.
+
+We selected $\sigma_{\mathrm{sf}} = 0.1$ and $\sigma_{\mathrm{mag}} = 2.0$ as the optimal parameter configuration through systematic evaluation.
+This composite field definition outperforms alternative formulations (e.g., Gaussian or LogSumExp fields),
+yielding lower reconstruction error and faster convergence.
+Detailed analysis of field variants and parameter selection is provided in Section~\ref{sec:field_analysis}.
+
+\subsection{Neural Field Autoencoder}
+
+The neural field autoencoder consists of an encoder that maps variable-size molecular structures to fixed-size latent codes, and a decoder that reconstructs continuous vector fields from latent codes and spatial queries.
+
+\subsubsection{Encoder: Molecule-to-Field Encoding}
 
 The encoder $E_\phi$ maps a variable-size molecular structure to a fixed-size latent field representation.
 Given atomic coordinates $\mathbf{X} \in \mathbb{R}^{n \times 3}$ and atom types
@@ -73,6 +129,7 @@ To bridge the variable-size molecular graph and the fixed grid representation,
 we adopt a cross-graph encoding architecture with two types of edges:
 (i) an intra-atomic graph $\mathcal{G}_a$ connecting each atom to its $k_a$ nearest atomic neighbors via k-NN,
 and (ii) a cross graph $\mathcal{G}_{ag}$ connecting each grid anchor point to its $k_g$ nearest atoms.
+Additional architectural details are provided in Section~\ref{app:autoencoder}.
 
 Node features are initialized as:
 \begin{equation}
@@ -103,7 +160,7 @@ The final latent code $\mathbf{z} \in \mathbb{R}^{L^3 \times d}$ is obtained by 
 where $N_a$ is the total number of atom nodes and $g \in \{0, \ldots, L^3-1\}$ indexes grid anchors.
 This cross-graph formulation enables scalable encoding while preserving geometric structure.
 
-\subsection{Decoder: Field Prediction with Equivariance}
+\subsubsection{Decoder: Field Prediction with Equivariance}
 
 The decoder $D_\psi$ predicts continuous vector fields from latent codes and spatial queries.
 Given query points $Q = \{\mathbf{q}_i\}_{i=1}^m$ and latent grid codes $\mathbf{z} \in \mathbb{R}^{L^3 \times d}$,
@@ -155,49 +212,31 @@ This E(n)-equivariant design guarantees that the learned field representation
 is invariant to global translations and equivariant to rotations,
 ensuring physical consistency and suitability for gradient-based reconstruction.
 
-\subsection{Field Definition}
-\label{sec:field}
+\subsubsection{Training}
 
-To supervise the neural field, we define a ground-truth vector field
-derived from discrete molecular structures.
-Our field definition explicitly separates direction selection from magnitude control,
-which is crucial for stable optimization and accurate reconstruction.
+We jointly train the encoder $E_\phi$ and decoder $D_\psi$ to reconstruct
+ground-truth vector fields from molecular structures.
+For each molecule with atomic coordinates $\mathbf{X}$ and types $T$,
+we sample $m$ spatial query points $Q = \{\mathbf{q}_i\}_{i=1}^m$,
+encode the molecule to obtain latent codes $\mathbf{z} = E_\phi(\mathbf{X}, T)$,
+and predict vector fields $\mathbf{V} = D_\psi(Q, \mathbf{z})$.
 
-For a query point $\mathbf{q} \in \mathbb{R}^3$ and atom type $k$,
-let $\mathcal{A}_k = \{\mathbf{a}_j\}_{j=1}^{n_k}$ denote the set of $n_k$ atoms of type $k$ with coordinates $\mathbf{a}_j \in \mathbb{R}^3$.
-We compute distances $d_j = \|\mathbf{q} - \mathbf{a}_j\|$ and direction vectors $\mathbf{d}_j = \mathbf{a}_j - \mathbf{q}$.
-
-Direction selection is performed using softmax weighting over inverse distances:
+The training objective minimizes the mean squared error between predicted and ground-truth fields:
 \begin{equation}
-w_j^{\text{softmax}} = \frac{\exp(-d_j / \sigma_{\text{sf}})}{\sum_{j'=1}^{n_k} \exp(-d_{j'} / \sigma_{\text{sf}})},
+\mathcal{L}_{\text{auto}} = \frac{1}{mK}\sum_{i=1}^m \sum_{k=1}^K \|\mathbf{v}_k(\mathbf{q}_i) - \mathbf{v}_k^*(\mathbf{q}_i)\|^2,
 \end{equation}
-where $\sigma_{\text{sf}} > 0$ is a temperature parameter controlling the locality of direction selection.
+where $\mathbf{v}_k^*(\mathbf{q}_i)$ is the ground-truth field defined in Section~\ref{sec:field}.
 
-Magnitude control is achieved using a bounded, differentiable function:
+We employ adaptive spatial sampling to concentrate query points near atomic centers, where gradients are most informative (see Section~\ref{sec:adaptive_spatial_sampling}).
+Optionally, we apply distance-based weighting to emphasize regions near atoms:
 \begin{equation}
-w_j^{\text{mag}} = \tanh(d_j / \sigma_{\text{mag}}),
+w_i = \exp(-\min_j \|\mathbf{q}_i - \mathbf{a}_j\| / \sigma_w),
 \end{equation}
-where $\sigma_{\text{mag}} > 0$ controls the saturation point of the magnitude function.
-
-The normalized direction vector is:
+where $\sigma_w > 0$ controls the weighting scale, leading to a weighted loss:
 \begin{equation}
-\hat{\mathbf{d}}_j = \frac{\mathbf{d}_j}{\|\mathbf{d}_j\| + \epsilon},
+\mathcal{L}_{\text{auto}} = \frac{1}{\sum_i w_i}\sum_{i=1}^m w_i \sum_{k=1}^K \|\mathbf{v}_k(\mathbf{q}_i) - \mathbf{v}_k^*(\mathbf{q}_i)\|^2.
 \end{equation}
-where $\epsilon > 0$ is a small constant for numerical stability.
-
-The ground-truth vector field for atom type $k$ at query point $\mathbf{q}$ is:
-\begin{equation}
-\mathbf{v}_k^*(\mathbf{q}) = \sum_{j=1}^{n_k} w_j^{\text{softmax}} \cdot w_j^{\text{mag}} \cdot \hat{\mathbf{d}}_j.
-\end{equation}
-
-This composite formulation provides several benefits:
-(i) the softmax weighting ensures nearby atoms dominate direction selection while maintaining smoothness,
-(ii) the tanh magnitude function provides bounded, well-conditioned gradients that prevent numerical instability,
-(iii) the separation of direction and magnitude allows independent control of field properties.
-
-Empirically, we find that this composite field definition
-outperforms alternative formulations (e.g., Gaussian or LogSumExp fields),
-yielding lower reconstruction error and faster convergence.
+We address loss imbalance between field supervision and coordinate reconstruction through careful normalization and weighting strategies (see Section~\ref{sec:loss_imbalance}).
 
 \subsection{Latent Diffusion Model}
 
@@ -234,39 +273,15 @@ with node features initialized as $\mathbf{h}_i^{(0)} = \mathbf{z}_t[i, :]$ and 
 \mathbf{m}_{ij}^{(\ell)} = \text{EdgeMLP}\left([\mathbf{h}_i^{(\ell-1)}, \mathbf{h}_j^{(\ell-1)}, \|\mathbf{x}_i - \mathbf{x}_j\|, \mathbf{t}_{\text{emb}}]\right),
 \end{equation}
 where $\mathbf{t}_{\text{emb}}$ is obtained via sinusoidal position encoding of timestep $t$.
+Edges are constructed using radius-based neighborhoods, with detailed ablation studies on the radius parameter provided in Section~\ref{sec:egnn_radius_ablation}.
 
 Operating in latent space significantly reduces computational cost
 compared to diffusion directly on atomic coordinates,
 while preserving sufficient expressiveness for molecular generation.
+Additional details on the diffusion model design are provided in Section~\ref{app:diffusion}.
 
-\subsection{Training Procedure}
+\subsubsection{Training}
 
-Training is performed in two stages.
-
-\textbf{Stage 1: Neural Field Autoencoder.}
-We jointly train the encoder $E_\phi$ and decoder $D_\psi$ to reconstruct
-ground-truth vector fields from molecular structures.
-For each molecule with atomic coordinates $\mathbf{X}$ and types $T$,
-we sample $m$ spatial query points $Q = \{\mathbf{q}_i\}_{i=1}^m$,
-encode the molecule to obtain latent codes $\mathbf{z} = E_\phi(\mathbf{X}, T)$,
-and predict vector fields $\mathbf{V} = D_\psi(Q, \mathbf{z})$.
-
-The training objective minimizes the mean squared error between predicted and ground-truth fields:
-\begin{equation}
-\mathcal{L}_{\text{auto}} = \frac{1}{mK}\sum_{i=1}^m \sum_{k=1}^K \|\mathbf{v}_k(\mathbf{q}_i) - \mathbf{v}_k^*(\mathbf{q}_i)\|^2,
-\end{equation}
-where $\mathbf{v}_k^*(\mathbf{q}_i)$ is the ground-truth field defined in Section~\ref{sec:field}.
-
-Optionally, we apply distance-based weighting to emphasize regions near atoms:
-\begin{equation}
-w_i = \exp(-\min_j \|\mathbf{q}_i - \mathbf{a}_j\| / \sigma_w),
-\end{equation}
-where $\sigma_w > 0$ controls the weighting scale, leading to a weighted loss:
-\begin{equation}
-\mathcal{L}_{\text{auto}} = \frac{1}{\sum_i w_i}\sum_{i=1}^m w_i \sum_{k=1}^K \|\mathbf{v}_k(\mathbf{q}_i) - \mathbf{v}_k^*(\mathbf{q}_i)\|^2.
-\end{equation}
-
-\textbf{Stage 2: Latent Diffusion Model.}
 After autoencoder training, the encoder $E_\phi$ is frozen.
 Latent codes $\mathbf{z}_0 = E_\phi(\mathbf{X}, T)$ extracted from training molecules are used to train the diffusion model.
 
@@ -284,6 +299,13 @@ An exponential moving average of model parameters is maintained to stabilize tra
 where $\lambda \in (0, 1)$ is the momentum parameter.
 
 \subsection{Sampling and Molecule Reconstruction}
+\label{sec:reconstruction}
+
+Given a predicted vector field $\mathbf{V} = D_\psi(Q, \mathbf{z})$,
+we reconstruct discrete molecular structures by iteratively extracting
+atomic candidates via gradient ascent and merging.
+This procedure corresponds to the reconstruction module illustrated
+in Figure~\ref{fig:overall_pipeline}.
 
 To generate molecules, we first sample a latent code
 via the reverse diffusion process starting from Gaussian noise $\mathbf{z}_T \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$.
@@ -309,3 +331,4 @@ and chemically invalid structures are filtered out based on bond length and angl
 
 This procedure enables end-to-end generation of valid 3D molecular structures
 from latent diffusion samples.
+The detailed algorithm for field-to-molecule reconstruction is provided in Algorithm~\ref{algo:field_to_molecule} in Section~\ref{sec:field_analysis}.

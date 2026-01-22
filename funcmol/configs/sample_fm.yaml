@@ -21,17 +21,17 @@ defaults:
 # fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251103/lightning_logs/version_0/checkpoints/model-epoch=99.ckpt
 # fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251108/lightning_logs/version_1/checkpoints/model-epoch=364.ckpt
 # fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251225/lightning_logs/version_1/checkpoints/last.ckpt
-fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20260120/lightning_logs/version_0/checkpoints/last.ckpt
+fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20260121/lightning_logs/version_0/checkpoints/model-epoch=332.ckpt
 # fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_drugs/20260116/lightning_logs/version_2/checkpoints/model-epoch=09.ckpt
-dirname: ../exps/funcmol/fm_qm9/20260120
+dirname: ../exps/funcmol/fm_qm9/20260121
 
 # 生成参数
-max_samples: 1000  # 要生成的分子数量
+max_samples: 150  # 要生成的分子数量
 field_methods: ['tanh']  # 要使用的field方法
 batch_size: 32  # 批次大小，一次并行生成多个分子（分子级别的并行）
 
 # GPU配置
-gpu_list: [0, 2, 3,4,5]  # 指定要使用的GPU列表（可选，如果不指定则使用所有可用GPU或CUDA_VISIBLE_DEVICES）
+gpu_list: [0,2,3,4,5]  # 指定要使用的GPU列表（可选，如果不指定则使用所有可用GPU或CUDA_VISIBLE_DEVICES）
 use_multi_gpu: true  # 是否使用多GPU并行处理（默认true，如果gpu_list只有一个GPU则自动设为false）
 
 diffusion_method: "new_x0" #  方法选择: "old" (WJS) 或 "new" (DDPM) 或 "new_x0" (DDPM with x0)
@@ -62,7 +62,8 @@ smooth_sigma: 0.5
 # 模型路径
 # nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/model-epoch=999.ckpt
 # nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260112/lightning_logs/version_1/checkpoints/last.ckpt
-nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260116/lightning_logs/version_0/checkpoints/model-epoch=275.ckpt
+# nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260116/lightning_logs/version_0/checkpoints/model-epoch=275.ckpt
+nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260120/lightning_logs/version_0/checkpoints/last.ckpt
 # nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_drugs/20260113/lightning_logs/version_1/checkpoints/last.ckpt
 
 # set the running dir

@@ -52,13 +52,13 @@ position_weight:
 # 启用后，decoder 和 denoiser 将同时优化，encoder 始终冻结
 # decoder 默认使用 neural field checkpoint 中的 decoder，如果从 reload_model_path 加载的 checkpoint 中包含 decoder_state_dict，则优先使用
 joint_finetune:
-  enabled: False  # 是否启用联合微调（同时优化 decoder 和 denoiser）
-  decoder_loss_weight: 1.0  # decoder 损失权重（λ），用于组合损失：total_loss = denoiser_loss + λ * decoder_loss
-  decoder_lr: null  # decoder 的学习率，如果为 null 则使用 denoiser 的学习率（lr）
+  enabled: True  # 是否启用联合微调（同时优化 decoder 和 denoiser）
+  decoder_loss_weight: 10.0  # decoder 损失权重（λ），用于组合损失：total_loss = denoiser_loss + λ * decoder_loss
+  decoder_lr: 1e-4  # decoder 的学习率，如果为 null 则使用 denoiser 的学习率（lr）
 
-  num_timesteps_for_decoder: 5  # 从[0, num_timesteps_for_decoder)中随机均匀采样一个timestep进行decoder loss计算（避免OOM）
+  num_timesteps_for_decoder: 10  # 从[0, num_timesteps_for_decoder)中随机均匀采样一个timestep进行decoder loss计算（避免OOM）
 
-  n_points: 300  # joint fine-tuning时使用的query points数量（如果未设置，则使用dset.n_points，默认500）
+  n_points: null  # joint fine-tuning时使用的query points数量（如果未设置，则使用dset.n_points，默认500）
   targeted_sampling_ratio: null  # grid点和邻近点的比例 (n_grid / n_neighbor)，null表示使用dset.targeted_sampling_ratio
   atom_distance_threshold: null  # 只采样距离原子多少Å内的query points（单位：Å），null表示使用dset.atom_distance_threshold
   atom_distance_scale: null  # 原子距离衰减尺度（用于loss weighting的指数衰减），null表示使用loss_weighting.atom_distance_scale或默认值0.5
@@ -71,18 +71,18 @@ joint_finetune:
 # 启用后，decoder参数保持冻结，只用于提供field loss监督信号给denoiser
 # query points采样方法：使用dataset的_get_xs方法，一部分采样neighbor，一部分采样grid点
 field_loss_finetune:
-  enabled: True  # 是否启用field loss finetune
+  enabled: False  # 是否启用field loss finetune
   field_loss_weight: 100.0  # field loss的权重（λ），用于组合损失：total_loss = denoiser_loss + λ * field_loss
   num_timesteps_for_field_loss: 500  # 从[0, num_timesteps_for_field_loss)中随机均匀采样一个timestep进行field loss计算（避免OOM）
 
 # nf_pretrained_path: ../exps/neural_field/nf_qm9
 # nf_pretrained_path: ../exps/neural_field/nf_qm9_20250812_181425_750832
-nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260120/lightning_logs/version_0/checkpoints/last.ckpt
+nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260116/lightning_logs/version_0/checkpoints/model-epoch=275.ckpt
 exp_dir: ../exps/funcmol
 exp_name: "fm_${dset.dset_name}/${now:%Y%m%d}"
 dirname: "${exp_dir}/${exp_name}"
 
-reload_model_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20260117/lightning_logs/version_0/checkpoints/last.ckpt
+reload_model_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20260120/lightning_logs/version_2/checkpoints/last.ckpt
 # reload_model_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20260105/lightning_logs/version_1/checkpoints
   # Funcmol (denoiser) checkpoint 路径，支持两种格式：
   # 1. Lightning checkpoint 文件路径（.ckpt 文件），例如：/path/to/model-epoch=100.ckpt
@@ -91,7 +91,7 @@ reload_model_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/ex
 # data params
 smooth_sigma: 0.5 # 2.0, 1.0, 0.5
 normalize_codes: 1
-on_the_fly: False  # use True to compute codes on the fly from neural field
+on_the_fly: True  # use True to compute codes on the fly from neural field
 
 # Codes directory configuration
 # NOTE：选择是否使用数据增强的codes进行训练
@@ -103,18 +103,18 @@ use_augmented_codes: False  # True: 使用数据增强的codes, False: 使用原
 num_augmentations: 1  # null 或具体数字（如 3, 5, 10 等）
 
 # 不使用数据增强的codes路径（原始codes）
-codes_dir_no_aug: "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260120/lightning_logs/version_0/checkpoints/code_no_aug/"
+codes_dir_no_aug: "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260116/lightning_logs/version_0/checkpoints/code_no_aug/"
 # codes_dir_no_aug: "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/code_no_aug/"
 
 # 使用数据增强的codes路径（包含多个增强版本的codes）
-codes_dir_with_aug: "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260120/lightning_logs/version_0/checkpoints/codes_no_shuffle/" 
+codes_dir_with_aug: "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260116/lightning_logs/version_0/checkpoints/codes_no_shuffle/" 
 # codes_dir_with_aug: "/datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/codes_no_shuffle/"
 
 # training params
 num_epochs: 50000
 num_iterations: 50000  # 总迭代次数，用于学习率调度
 dset:
-  batch_size: 36
+  batch_size: 28
   num_workers: 4
 
 ckpt_every_n_epochs: 1  # 每隔多少epoch保存一次ckpt
@@ -122,7 +122,7 @@ decoder:
   code_dim: 256 # 和encoder的code_dim一致
 
 # optim params
-lr: 3e-4 # 1e-3 # 5e-4
+lr: 1e-4 # 1e-3 # 5e-4
 # use_lr_schedule: 1 # 0-NOT use lr schedule, 1-use lr schedule
 use_lr_schedule: 0 # 暂时禁用学习率调度，使用固定学习率
 # num_warmup_iter: 4000

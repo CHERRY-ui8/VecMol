@@ -70,6 +70,9 @@ class FieldDataset(Dataset):
         self.split = split
         self.rotate = rotate
         self.resolution = resolution
+        # Ensure n_points is not None, use default value if None
+        if n_points is None:
+            raise ValueError(f"n_points cannot be None. Please set dset.n_points or joint_finetune.n_points in config.")
         self.n_points = n_points
         self.sample_full_grid = sample_full_grid
         self.grid_dim = grid_dim
@@ -625,9 +628,9 @@ def create_field_loaders(
     joint_finetune_config = config.get("joint_finetune", {})
     joint_finetune_enabled = joint_finetune_config.get("enabled", False)
     
-    # 如果joint fine-tuning启用且指定了n_points，则使用指定的值，否则使用默认的dset.n_points
+    # 如果joint fine-tuning启用且指定了n_points（非null），则使用指定的值，否则使用默认的dset.n_points
     n_points = config["dset"]["n_points"]
-    if joint_finetune_enabled and "n_points" in joint_finetune_config:
+    if joint_finetune_enabled and "n_points" in joint_finetune_config and joint_finetune_config["n_points"] is not None:
         n_points = joint_finetune_config["n_points"]
     
     # 从配置中读取targeted_sampling_ratio（grid点和邻近点的比例）
