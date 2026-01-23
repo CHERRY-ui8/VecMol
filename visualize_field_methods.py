@@ -96,8 +96,8 @@ for i, method in enumerate(methods):
     axes[i].legend(fontsize=18)
 
 plt.tight_layout()
-plt.savefig('field_methods_subplots.png', dpi=150, bbox_inches='tight')
-print("Saved: field_methods_subplots.png")
+plt.savefig('field_methods_subplots.pdf', dpi=150, bbox_inches='tight')
+print("Saved: field_methods_subplots.pdf")
 
 # 所有方法叠加图
 plt.figure(figsize=(10, 6))
@@ -121,6 +121,6 @@ plt.ylim(ylim)
 plt.grid(True, alpha=0.3)
 plt.legend(fontsize=18)
 plt.tight_layout()
-plt.savefig('field_methods_overlay.png', dpi=150, bbox_inches='tight')
-print("Saved: field_methods_overlay.png")
+plt.savefig('field_methods_overlay.pdf', dpi=150, bbox_inches='tight')
+print("Saved: field_methods_overlay.pdf")
 plt.show()

@@ -1,6 +1,6 @@
 sigma: 1
 # 也许不能太多，要控制，不是所有元素都需要收敛，收敛太慢也是收敛能力差的一种表现
-n_iter: 1500  # 每次迭代都会调用decoder，很费时间（NOTE: 如果撒点范围-7到7，请用600） 600
+n_iter: 500  # 每次迭代都会调用decoder，很费时间（NOTE: 如果撒点范围-7到7，请用600） 600
 # 早停机制配置（可选）
 enable_early_stopping: False  # 启用早停机制，当梯度收敛时提前停止，可大幅减少迭代次数
 convergence_threshold: 1e-6  # 收敛阈值（梯度模长变化），仅在启用早停时有效
@@ -56,11 +56,11 @@ sampling_range_max: 4.0   # 撒点范围的最大值
 
 # 缩小撒点范围之后，应该可以减少query_points数
 n_query_points_per_type:
-  C: 2000  # 碳原子的 query_points 数
-  H: 2000  # 氢原子的 query_points 数
-  O: 300  # 氧原子的 query_points 数
-  N: 300  # 氮原子的 query_points 数
-  F: 150  # 氟原子的 query_points 数
+  C: 200  # 碳原子的 query_points 数
+  H: 200  # 氢原子的 query_points 数
+  O: 30  # 氧原子的 query_points 数
+  N: 30  # 氮原子的 query_points 数
+  F: 15  # 氟原子的 query_points 数
 
 # 不同方法的参数配置
 method_configs:
@@ -72,7 +72,7 @@ method_configs:
 
   tanh:
     n_query_points: 2000 # 1000 deprecated
-    step_size: 0.01 # 0.05
+    step_size: 0.1 # 0.05
     sig_sf: 0.1
     sig_mag: 2
   

@@ -3,16 +3,16 @@
 defaults:
   - dset: qm9
   - converter: gnf_converter_qm9
-  - encoder: gnn_medium
-  - decoder: decoder_global_medium
+  - encoder: gnn_large
+  - decoder: decoder_global_large
   - override hydra/job_logging: custom
   - _self_
 
 seed: 1234  # 随机种子，确保采样结果可重现
 
 # 评估参数
-max_samples: null  # 要评估的样本数量，null表示使用整个数据集，也可以指定具体数量如100
-split: val  # 数据集分割：train/val/test，默认使用val数据集
+max_samples: 10000  # 要评估的样本数量，null表示使用整个数据集，也可以指定具体数量如100
+split: test  # 数据集分割：train/val/test，默认使用val数据集
 # 手动指定要测试的样本索引（可选，优先级高于max_samples）
 # 如果设置了此参数，将使用指定的索引列表，忽略max_samples参数
 # sample_indices: [2,7,74,83,108,158,186,375,404,433,35,90,145,146,155,231,233,234,241,245,269,270,271,288,292,363,366,373,452]
@@ -20,19 +20,19 @@ split: val  # 数据集分割：train/val/test，默认使用val数据集
 sample_indices: null
 
 # Field模式设置
-field_mode: nf_field  # 'gt_field' 或 'nf_field'
+field_mode: gt_field  # 'gt_field' 或 'nf_field'
 
 # Field方法设置
 field_methods: ['tanh']  # 要比较的field方法，现在已经确定了使用tanh方法
 
 # 模型路径（仅在nf_field模式下需要）
-nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260114/lightning_logs/version_1/checkpoints/model-epoch=300.ckpt
+nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260123/lightning_logs/version_1/checkpoints/last.ckpt
 # nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251120/lightning_logs/version_0/checkpoints/model-epoch=259.ckpt
 # 注意：输出目录将基于此路径自动创建，如: exps/neural_field/nf_qm9_20250804_153549_358664
 
 # 多GPU并行设置
 use_multi_gpu: true  # 是否启用多GPU并行处理（分子级别并行），默认true
-gpu_list: [2,3,4,5,6,7]  # 指定要使用的GPU列表，例如 [1,2,3] 或 "1,2,3"，null表示使用CUDA_VISIBLE_DEVICES环境变量或所有GPU
+gpu_list: [0,2,3,4,5]  # 指定要使用的GPU列表，例如 [1,2,3] 或 "1,2,3"，null表示使用CUDA_VISIBLE_DEVICES环境变量或所有GPU
 num_workers: null  # 工作进程数，null表示自动使用所有可用GPU数量，也可以手动指定
 batch_size: 1  # 单GPU模式下的批次大小（多GPU模式下不使用此参数）
 

@@ -1002,19 +1002,19 @@ def reshape_target_field(target_field, B, n_points, n_atom_types):
 def compute_decoder_field_loss(
     pred_field,
     target_field,
-    use_cosine_loss=True,
-    magnitude_loss_weight=0.1,
+    cosine_loss_weight=0.0,
+    length_loss_weight=0.0,
     valid_mask=None
 ):
     """
-    Compute decoder field loss (cosine distance + magnitude or MSE).
+    Compute decoder field loss: cosine_loss_weight * cosine_loss + length_loss_weight * length_loss + magnitude_loss.
     This is a generic function for computing decoder loss, independent of diffusion models.
     
     Args:
         pred_field: [B, n_points, n_atom_types, 3] predicted field
         target_field: [B, n_points, n_atom_types, 3] target field
-        use_cosine_loss: Whether to use cosine distance loss (True) or MSE loss (False)
-        magnitude_loss_weight: Weight for magnitude loss when use_cosine_loss=True
+        cosine_loss_weight: Weight for cosine loss. If > 0, cosine loss will be computed and added. If 0, only MSE loss is used.
+        length_loss_weight: Weight for length loss (MSE of field magnitudes). Can be used with or without cosine_loss.
         valid_mask: Optional [B, n_points] boolean mask for valid points (None means all points are valid)
         
     Returns:
@@ -1037,12 +1037,22 @@ def compute_decoder_field_loss(
     # Small epsilon for numerical stability
     eps = 1e-8
     
-    if use_cosine_loss:
-        # Cosine distance + magnitude loss
-        # Compute norms
-        pred_norm = torch.norm(pred_field_masked, dim=-1, keepdim=True)  # [B, n_points, n_atom_types, 1]
-        target_norm = torch.norm(target_field_masked, dim=-1, keepdim=True)  # [B, n_points, n_atom_types, 1]
-        
+    # Always compute magnitude loss (MSE of the field vectors themselves, not their norms)
+    # This is the standard MSE loss on the vector field
+    magnitude_loss = F.mse_loss(
+        pred_field_masked,
+        target_field_masked,
+        reduction='sum'
+    )
+    magnitude_loss = magnitude_loss / (valid_mask_expanded.sum() + eps)
+    
+    # Compute norms for cosine loss and length loss
+    pred_norm = torch.norm(pred_field_masked, dim=-1, keepdim=True)  # [B, n_points, n_atom_types, 1]
+    target_norm = torch.norm(target_field_masked, dim=-1, keepdim=True)  # [B, n_points, n_atom_types, 1]
+    
+    # Compute cosine loss if cosine_loss_weight > 0
+    cosine_loss = torch.tensor(0.0, device=device)
+    if cosine_loss_weight > 0:
         # Compute cosine similarity
         dot_product = (pred_field_masked * target_field_masked).sum(dim=-1, keepdim=True)  # [B, n_points, n_atom_types, 1]
         
@@ -1060,24 +1070,28 @@ def compute_decoder_field_loss(
         # Cosine loss: 1 - cosine_similarity
         cosine_loss = (1 - cosine_sim) * valid_mask_expanded
         cosine_loss = cosine_loss.sum() / (valid_mask_expanded.sum() + eps)
+    
+    # Compute length loss if length_loss_weight > 0
+    length_loss = torch.tensor(0.0, device=device)
+    if length_loss_weight > 0:
+        # Compute field magnitudes (norm over the last dimension)
+        pred_magnitude = torch.norm(pred_field_masked, dim=-1)  # [B, n_points, n_atom_types]
+        target_magnitude = torch.norm(target_field_masked, dim=-1)  # [B, n_points, n_atom_types]
         
-        # Magnitude loss: MSE of norms
-        magnitude_loss = F.mse_loss(
-            pred_norm * valid_mask_expanded,
-            target_norm * valid_mask_expanded,
+        # Apply valid mask
+        valid_mask_for_magnitude = valid_mask.unsqueeze(-1)  # [B, n_points, 1]
+        pred_magnitude_masked = pred_magnitude * valid_mask_for_magnitude
+        target_magnitude_masked = target_magnitude * valid_mask_for_magnitude
+        
+        # Compute MSE of magnitudes
+        length_loss = F.mse_loss(
+            pred_magnitude_masked,
+            target_magnitude_masked,
             reduction='sum'
         )
-        magnitude_loss = magnitude_loss / (valid_mask_expanded.sum() + eps)
-        
-        # Combined loss
-        loss = cosine_loss + magnitude_loss_weight * magnitude_loss
-    else:
-        # Standard MSE loss
-        loss = F.mse_loss(
-            pred_field_masked,
-            target_field_masked,
-            reduction='sum'
-        )
-        loss = loss / (valid_mask_expanded.sum() + eps)
+        length_loss = length_loss / (valid_mask_for_magnitude.sum() + eps)
+    
+    # Combined loss: cosine_loss_weight * cosine_loss + length_loss_weight * length_loss + magnitude_loss
+    loss = cosine_loss_weight * cosine_loss + length_loss_weight * length_loss + magnitude_loss
     
     return loss

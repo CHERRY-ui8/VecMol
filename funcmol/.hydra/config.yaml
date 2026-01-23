@@ -18,12 +18,12 @@ dset:
   targeted_sampling_ratio: 0.5
   atom_distance_threshold: 1.0
   num_workers: 4
-  batch_size: 48
+  batch_size: 24
   lr_enc: 0.0002
   lr_dec: 0.0002
 converter:
   sigma: 1
-  n_iter: 400
+  n_iter: 500
   enable_early_stopping: false
   convergence_threshold: 1.0e-06
   min_iterations: 50
@@ -84,19 +84,18 @@ converter:
     enable_timing: true
 encoder:
   _target_: funcmol.models.encoder.CrossGraphEncoder
-  n_atom_types: 5
-  code_dim: 256
-  hidden_dim: 256
-  num_layers: 6
+  code_dim: 384
+  hidden_dim: 384
+  num_layers: 8
   k_neighbors: 24
   atom_k_neighbors: 8
   cutoff: 8.0
 decoder:
   name: decoder_global
-  code_dim: 256
-  hidden_dim: 256
+  code_dim: 384
+  hidden_dim: 384
   coord_dim: 3
-  n_layers: 5
+  n_layers: 6
   radius: 3
   cutoff: 8.0
   k_neighbors: 32
@@ -108,17 +107,17 @@ seed: 1234
 exp_dir: ../exps/neural_field
 exp_name: nf_${dset.dset_name}/${now:%Y%m%d}
 dirname: ${exp_dir}/${exp_name}
-reload_model_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260116/lightning_logs/version_0/checkpoints/model-epoch=275.ckpt
+reload_model_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260123/lightning_logs/version_0/checkpoints/model-epoch=36.ckpt
 auto_resume: true
 ckpt_every_n_epochs: 1
-n_epochs: 500
+n_epochs: 1000
 eval_every: 1
 lr_decay: true
 lr_scheduler_type: plateau
 warmup:
   enabled: false
   warmup_steps: 10000
-lr_factor: 0.5
+lr_factor: 0.8
 lr_patience: 5
 lr_min: 1.0e-06
 lr_mode: min
@@ -129,16 +128,16 @@ lr_milestones:
 lr_gamma: 0.5
 finetune_decoder:
   enabled: true
-  freeze_encoder: true
-  use_denoiser_for_codes: true
-  denoiser_checkpoint_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20260120/lightning_logs/version_2/checkpoints
+  freeze_encoder: false
+  use_denoiser_for_codes: false
+  denoiser_checkpoint_path: null
   sample_near_atoms_only: false
   atom_distance_threshold: 1
   n_points: 500
-  use_cosine_loss: false
-  magnitude_loss_weight: 1
+  cosine_loss_weight: 1.0
+  length_loss_weight: 1.0
   max_timestep_for_decoder: 10
-  real_code_ratio: 0.5
+  real_code_ratio: 1
   code_augmentation:
     enabled: false
     noise_std: 0.003

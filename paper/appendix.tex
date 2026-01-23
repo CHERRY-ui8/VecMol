@@ -212,7 +212,22 @@ Converged points are then clustered using DBSCAN to extract atomic coordinates.
 \end{algorithmic}
 \end{algorithm}
 
-
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/clustering_evolution.png}
+\caption{
+\textbf{Visualization of the clustering process during field-to-molecule reconstruction.}
+Examples are trained on the QM9 dataset.
+The figure illustrates how candidate points, initialized uniformly in the bounding box, evolve through iterative gradient ascent and subsequently form distinct clusters via DBSCAN.
+\textbf{Left to right:} Each column represents a successive iteration of the clustering process.
+\textbf{Top and bottom rows:} Two independent examples of the reconstruction procedure.
+Initially (leftmost column), points are randomly distributed throughout the 3D space.
+As iterations progress, points converge toward atomic positions by following the gradient field, gradually forming dense clusters.
+In the final state (rightmost column), well-separated clusters emerge, with each cluster center corresponding to a recovered atomic coordinate.
+The color coding distinguishes different atom types: green represents carbon (C), gray represents hydrogen (H), red represents oxygen (O), blue represents nitrogen (N), and pink represents fluorine (F).
+}
+\label{fig:clustering_evolution}
+\end{figure}
 
 \section{Autoencoder Architecture and Analysis}\label{app:autoencoder}
 This section provides additional architectural details and experimental analysis of the neural field autoencoder.

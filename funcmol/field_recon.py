@@ -47,6 +47,7 @@ from omegaconf import DictConfig, OmegaConf, ListConfig
 from funcmol.dataset.dataset_field import create_gnf_converter
 from funcmol.utils.utils_nf import load_neural_field
 from funcmol.dataset.dataset_field import FieldDataset
+from funcmol.utils.utils_base import xyz_to_sdf
 from funcmol.utils.misc import (
     parse_gpu_list_from_config,
     setup_multiprocessing_spawn,
@@ -309,6 +310,27 @@ def process_single_molecule(args):
             # 如果保存文件失败，抛出异常，让外层except处理
             raise Exception(f"Failed to save molecule file: {save_error}") from save_error
         
+        # 保存重建的分子为 SDF 文件
+        try:
+            # 获取重建的坐标和类型
+            recon_coords_np = recon_coords_device.cpu().numpy()
+            recon_types_np = recon_types[0].cpu().numpy()
+            
+            # 生成 SDF 字符串
+            sdf_string = xyz_to_sdf(recon_coords_np, recon_types_np, elements)
+            
+            if sdf_string:
+                # 保存 SDF 文件
+                sdf_file = mol_save_dir / f"sample_{sample_idx:04d}_{field_method}.sdf"
+                with open(sdf_file, 'w', encoding='utf-8') as f:
+                    f.write(sdf_string)
+            else:
+                # 如果没有有效原子，记录警告但不中断处理
+                print(f"Warning: No valid atoms for SDF file generation (sample {sample_idx}, method {field_method})")
+        except Exception as sdf_error:
+            # 如果 SDF 生成失败，记录错误但不中断处理流程
+            print(f"Warning: Failed to save SDF file for sample {sample_idx} with {field_method}: {sdf_error}")
+        
         # 返回结果，不在子进程中写入CSV（避免多进程写入冲突）
         # CSV写入将在主进程统一进行
         return {
@@ -428,7 +450,17 @@ def main(config: DictConfig) -> None:
         debug_subset=config.get('debug_subset', False),
         atom_distance_threshold=atom_distance_threshold,
     )
-    field_methods = config.get('field_methods', ['gaussian_mag', 'tanh'])
+    # 处理 field_methods，支持 OmegaConf 的 ListConfig 类型
+    field_methods_raw = config.get('field_methods', ['gaussian_mag', 'tanh'])
+    if isinstance(field_methods_raw, (list, tuple, ListConfig)):
+        # 将 ListConfig 转换为普通 Python list
+        if isinstance(field_methods_raw, ListConfig):
+            field_methods = OmegaConf.to_container(field_methods_raw, resolve=True)
+        else:
+            field_methods = list(field_methods_raw)
+    else:
+        # 如果不是列表类型，转换为列表
+        field_methods = [field_methods_raw] if field_methods_raw is not None else ['gaussian_mag', 'tanh']
     
     # For gt_field and nf_field modes, load dataset for reconstruction
     # 优先检查是否手动指定了样本索引
@@ -802,6 +834,30 @@ def main(config: DictConfig) -> None:
                                     types=gt_types.cpu().numpy(),
                                     gt_coords=gt_coords.cpu().numpy(),
                                     rmsd=rmsd)
+                            
+                            # 保存重建的分子为 SDF 文件
+                            try:
+                                # 获取重建的坐标和类型
+                                recon_coords_np = recon_coords_device.cpu().numpy()
+                                recon_types_np = recon_types[0].cpu().numpy()
+                                
+                                # 获取元素列表
+                                elements_list = config.dset.elements
+                                
+                                # 生成 SDF 字符串
+                                sdf_string = xyz_to_sdf(recon_coords_np, recon_types_np, elements_list)
+                                
+                                if sdf_string:
+                                    # 保存 SDF 文件
+                                    sdf_file = mol_save_dir / f"sample_{sample_idx:04d}_{field_method}.sdf"
+                                    with open(sdf_file, 'w', encoding='utf-8') as f:
+                                        f.write(sdf_string)
+                                else:
+                                    # 如果没有有效原子，记录警告但不中断处理
+                                    print(f"Warning: No valid atoms for SDF file generation (sample {sample_idx}, method {field_method})")
+                            except Exception as sdf_error:
+                                # 如果 SDF 生成失败，记录错误但不中断处理流程
+                                print(f"Warning: Failed to save SDF file for sample {sample_idx} with {field_method}: {sdf_error}")
                         
                         except Exception as e:
                             print(f"Error processing sample {sample_idx} with {field_method}: {e}")

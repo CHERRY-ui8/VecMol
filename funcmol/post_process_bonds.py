@@ -24,15 +24,15 @@ OpenBabel连键后处理脚本
 # add_hydrogens = True # 是否自动补齐缺少的H原子（True: 补齐, False: 不补齐）
 # keep_largest_component = False # 是否只保留最大连通分支（True: 只保留最大分支, False: 保留所有有键连接的片段）
 
-exp_date = "20260121"
-exp_version = "version_0"
-ckpt_name = "epoch_332"
+exp_date = "20260120"
+exp_version = "version_2"
+ckpt_name = "last_decoder_finetuned_0(more epoch)"
 dataset_name = "fm_qm9"  # 数据集名称：fm_qm9 或 fm_drugs
 # input_dir = '/data/huayuchen/Neurl-voxel/exps/funcmol/fm_drugs/20260116/samples/20260116_version_2_epoch_9_better_converge/molecule'
 input_dir = f"../exps/funcmol/{dataset_name}/{exp_date}/samples/{exp_date}_{exp_version}_{ckpt_name}/molecule"
 # output_dir = '/data/huayuchen/Neurl-voxel/exps/funcmol/fm_drugs/20260116/samples/20260116_version_2_epoch_9_better_converge_withbonds_addH_fix_2.0_from_small_frag/molecule'
-output_dir = f"../exps/funcmol/{dataset_name}/{exp_date}/samples/{exp_date}_{exp_version}_{ckpt_name}_withbonds_addH/molecule"
-add_hydrogens = True # 是否自动补齐缺少的H原子（True: 补齐, False: 不补齐）
+output_dir = f"../exps/funcmol/{dataset_name}/{exp_date}/samples/{exp_date}_{exp_version}_{ckpt_name}_withbonds/molecule"
+add_hydrogens = False # 是否自动补齐缺少的H原子（True: 补齐, False: 不补齐）
 keep_largest_component = True # 是否只保留最大连通分支（True: 只保留最大分支, False: 保留所有有键连接的片段）
 fix_missing_bonds = False # 是否使用fix_missing_bonds_from_sdf修复缺失的键（True: 使用, False: 直接补H）
 bond_length_ratio = 1.5 # 键修复时的标准键长比例阈值（距离≤标准键长×此值时添加键）

@@ -21,12 +21,12 @@ defaults:
 # fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251103/lightning_logs/version_0/checkpoints/model-epoch=99.ckpt
 # fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251108/lightning_logs/version_1/checkpoints/model-epoch=364.ckpt
 # fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251225/lightning_logs/version_1/checkpoints/last.ckpt
-fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20260121/lightning_logs/version_0/checkpoints/model-epoch=332.ckpt
+fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20260120/lightning_logs/version_2/checkpoints/last.ckpt
 # fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_drugs/20260116/lightning_logs/version_2/checkpoints/model-epoch=09.ckpt
-dirname: ../exps/funcmol/fm_qm9/20260121
+dirname: ../exps/funcmol/fm_qm9/20260120
 
 # 生成参数
-max_samples: 150  # 要生成的分子数量
+max_samples: 4808  # 要生成的分子数量
 field_methods: ['tanh']  # 要使用的field方法
 batch_size: 32  # 批次大小，一次并行生成多个分子（分子级别的并行）
 
@@ -62,9 +62,15 @@ smooth_sigma: 0.5
 # 模型路径
 # nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/model-epoch=999.ckpt
 # nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260112/lightning_logs/version_1/checkpoints/last.ckpt
-# nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260116/lightning_logs/version_0/checkpoints/model-epoch=275.ckpt
-nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260120/lightning_logs/version_0/checkpoints/last.ckpt
+nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260116/lightning_logs/version_0/checkpoints/model-epoch=275.ckpt
 # nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_drugs/20260113/lightning_logs/version_1/checkpoints/last.ckpt
+
+# Decoder 加载选项
+# 是否从 diffusion checkpoint (fm_pretrained_path) 中加载 decoder_state_dict
+# - true: 如果 diffusion checkpoint 中有 decoder_state_dict，则使用它；如果没有则回退到 nf_pretrained_path
+# - false: 直接从 nf_pretrained_path 加载 decoder，忽略 diffusion checkpoint 中的 decoder_state_dict
+# 当您单独微调了 decoder 并希望使用微调后的 decoder checkpoint 时，应设置为 false
+load_decoder_from_diffusion_checkpoint: false
 
 # set the running dir
 hydra:

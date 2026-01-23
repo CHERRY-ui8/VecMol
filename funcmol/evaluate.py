@@ -15,13 +15,13 @@ SDF分子评估脚本
   - 用于计算atoms_per_mol等只考虑最大片段的指标
 """
 
-exp_date = "20260121"
-exp_version = "version_0"
-ckpt_name = "epoch_332"
+exp_date = "20260120"
+exp_version = "version_2"
+ckpt_name = "last_decoder_finetuned_0(more epoch)"
 # 数据集类型：'qm9' 或 'drugs'
 dataset_type = 'qm9'  # 设置为 'drugs' 以启用额外的 drugs 指标
 # 配置参数：实验目录
-exp_dir = f"../exps/funcmol/fm_{dataset_type}/{exp_date}/samples/{exp_date}_{exp_version}_{ckpt_name}_withbonds_addH"
+exp_dir = f"../exps/funcmol/fm_{dataset_type}/{exp_date}/samples/{exp_date}_{exp_version}_{ckpt_name}_withbonds"
 # 测试集数据路径（用于分布比较）
 test_data_dir = "../funcmol/dataset/data/qm9"  # QM9测试集数据目录
 # test_data_dir = "/data/huayuchen/Neurl-voxel/funcmol/dataset/data/drugs"  # Drugs测试集数据目录

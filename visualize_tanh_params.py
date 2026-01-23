@@ -79,6 +79,6 @@ ax2.grid(True, alpha=0.3)
 ax2.legend(loc='upper right', fontsize=16)
 
 plt.tight_layout()
-plt.savefig('tanh_params_1d.png', dpi=300, bbox_inches='tight')
-print("Saved: tanh_params_1d.png")
+plt.savefig('tanh_params_1d.pdf', dpi=300, bbox_inches='tight')
+print("Saved: tanh_params_1d.pdf")
 plt.show()
