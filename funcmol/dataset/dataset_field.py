@@ -839,13 +839,14 @@ def create_gnf_converter(config: dict) -> GNFConverter:
     )
 
 
-def prepare_data_with_sample_idx(config, device, sample_idx):
+def prepare_data_with_sample_idx(config, device, sample_idx, split="val"):
     """准备包含特定样本的数据。
 
     Args:
         config: 配置对象
         device: 计算设备
         sample_idx: 要加载的样本索引
+        split: 数据集分割，可以是 "train", "val", 或 "test"，默认为 "val"
 
     Returns:
         Tuple[batch, coords, atoms_channel]，数据批次、坐标和原子类型
@@ -855,7 +856,7 @@ def prepare_data_with_sample_idx(config, device, sample_idx):
     """
     
     gnf_converter = create_gnf_converter(config)
-    loader_val = create_field_loaders(config, gnf_converter, split="val")
+    loader_val = create_field_loaders(config, gnf_converter, split=split)
     
     # 计算需要跳过多少个batch才能到达目标样本
     batch_size = config.dset.batch_size
@@ -918,4 +919,4 @@ def prepare_data_with_sample_idx(config, device, sample_idx):
             
             return single_batch, coords, atoms_channel
     
-    raise IndexError(f"Sample index {sample_idx} is out of bounds for validation set") 
+    raise IndexError(f"Sample index {sample_idx} is out of bounds for {split} set") 

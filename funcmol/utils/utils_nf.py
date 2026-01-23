@@ -818,8 +818,35 @@ def infer_codes(
     
     total_samples = 0
     
+    # 计算总批次数用于进度条
+    try:
+        total_batches = len(loader)
+    except (TypeError, AttributeError):
+        total_batches = None
+    
+    # 如果有 n_samples 限制，估算批次数
+    if n_samples is not None and total_batches is None:
+        batch_size = config.get('dset', {}).get('batch_size', 1)
+        if batch_size > 0:
+            total_batches = (n_samples + batch_size - 1) // batch_size
+    
+    # 设置进度条描述
+    desc = "Inferring codes"
+    if n_samples is not None:
+        desc += f" (target: {n_samples:,} samples)"
+    
+    # 只在非分布式环境下显示进度条（计算 code_stats 时通常是这种情况）
+    show_progress = (fabric is None)
+    
     with torch.no_grad():
-        for batch_idx, batch in enumerate(loader):
+        # 使用 tqdm 显示进度
+        if show_progress:
+            loader_iter = tqdm(loader, desc=desc, total=total_batches, unit="batch", 
+                              bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
+        else:
+            loader_iter = loader
+            
+        for batch_idx, batch in enumerate(loader_iter):
             # Directly use encoder to process batch data
             codes = enc(batch)
             
@@ -839,8 +866,14 @@ def infer_codes(
             codes_all.append(codes)
             total_samples += codes.size(0)
             
+            # 更新进度条显示当前样本数
+            if show_progress and hasattr(loader_iter, 'set_postfix'):
+                loader_iter.set_postfix({"samples": f"{total_samples:,}"})
+            
             # Stop if we've reached the specified number of samples
             if n_samples is not None and total_samples >= n_samples:
+                if show_progress and hasattr(loader_iter, 'set_postfix'):
+                    loader_iter.set_postfix({"samples": f"{total_samples:,}", "status": "completed"})
                 break
     
     # Concatenate all codes

@@ -118,7 +118,7 @@ hydra:
     override_dirname: ''
     id: ???
     num: ???
-    config_name: field_quality_drugs
+    config_name: field_quality_qm9
     env_set: {}
     env_copy: []
     config:
@@ -142,10 +142,11 @@ hydra:
       provider: schema
     output_dir: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/funcmol/exps/analysis/field_quality
     choices:
-      decoder: decoder_global_large
-      encoder: gnn_large
-      converter: gnf_converter_drugs
-      dset: drugs
+      denoiser: gnn
+      decoder: decoder_global_medium
+      encoder: gnn_medium
+      converter: gnf_converter_qm9
+      dset: qm9
       hydra/env: default
       hydra/callbacks: null
       hydra/job_logging: custom

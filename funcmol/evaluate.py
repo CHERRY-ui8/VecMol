@@ -17,11 +17,11 @@ SDF分子评估脚本
 
 exp_date = "20260120"
 exp_version = "version_2"
-ckpt_name = "last_decoder_finetuned_0(more epoch)"
+ckpt_name = "last"
 # 数据集类型：'qm9' 或 'drugs'
 dataset_type = 'qm9'  # 设置为 'drugs' 以启用额外的 drugs 指标
 # 配置参数：实验目录
-exp_dir = f"../exps/funcmol/fm_{dataset_type}/{exp_date}/samples/{exp_date}_{exp_version}_{ckpt_name}_withbonds"
+exp_dir = f"../exps/funcmol/fm_{dataset_type}/{exp_date}/samples/{exp_date}_{exp_version}_{ckpt_name}_withbonds_addH"
 # 测试集数据路径（用于分布比较）
 test_data_dir = "../funcmol/dataset/data/qm9"  # QM9测试集数据目录
 # test_data_dir = "/data/huayuchen/Neurl-voxel/funcmol/dataset/data/drugs"  # Drugs测试集数据目录
@@ -163,9 +163,12 @@ def load_sdf_molecules(sdf_path: Path) -> List[Chem.Mol]:
     
     try:
         # 使用SDMolSupplier读取SDF文件（支持多分子）
-        supplier = Chem.SDMolSupplier(str(actual_path), sanitize=False)
+        # 注意：removeHs=False 确保保留H原子，这对于strain_energy计算很重要
+        supplier = Chem.SDMolSupplier(str(actual_path), sanitize=False, removeHs=False)
         for mol in supplier:
             if mol is not None:
+                # 确保conformer信息被正确加载
+                # SDMolSupplier应该自动加载conformer（如果SDF文件包含坐标信息）
                 molecules.append(mol)
     except Exception as e:
         print(f"读取SDF文件 {actual_path} 时出错: {e}")
@@ -646,10 +649,12 @@ def compute_strain_energy(mol: Chem.Mol, verbose: bool = False) -> Tuple[Optiona
         # 计算原始构象的能量
         try:
             # 使用 UFF 力场
+            # 注意：如果分子结构不合理（如价态错误），UFFGetMoleculeForceField可能返回None或抛出异常
             ff = AllChem.UFFGetMoleculeForceField(mol_copy, confId=0)
             if ff is None:
                 if verbose:
                     print(f"compute_strain_energy: UFFGetMoleculeForceField 返回 None，原子数={mol_copy.GetNumAtoms()}")
+                    print(f"  可能原因：分子结构不合理（价态错误等）")
                 return None, False
             original_energy = ff.CalcEnergy()
             
@@ -658,17 +663,21 @@ def compute_strain_energy(mol: Chem.Mol, verbose: bool = False) -> Tuple[Optiona
         except Exception as e:
             if verbose:
                 print(f"compute_strain_energy: 计算原始能量时出错: {e}")
+                # 如果是价态错误，给出更明确的提示
+                if "valence" in str(e).lower() or "valency" in str(e).lower():
+                    print(f"  原因：分子价态不合理，无法使用UFF力场计算")
             return None, False
         
         # 优化构象
         try:
             # 使用 UFF 优化
             opt_result = AllChem.UFFOptimizeMolecule(mol_copy, confId=0, maxIters=200)
-            # opt_result[0] 表示是否收敛（0表示收敛，1表示未收敛）
-            if opt_result[0] != 0:
+            # 处理返回值：可能是整数（0=成功，1=未收敛）或元组(status, energy)
+            opt_status = opt_result[0] if isinstance(opt_result, (tuple, list)) else opt_result
+            if opt_status != 0:
                 # 优化未收敛，可能结构有问题
                 if verbose:
-                    print(f"compute_strain_energy: UFF优化未收敛（返回码={opt_result[0]}）")
+                    print(f"compute_strain_energy: UFF优化未收敛（返回码={opt_status}）")
                 pass  # 继续计算，但结果可能不准确
             
             # 计算优化后的能量
@@ -1075,6 +1084,12 @@ def evaluate_single_molecule(mol: Chem.Mol, molecule_id: str, save_dir: Optional
     original_num_bonds = mol.GetNumBonds() if mol is not None else 0
     num_components = 1
     
+    # 保存原始分子的conformer信息（用于strain_energy计算）
+    original_mol_for_strain = None
+    if mol is not None and mol.GetNumConformers() > 0:
+        # 保存原始分子的副本，用于strain_energy计算
+        original_mol_for_strain = Chem.Mol(mol)
+    
     # 计算片段数量（在去除孤立原子之前）
     if mol is not None and mol.GetNumBonds() > 0:
         try:
@@ -1165,9 +1180,21 @@ def evaluate_single_molecule(mol: Chem.Mol, molecule_id: str, save_dir: Optional
         # Single fragment - 基于去除孤立原子后的分子（保留所有片段）
         result['is_single_fragment'] = check_single_fragment(mol)
         
-        # Strain energy - 基于当前处理的分子
-        # 注意：如果分子在处理过程中丢失了conformer信息，strain_energy将为None
-        strain_energy, is_abnormal = compute_strain_energy(mol, verbose=False)
+        # Strain energy - 优先使用处理后的分子，如果处理后的分子没有conformer，则使用原始分子
+        # 注意：strain_energy需要conformer信息（3D坐标）
+        mol_for_strain = mol
+        if mol is not None and mol.GetNumConformers() == 0:
+            # 如果处理后的分子没有conformer，尝试使用原始分子
+            if original_mol_for_strain is not None and original_mol_for_strain.GetNumConformers() > 0:
+                mol_for_strain = original_mol_for_strain
+            else:
+                # 如果原始分子也没有conformer，strain_energy将为None
+                mol_for_strain = None
+        
+        if mol_for_strain is not None:
+            strain_energy, is_abnormal = compute_strain_energy(mol_for_strain, verbose=False)
+        else:
+            strain_energy, is_abnormal = None, False
         result['strain_energy'] = strain_energy
         result['strain_energy_abnormal'] = is_abnormal
         

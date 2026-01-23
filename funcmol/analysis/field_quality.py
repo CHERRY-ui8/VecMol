@@ -25,6 +25,8 @@ matplotlib.use('Agg')  # 使用非交互式后端
 from funcmol.dataset.dataset_field import FieldDataset, create_gnf_converter
 from funcmol.utils.utils_nf import load_neural_field
 from funcmol.utils.constants import PADDING_INDEX
+from funcmol.models.funcmol import create_funcmol
+from funcmol.utils.utils_fm import load_checkpoint_fm
 
 # 设置项目根目录（funcmol目录）
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -288,7 +290,7 @@ def plot_rmsd_by_distance(
     print(f"图表已保存到: {output_path}")
 
 
-@hydra.main(config_path="../configs", config_name="field_quality_drugs", version_base=None)
+@hydra.main(config_path="../configs", config_name="field_quality_qm9", version_base=None)
 def main(config: DictConfig) -> None:
     """
     主函数：评估neural field场的质量
@@ -338,6 +340,45 @@ def main(config: DictConfig) -> None:
     encoder.eval()
     decoder.eval()
     print("模型加载完成")
+    
+    # 可选：加载FuncMol denoiser用于评估denoised_field
+    funcmol = None
+    code_stats = None
+    evaluate_denoised_field = config.get("evaluate_denoised_field", False)
+    
+    if evaluate_denoised_field:
+        print("\n" + "="*80)
+        print("加载FuncMol Denoiser模型")
+        print("="*80)
+        fm_checkpoint_path = config.get("fm_pretrained_path")
+        if not fm_checkpoint_path:
+            raise ValueError("评估denoised_field需要提供 fm_pretrained_path")
+        
+        # 从当前配置中构建FuncMol配置
+        # 使用当前config中的相关配置，而不是从其他配置文件加载
+        funcmol_config = {
+            "smooth_sigma": config_dict.get("smooth_sigma", 0.0),
+            "diffusion_method": config_dict.get("diffusion_method", "new_x0"),
+            "denoiser": config_dict.get("denoiser", {}),
+            "ddpm": config_dict.get("ddpm", {"num_timesteps": 1000, "use_time_weight": True}),
+            "decoder": config_dict.get("decoder", {}),
+            "dset": config_dict.get("dset", {}),
+            "encoder": config_dict.get("encoder", {}),
+        }
+        
+        # 创建FuncMol模型
+        funcmol = create_funcmol(funcmol_config)
+        funcmol = funcmol.to(device)
+        
+        # 加载checkpoint
+        funcmol, code_stats = load_checkpoint_fm(funcmol, fm_checkpoint_path)
+        funcmol.eval()
+        
+        # 设置decoder的code_stats（如果需要）
+        if hasattr(decoder, 'set_code_stats') and code_stats is not None:
+            decoder.set_code_stats(code_stats)
+        
+        print("FuncMol Denoiser加载完成，将使用完全去噪（从随机噪声开始）生成denoised_field")
     
     # 2. 创建GNFConverter
     print("\n" + "="*80)
@@ -448,9 +489,30 @@ def main(config: DictConfig) -> None:
             with torch.no_grad():
                 codes = encoder(batch)  # [B, grid_size³, code_dim]
             
-            # 使用decoder预测场
+            # 使用decoder预测场（predicted field）
             with torch.no_grad():
                 pred_field = decoder(query_points, codes)  # [B, n_points, n_atom_types, 3]
+            
+            # 可选：计算denoised_field（从随机噪声完全去噪）
+            denoised_field = None
+            if evaluate_denoised_field and funcmol is not None:
+                with torch.no_grad():
+                    # 获取codes的形状信息
+                    B_codes = codes.shape[0]
+                    n_grid = codes.shape[1]  # grid_size³
+                    code_dim = codes.shape[2]
+                    
+                    # 从随机噪声开始，使用完整的DDPM采样过程生成完全去噪的codes
+                    # shape: (batch_size, grid_size³, code_dim)
+                    denoised_codes = funcmol.sample_ddpm(
+                        shape=(B_codes, n_grid, code_dim),
+                        code_stats=code_stats,
+                        progress=False,  # 评估时不显示进度条
+                        clip_denoised=False
+                    )  # [B, grid_size³, code_dim]
+                    
+                    # 使用denoised_codes生成field
+                    denoised_field = decoder(query_points, denoised_codes)  # [B, n_points, n_atom_types, 3]
             
             # 对每个batch中的样本进行处理
             for b in range(B):
@@ -462,10 +524,10 @@ def main(config: DictConfig) -> None:
                 atom_mask = (batch.x[batch.batch == b] != PADDING_INDEX)
                 sample_atom_positions = batch.pos[batch.batch == b][atom_mask]  # [n_atoms, 3]
                 
-                # 计算RMSD（梯度场的RMSD）
+                # 计算predicted field的RMSD
                 rmsd = compute_rmsd(sample_pred_field, sample_gt_field)
                 
-                # 按距离分组计算RMSD
+                # 按距离分组计算predicted field的RMSD
                 rmsd_by_bin, counts_by_bin, distances = compute_rmsd_by_distance(
                     sample_pred_field,
                     sample_gt_field,
@@ -477,6 +539,22 @@ def main(config: DictConfig) -> None:
                 # 保存距离分组数据用于后续绘图
                 all_rmsd_by_distance.append(rmsd_by_bin)
                 all_counts_by_distance.append(counts_by_bin)
+                
+                # 如果评估denoised_field，也计算其RMSD
+                denoised_rmsd = None
+                denoised_rmsd_by_bin = None
+                if evaluate_denoised_field and denoised_field is not None:
+                    sample_denoised_field = denoised_field[b]  # [n_points, n_atom_types, 3]
+                    denoised_rmsd = compute_rmsd(sample_denoised_field, sample_gt_field)
+                    
+                    # 按距离分组计算denoised field的RMSD
+                    denoised_rmsd_by_bin, _, _ = compute_rmsd_by_distance(
+                        sample_denoised_field,
+                        sample_gt_field,
+                        sample_query_points,
+                        sample_atom_positions,
+                        distance_bins=distance_bins
+                    )
                 
                 # 获取原子数量
                 n_atoms = atom_mask.sum().item()
@@ -490,19 +568,26 @@ def main(config: DictConfig) -> None:
                 # 保存结果
                 result = {
                     'sample_idx': batch_idx * batch_size + b,
-                    'rmsd': rmsd,
+                    'rmsd': rmsd,  # predicted field的RMSD
                     'mean_distance_to_atom': mean_distance,
                     'min_distance_to_atom': min_distance,
                     'max_distance_to_atom': max_distance,
                     'n_points': n_points,
                     'n_atoms': n_atoms,
                 }
-                # 添加每个距离区间的RMSD
+                # 添加每个距离区间的predicted field RMSD
                 for bin_name, bin_rmsd in rmsd_by_bin.items():
                     result[f'rmsd_{bin_name}'] = bin_rmsd
                 # 添加每个距离区间的点数
                 for bin_name, bin_count in counts_by_bin.items():
                     result[f'count_{bin_name}'] = bin_count
+                
+                # 如果评估了denoised_field，添加相关结果
+                if evaluate_denoised_field and denoised_rmsd is not None:
+                    result['denoised_rmsd'] = denoised_rmsd
+                    # 添加每个距离区间的denoised field RMSD
+                    for bin_name, bin_rmsd in denoised_rmsd_by_bin.items():
+                        result[f'denoised_rmsd_{bin_name}'] = bin_rmsd
                 
                 all_results.append(result)
                 
@@ -528,19 +613,33 @@ def main(config: DictConfig) -> None:
     std_rmsd = df['rmsd'].std()
     
     print(f"总样本数: {len(all_results)}")
-    print("\n梯度场RMSD:")
+    print("\n预测场(Predicted Field) RMSD:")
     print(f"  平均值: {mean_rmsd:.6f} ± {std_rmsd:.6f}")
     print(f"  最小值: {df['rmsd'].min():.6f}")
     print(f"  最大值: {df['rmsd'].max():.6f}")
+    
+    # 如果评估了denoised_field，打印其统计信息
+    if 'denoised_rmsd' in df.columns:
+        mean_denoised_rmsd = df['denoised_rmsd'].mean()
+        std_denoised_rmsd = df['denoised_rmsd'].std()
+        print("\n去噪场(Denoised Field) RMSD:")
+        print(f"  平均值: {mean_denoised_rmsd:.6f} ± {std_denoised_rmsd:.6f}")
+        print(f"  最小值: {df['denoised_rmsd'].min():.6f}")
+        print(f"  最大值: {df['denoised_rmsd'].max():.6f}")
+        print(f"\nRMSD差异 (Denoised - Predicted):")
+        diff = df['denoised_rmsd'] - df['rmsd']
+        print(f"  平均值: {diff.mean():.6f} ± {diff.std():.6f}")
+        print(f"  最小值: {diff.min():.6f}")
+        print(f"  最大值: {diff.max():.6f}")
     
     print("\n距离最近原子的距离统计:")
     print(f"  平均距离: {df['mean_distance_to_atom'].mean():.4f} ± {df['mean_distance_to_atom'].std():.4f} Å")
     print(f"  最小距离: {df['min_distance_to_atom'].min():.4f} Å")
     print(f"  最大距离: {df['max_distance_to_atom'].max():.4f} Å")
     
-    # 打印各距离区间的RMSD统计
-    print("\n各距离区间的RMSD统计:")
-    rmsd_bin_cols = [col for col in df.columns if col.startswith('rmsd_')]
+    # 打印各距离区间的predicted field RMSD统计
+    print("\n各距离区间的预测场(Predicted Field) RMSD统计:")
+    rmsd_bin_cols = [col for col in df.columns if col.startswith('rmsd_') and not col.startswith('denoised_rmsd_')]
     for col in sorted(rmsd_bin_cols, key=lambda x: float(x.split('_')[1].split('-')[0]) if '-' in x else float(x.split('_')[1].replace('+', ''))):
         bin_name = col.replace('rmsd_', '')
         mean_val = df[col].mean()
@@ -551,6 +650,28 @@ def main(config: DictConfig) -> None:
             print(f"  {bin_name} Å: {mean_val:.6f} ± {std_val:.6f} (总点数: {total_points})")
         else:
             print(f"  {bin_name} Å: {mean_val:.6f} ± {std_val:.6f}")
+    
+    # 如果评估了denoised_field，打印各距离区间的denoised field RMSD统计
+    if 'denoised_rmsd' in df.columns:
+        print("\n各距离区间的去噪场(Denoised Field) RMSD统计:")
+        denoised_rmsd_bin_cols = [col for col in df.columns if col.startswith('denoised_rmsd_')]
+        for col in sorted(denoised_rmsd_bin_cols, key=lambda x: float(x.split('_')[2].split('-')[0]) if '-' in x else float(x.split('_')[2].replace('+', ''))):
+            bin_name = col.replace('denoised_rmsd_', '')
+            mean_val = df[col].mean()
+            std_val = df[col].std()
+            count_col = f'count_{bin_name}'
+            if count_col in df.columns:
+                total_points = df[count_col].sum()
+                # 计算与predicted field的差异
+                pred_col = f'rmsd_{bin_name}'
+                if pred_col in df.columns:
+                    diff = df[col] - df[pred_col]
+                    diff_mean = diff.mean()
+                    print(f"  {bin_name} Å: {mean_val:.6f} ± {std_val:.6f} (总点数: {total_points}, 差异: {diff_mean:+.6f})")
+                else:
+                    print(f"  {bin_name} Å: {mean_val:.6f} ± {std_val:.6f} (总点数: {total_points})")
+            else:
+                print(f"  {bin_name} Å: {mean_val:.6f} ± {std_val:.6f}")
     
     # 6. 保存结果
     print("\n" + "="*80)
@@ -581,6 +702,20 @@ def main(config: DictConfig) -> None:
         bin_name = col.replace('rmsd_', '')
         summary[f'mean_rmsd_{bin_name}'] = df[col].mean()
         summary[f'std_rmsd_{bin_name}'] = df[col].std()
+    
+    # 如果评估了denoised_field，添加相关统计
+    if 'denoised_rmsd' in df.columns:
+        summary['mean_denoised_rmsd'] = df['denoised_rmsd'].mean()
+        summary['std_denoised_rmsd'] = df['denoised_rmsd'].std()
+        summary['mean_rmsd_diff'] = (df['denoised_rmsd'] - df['rmsd']).mean()
+        summary['std_rmsd_diff'] = (df['denoised_rmsd'] - df['rmsd']).std()
+        
+        # 添加各距离区间的denoised field RMSD
+        denoised_rmsd_bin_cols = [col for col in df.columns if col.startswith('denoised_rmsd_')]
+        for col in sorted(denoised_rmsd_bin_cols, key=lambda x: float(x.split('_')[2].split('-')[0]) if '-' in x else float(x.split('_')[2].replace('+', ''))):
+            bin_name = col.replace('denoised_rmsd_', '')
+            summary[f'mean_denoised_rmsd_{bin_name}'] = df[col].mean()
+            summary[f'std_denoised_rmsd_{bin_name}'] = df[col].std()
     
     summary_df = pd.DataFrame([summary])
     summary_path = output_dir / f"field_quality_summary_{dataset_type}.csv"

@@ -10,7 +10,7 @@ seed: 1234
 # nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/model-epoch=999.ckpt
 # nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251024/lightning_logs/version_0/checkpoints/model-epoch=409.ckpt
 # nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260116/lightning_logs/version_0/checkpoints/model-epoch=275.ckpt
-nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260120/lightning_logs/version_0/checkpoints/last.ckpt
+nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260123/lightning_logs/version_1/checkpoints/last.ckpt
 
 # debug options
 debug: False

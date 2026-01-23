@@ -3,8 +3,9 @@
 defaults:
   - dset: qm9
   - converter: gnf_converter_qm9
-  - encoder: gnn_small
-  - decoder: decoder_global_small
+  - encoder: gnn_medium
+  - decoder: decoder_global_medium
+  - denoiser: gnn  # 用于评估denoised_field
   - override hydra/job_logging: custom
   - _self_
 
@@ -21,7 +22,7 @@ nf_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neu
 split: test
 
 # 评估的样本数量（None表示使用全部）
-num_samples: 4000
+num_samples: 500
 
 # Batch size（评估时通常使用1）
 batch_size: 1
@@ -31,6 +32,23 @@ sample_full_grid: false
 
 # 输出目录
 output_dir: ../exps/analysis/field_quality/qm9
+
+# 是否评估denoised_field（从随机噪声完全去噪生成的field）
+evaluate_denoised_field: true
+
+# FuncMol checkpoint路径（评估denoised_field时需要）
+fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20260120/lightning_logs/version_2/checkpoints/last.ckpt
+
+# Diffusion方法（用于创建FuncMol模型，评估denoised_field时需要）
+diffusion_method: "new_x0"  # "new" 或 "new_x0"
+
+# DDPM配置（用于创建FuncMol模型，评估denoised_field时需要）
+ddpm:
+  num_timesteps: 1000
+  beta_start: 0.0001
+  beta_end: 0.02
+  schedule: "cosine"
+  use_time_weight: false
 
 # Hydra 设置
 hydra:

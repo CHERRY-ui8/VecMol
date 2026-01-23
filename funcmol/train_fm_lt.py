@@ -13,7 +13,7 @@ sys.path.append("..")
 # Set GPU environment
 # os.environ['CUDA_VISIBLE_DEVICES'] = "1"
 # os.environ['CUDA_VISIBLE_DEVICES'] = "4,5,6,7"
-os.environ['CUDA_VISIBLE_DEVICES'] = "0,2,3,4,5"
+os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3,4,5,6,7"
 
 # Data visualization and processing
 import matplotlib.pyplot as plt
@@ -1667,10 +1667,20 @@ def main(config):
                 if code_stats is None:
                     # Compute codes for normalization
                     print(f">> Computing code_stats from data (new training or checkpoint has no code_stats)")
+                    # 显示数据集信息
+                    try:
+                        dataset_size = len(loader_train.dataset)
+                        batch_size = loader_train.batch_size
+                        num_batches = len(loader_train)
+                        print(f">> Dataset info: {dataset_size:,} samples, batch size: {batch_size}, total batches: {num_batches:,}")
+                    except (TypeError, AttributeError):
+                        print(f">> Dataset info: batch size: {config_nf.get('dset', {}).get('batch_size', 'unknown')}")
+                    print(f">> This may take a while, please wait...")
                     _, code_stats = compute_codes(
                         loader_train, enc, config_nf, "train", config["normalize_codes"],
                         code_stats=None
                     )
+                    print(f">> Code stats computation completed!")
         else:
             loader_train = create_code_loaders(config, split="train")
             loader_val = create_code_loaders(config, split="val")
