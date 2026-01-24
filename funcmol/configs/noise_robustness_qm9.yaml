@@ -3,8 +3,8 @@
 defaults:
   - dset: qm9
   - converter: gnf_converter_qm9
-  - encoder: gnn
-  - decoder: decoder_global
+  - encoder: gnn_medium
+  - decoder: decoder_global_medium
   - override hydra/job_logging: custom
   - _self_
 
@@ -14,19 +14,19 @@ seed: 1234  # 随机种子，确保结果可重现
 dataset_type: qm9
 
 # Neural Field模型路径
-nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/model-epoch=999.ckpt
+nf_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260116/lightning_logs/version_0/checkpoints/model-epoch=275.ckpt
 
 # Codes目录路径（验证集codes）
-codes_dir: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/codes
+codes_dir: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260116/lightning_logs/version_0/checkpoints/code_no_aug
 
 # 测试集数据路径（用于计算分布比较指标）
 test_data_dir: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/funcmol/dataset/data/qm9
 
 # 要分析的codes数量
-num_codes: 4000
+num_codes: 100
 
 # 噪声水平（各向同性高斯噪声的标准差）
-noise_levels: [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
+noise_levels: [0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5]
 
 # 输出目录
 output_dir: ../exps/analysis/noise_robustness/qm9

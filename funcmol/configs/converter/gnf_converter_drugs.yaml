@@ -18,11 +18,12 @@ sigma_ratios:
   Cl: 1.3   # 氯原子，较大的 sigma
   Br: 1.4   # 溴原子，最大的 sigma
 
-gradient_field_method: tanh # softmax, sfnorm, logsumexp, inverse_square, tanh, gaussian_mag, distance
+gradient_field_method: gaussian_hole # softmax, sfnorm, logsumexp, inverse_square, tanh, gaussian_mag, distance, gaussian_hole
 temperature: 0.01 # 温度越高，分布越尖锐，越容易收敛（很可能极端地收敛到单个原子）；温度越低，分布越平缓，越不易收敛
 logsumexp_eps: 1e-8  # logsumexp方法的数值稳定性参数
 inverse_square_strength: 1.0 # 距离平方反比方法的强度参数
 gradient_clip_threshold: 0.3 # 梯度模长截断阈值
+gaussian_hole_clip: 0.8 # gaussian_hole 方法中距离裁剪的上限
 # 梯度采样相关参数
 gradient_sampling_candidate_multiplier: 3  # 梯度采样候选点倍数
 # field变化率采样参数

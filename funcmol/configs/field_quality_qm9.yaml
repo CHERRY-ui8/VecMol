@@ -16,13 +16,13 @@ dataset_type: qm9
 
 # Neural Field模型路径
 # nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/model-epoch=999.ckpt
-nf_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260116/lightning_logs/version_0/checkpoints/model-epoch=275.ckpt
+nf_pretrained_path: /datapool/data3/storage/pengxingang/pxg/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/
 
 # 数据集分割（train/val/test）
 split: test
 
 # 评估的样本数量（None表示使用全部）
-num_samples: 500
+num_samples: 4000
 
 # Batch size（评估时通常使用1）
 batch_size: 1

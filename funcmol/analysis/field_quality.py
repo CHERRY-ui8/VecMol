@@ -156,9 +156,9 @@ def compute_rmsd_by_distance(
     # 计算每个查询点到最近原子的距离
     distances = compute_distance_to_nearest_atom(query_points, atom_positions)
     
-    # 默认距离区间
+    # 默认距离区间（更细的划分）
     if distance_bins is None:
-        distance_bins = [0, 0.3, 0.5, 0.7, 1.0, 1.5, 2.0, 3.0, float('inf')]
+        distance_bins = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.5, 3.0, float('inf')]
     
     # 计算每个点的平方误差
     squared_diff = (pred_field - gt_field) ** 2  # [n_points, n_atom_types, 3]
@@ -241,49 +241,168 @@ def plot_rmsd_by_distance(
             avg_rmsd_by_bin[bin_name] = 0.0
             total_counts_by_bin[bin_name] = 0
     
-    # 创建图表
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    # 创建图表（只绘制RMSD图，不绘制点数分布图）
+    fig, ax = plt.subplots(1, 1, figsize=(12, 6))
     
-    # 左图：RMSD vs 距离区间
+    # RMSD vs 距离区间
     bin_names_sorted = sorted(bin_names, key=lambda x: float(x.split('-')[0]) if '-' in x else float(x.replace('+', '')))
     rmsd_values = [avg_rmsd_by_bin[bn] for bn in bin_names_sorted]
     counts = [total_counts_by_bin[bn] for bn in bin_names_sorted]
     
     # 绘制柱状图
-    bars = ax1.bar(range(len(bin_names_sorted)), rmsd_values, alpha=0.7, color='steelblue')
-    ax1.set_xlabel('Distance to Nearest Atom (Å)', fontsize=12)
-    ax1.set_ylabel('RMSD Loss', fontsize=12)
-    ax1.set_title('Average RMSD Loss by Distance', fontsize=14, fontweight='bold')
-    ax1.set_xticks(range(len(bin_names_sorted)))
-    ax1.set_xticklabels(bin_names_sorted, rotation=45, ha='right')
-    ax1.grid(axis='y', alpha=0.3)
+    bars = ax.bar(range(len(bin_names_sorted)), rmsd_values, alpha=0.7, color='steelblue')
+    ax.set_xlabel('Distance to Nearest Atom (Å)', fontsize=12)
+    ax.set_ylabel('RMSD Loss', fontsize=12)
+    ax.set_title('Average RMSD Loss by Distance', fontsize=14, fontweight='bold')
+    ax.set_xticks(range(len(bin_names_sorted)))
+    ax.set_xticklabels(bin_names_sorted, rotation=45, ha='right')
+    ax.grid(axis='y', alpha=0.3)
     
-    # 在柱状图上添加数值标签
-    for i, (bar, rmsd, count) in enumerate(zip(bars, rmsd_values, counts)):
+    # 不添加数值标签，保持图表简洁
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"图表已保存到: {output_path}")
+
+
+def compute_relative_error_by_distance(
+    pred_field: torch.Tensor,
+    gt_field: torch.Tensor,
+    query_points: torch.Tensor,
+    atom_positions: torch.Tensor,
+    distance_bins: Optional[List[float]] = None
+) -> Tuple[Dict[str, float], Dict[str, int], torch.Tensor]:
+    """
+    按距离最近原子的距离分组计算相对误差 (RMSD / GT field magnitude)
+    
+    Args:
+        pred_field: 预测场 [n_points, n_atom_types, 3]
+        gt_field: 真实场 [n_points, n_atom_types, 3]
+        query_points: 查询点坐标 [n_points, 3]
+        atom_positions: 原子坐标 [n_atoms, 3]
+        distance_bins: 距离区间的边界，例如 [0, 0.5, 1.0, 1.5, 2.0, float('inf')]
+                      如果为None，使用默认区间
+        
+    Returns:
+        (relative_error_by_bin, counts_by_bin, distances)
+        - relative_error_by_bin: 每个距离区间的相对误差值字典
+        - counts_by_bin: 每个距离区间的点数字典
+        - distances: 每个查询点到最近原子的距离 [n_points]
+    """
+    # 计算每个查询点到最近原子的距离
+    distances = compute_distance_to_nearest_atom(query_points, atom_positions)
+    
+    # 默认距离区间（更细的划分）
+    if distance_bins is None:
+        distance_bins = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.5, 3.0, float('inf')]
+    
+    # 计算每个点的平方误差
+    squared_diff = (pred_field - gt_field) ** 2  # [n_points, n_atom_types, 3]
+    # 对原子类型和空间维度求平均，得到每个点的MSE
+    pointwise_mse = torch.mean(squared_diff, dim=(-2, -1))  # [n_points]
+    pointwise_rmsd = torch.sqrt(pointwise_mse)  # [n_points]
+    
+    # 计算每个点的GT field模长（对所有原子类型和空间维度求平均后的模长）
+    gt_field_magnitude = torch.norm(gt_field, dim=-1)  # [n_points, n_atom_types]
+    gt_field_magnitude_mean = torch.mean(gt_field_magnitude, dim=-1)  # [n_points] - 对原子类型求平均
+    
+    # 计算相对误差：RMSD / GT field magnitude
+    # 避免除零，添加小的epsilon
+    epsilon = 1e-8
+    relative_error = pointwise_rmsd / (gt_field_magnitude_mean + epsilon)  # [n_points]
+    
+    relative_error_by_bin = {}
+    counts_by_bin = {}
+    
+    # 对每个距离区间计算相对误差
+    for i in range(len(distance_bins) - 1):
+        bin_min = distance_bins[i]
+        bin_max = distance_bins[i + 1]
+        
+        # 找到属于这个区间的点
+        if bin_max == float('inf'):
+            mask = (distances >= bin_min)
+        else:
+            mask = (distances >= bin_min) & (distances < bin_max)
+        
+        count = mask.sum().item()
+        counts_by_bin[f"{bin_min:.2f}-{bin_max:.2f}" if bin_max != float('inf') else f"{bin_min:.2f}+"] = count
+        
         if count > 0:
-            height = bar.get_height()
-            ax1.text(bar.get_x() + bar.get_width()/2., height,
-                    f'{rmsd:.4f}\n(n={count})',
-                    ha='center', va='bottom', fontsize=9)
+            # 计算这个区间的平均相对误差
+            bin_relative_error = relative_error[mask].mean().item()
+            relative_error_by_bin[f"{bin_min:.2f}-{bin_max:.2f}" if bin_max != float('inf') else f"{bin_min:.2f}+"] = bin_relative_error
+        else:
+            relative_error_by_bin[f"{bin_min:.2f}-{bin_max:.2f}" if bin_max != float('inf') else f"{bin_min:.2f}+"] = 0.0
     
-    # 右图：点数分布
-    ax2.bar(range(len(bin_names_sorted)), counts, alpha=0.7, color='coral')
-    ax2.set_xlabel('Distance to Nearest Atom (Å)', fontsize=12)
-    ax2.set_ylabel('Number of Points', fontsize=12)
-    ax2.set_title('Point Distribution by Distance', fontsize=14, fontweight='bold')
-    ax2.set_xticks(range(len(bin_names_sorted)))
-    ax2.set_xticklabels(bin_names_sorted, rotation=45, ha='right')
-    ax2.grid(axis='y', alpha=0.3)
+    return relative_error_by_bin, counts_by_bin, distances
+
+
+def plot_relative_error_by_distance(
+    all_relative_error_by_distance: List[Dict[str, float]],
+    all_counts_by_distance: List[Dict[str, int]],
+    output_path: Path,
+    title: str = "Relative Error (RMSD / GT Field Magnitude) by Distance"
+) -> None:
+    """
+    绘制不同距离区间的相对误差分布图
     
-    # 在柱状图上添加数值标签
-    for i, (count, bar) in enumerate(zip(counts, ax2.patches)):
-        if count > 0:
-            height = bar.get_height()
-            ax2.text(bar.get_x() + bar.get_width()/2., height,
-                    f'{count}',
-                    ha='center', va='bottom', fontsize=9)
+    Args:
+        all_relative_error_by_distance: 所有样本的距离分组相对误差列表
+        all_counts_by_distance: 所有样本的距离分组点数列表
+        output_path: 输出图片路径
+        title: 图表标题
+    """
+    # 收集所有距离区间的名称（应该是一致的）
+    if len(all_relative_error_by_distance) == 0:
+        print("警告: 没有数据可以绘制")
+        return
     
-    plt.suptitle(title, fontsize=16, fontweight='bold', y=1.02)
+    bin_names = list(all_relative_error_by_distance[0].keys())
+    
+    # 计算每个区间的平均相对误差和总点数
+    avg_relative_error_by_bin = {}
+    total_counts_by_bin = {}
+    
+    for bin_name in bin_names:
+        relative_error_values = []
+        counts = []
+        for rel_err_dict, count_dict in zip(all_relative_error_by_distance, all_counts_by_distance):
+            if bin_name in rel_err_dict and count_dict.get(bin_name, 0) > 0:
+                relative_error_values.append(rel_err_dict[bin_name])
+                counts.append(count_dict[bin_name])
+        
+        if len(relative_error_values) > 0:
+            # 使用加权平均（按点数加权）
+            total_count = sum(counts)
+            if total_count > 0:
+                weighted_relative_error = sum(r * c for r, c in zip(relative_error_values, counts)) / total_count
+                avg_relative_error_by_bin[bin_name] = weighted_relative_error
+                total_counts_by_bin[bin_name] = total_count
+            else:
+                avg_relative_error_by_bin[bin_name] = 0.0
+                total_counts_by_bin[bin_name] = 0
+        else:
+            avg_relative_error_by_bin[bin_name] = 0.0
+            total_counts_by_bin[bin_name] = 0
+    
+    # 创建图表
+    fig, ax = plt.subplots(1, 1, figsize=(12, 6))
+    
+    # 相对误差 vs 距离区间
+    bin_names_sorted = sorted(bin_names, key=lambda x: float(x.split('-')[0]) if '-' in x else float(x.replace('+', '')))
+    relative_error_values = [avg_relative_error_by_bin[bn] for bn in bin_names_sorted]
+    
+    # 绘制柱状图
+    ax.bar(range(len(bin_names_sorted)), relative_error_values, alpha=0.7, color='coral')
+    ax.set_xlabel('Distance to Nearest Atom (Å)', fontsize=12)
+    ax.set_ylabel('Relative Error (RMSD / GT Magnitude)', fontsize=12)
+    ax.set_title('Relative Error by Distance', fontsize=14, fontweight='bold')
+    ax.set_xticks(range(len(bin_names_sorted)))
+    ax.set_xticklabels(bin_names_sorted, rotation=45, ha='right')
+    ax.grid(axis='y', alpha=0.3)
+    
+    # 不添加数值标签，保持图表简洁
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
@@ -318,11 +437,16 @@ def main(config: DictConfig) -> None:
     print("\n" + "="*80)
     print("加载Neural Field模型")
     print("="*80)
-    nf_checkpoint_path = config.get("nf_pretrained_path")
+    nf_checkpoint_path = OmegaConf.select(config, "nf_pretrained_path")
     if not nf_checkpoint_path:
         raise ValueError("配置文件中必须提供 nf_pretrained_path")
     
+    nf_checkpoint_path = str(nf_checkpoint_path)
+    
     print(f"加载checkpoint: {nf_checkpoint_path}")
+    if not os.path.exists(nf_checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint文件不存在: {nf_checkpoint_path}\n请检查配置文件中的路径是否正确。")
+    
     checkpoint = torch.load(nf_checkpoint_path, map_location='cpu', weights_only=False)
     nf_config = checkpoint.get("hyper_parameters", {})
     
@@ -350,9 +474,14 @@ def main(config: DictConfig) -> None:
         print("\n" + "="*80)
         print("加载FuncMol Denoiser模型")
         print("="*80)
-        fm_checkpoint_path = config.get("fm_pretrained_path")
+        fm_checkpoint_path = OmegaConf.select(config, "fm_pretrained_path")
         if not fm_checkpoint_path:
             raise ValueError("评估denoised_field需要提供 fm_pretrained_path")
+        
+        fm_checkpoint_path = str(fm_checkpoint_path)
+        
+        if not os.path.exists(fm_checkpoint_path):
+            raise FileNotFoundError(f"FuncMol checkpoint文件不存在: {fm_checkpoint_path}\n请检查配置文件中的路径是否正确。")
         
         # 从当前配置中构建FuncMol配置
         # 使用当前config中的相关配置，而不是从其他配置文件加载
@@ -393,7 +522,6 @@ def main(config: DictConfig) -> None:
     print("="*80)
     
     # 创建FieldDataset
-    # 评估时只从格点采样，不采样邻近点（targeted_sampling_ratio=0）
     # 将相对路径转换为绝对路径
     data_dir = config_dict.get("dset", {}).get("data_dir", "dataset/data")
     if not os.path.isabs(data_dir):
@@ -402,6 +530,9 @@ def main(config: DictConfig) -> None:
     
     # 从dset配置中读取atom_distance_threshold，如果没有则使用默认值0.5
     atom_distance_threshold = config_dict.get("dset", {}).get("atom_distance_threshold", 0.5)
+    # 从dset配置中读取targeted_sampling_ratio，如果没有则使用默认值0.5（与train_nf保持一致）
+    targeted_sampling_ratio = config_dict.get("dset", {}).get("targeted_sampling_ratio", 0.5)
+    
     dataset = FieldDataset(
         gnf_converter=converter,
         dset_name=config_dict.get("dset", {}).get("dset_name", "qm9"),
@@ -413,7 +544,7 @@ def main(config: DictConfig) -> None:
         resolution=config_dict.get("dset", {}).get("resolution", 0.25),
         grid_dim=config_dict.get("dset", {}).get("grid_dim", 32),
         sample_full_grid=config.get("sample_full_grid", False),
-        targeted_sampling_ratio=0,  # 评估时只从格点采样，不采样邻近点
+        targeted_sampling_ratio=targeted_sampling_ratio,  # 使用与train_nf相同的采样比例
         atom_distance_threshold=atom_distance_threshold,
     )
     
@@ -449,8 +580,14 @@ def main(config: DictConfig) -> None:
     print("="*80)
     
     all_results = []
-    all_rmsd_by_distance = []  # 存储所有样本的距离分组RMSD
+    all_rmsd_by_distance = []  # 存储所有样本的predicted field距离分组RMSD
     all_counts_by_distance = []  # 存储所有样本的距离分组点数
+    all_relative_error_by_distance = []  # 存储所有样本的predicted field距离分组相对误差
+    
+    # 如果评估denoised_field，也收集其数据
+    all_denoised_rmsd_by_distance = []  # 存储所有样本的denoised field距离分组RMSD
+    all_denoised_relative_error_by_distance = []  # 存储所有样本的denoised field距离分组相对误差
+    all_denoised_results = []  # 存储denoised field的评估结果
     
     # 从配置中读取距离区间，如果没有则使用默认值
     distance_bins = config.get("distance_bins", None)
@@ -536,13 +673,24 @@ def main(config: DictConfig) -> None:
                     distance_bins=distance_bins
                 )
                 
+                # 按距离分组计算相对误差 (RMSD / GT field magnitude)
+                relative_error_by_bin, _, _ = compute_relative_error_by_distance(
+                    sample_pred_field,
+                    sample_gt_field,
+                    sample_query_points,
+                    sample_atom_positions,
+                    distance_bins=distance_bins
+                )
+                
                 # 保存距离分组数据用于后续绘图
                 all_rmsd_by_distance.append(rmsd_by_bin)
                 all_counts_by_distance.append(counts_by_bin)
+                all_relative_error_by_distance.append(relative_error_by_bin)
                 
-                # 如果评估denoised_field，也计算其RMSD
+                # 如果评估denoised_field，也计算其RMSD和相对误差
                 denoised_rmsd = None
                 denoised_rmsd_by_bin = None
+                denoised_relative_error_by_bin = None
                 if evaluate_denoised_field and denoised_field is not None:
                     sample_denoised_field = denoised_field[b]  # [n_points, n_atom_types, 3]
                     denoised_rmsd = compute_rmsd(sample_denoised_field, sample_gt_field)
@@ -555,23 +703,32 @@ def main(config: DictConfig) -> None:
                         sample_atom_positions,
                         distance_bins=distance_bins
                     )
+                    
+                    # 按距离分组计算denoised field的相对误差
+                    denoised_relative_error_by_bin, _, _ = compute_relative_error_by_distance(
+                        sample_denoised_field,
+                        sample_gt_field,
+                        sample_query_points,
+                        sample_atom_positions,
+                        distance_bins=distance_bins
+                    )
+                    
+                    # 保存denoised field的距离分组数据用于后续绘图
+                    all_denoised_rmsd_by_distance.append(denoised_rmsd_by_bin)
+                    all_denoised_relative_error_by_distance.append(denoised_relative_error_by_bin)
                 
                 # 获取原子数量
                 n_atoms = atom_mask.sum().item()
                 
-                # 计算距离统计
+                # 计算最小距离
                 distances_np = distances.cpu().numpy()
-                mean_distance = float(np.mean(distances_np))
                 min_distance = float(np.min(distances_np))
-                max_distance = float(np.max(distances_np))
                 
-                # 保存结果
+                # 保存predicted field结果
                 result = {
                     'sample_idx': batch_idx * batch_size + b,
                     'rmsd': rmsd,  # predicted field的RMSD
-                    'mean_distance_to_atom': mean_distance,
                     'min_distance_to_atom': min_distance,
-                    'max_distance_to_atom': max_distance,
                     'n_points': n_points,
                     'n_atoms': n_atoms,
                 }
@@ -582,14 +739,25 @@ def main(config: DictConfig) -> None:
                 for bin_name, bin_count in counts_by_bin.items():
                     result[f'count_{bin_name}'] = bin_count
                 
-                # 如果评估了denoised_field，添加相关结果
+                all_results.append(result)
+                
+                # 如果评估了denoised_field，单独保存denoised field结果
                 if evaluate_denoised_field and denoised_rmsd is not None:
-                    result['denoised_rmsd'] = denoised_rmsd
+                    denoised_result = {
+                        'sample_idx': batch_idx * batch_size + b,
+                        'rmsd': denoised_rmsd,  # denoised field的RMSD
+                        'min_distance_to_atom': min_distance,
+                        'n_points': n_points,
+                        'n_atoms': n_atoms,
+                    }
                     # 添加每个距离区间的denoised field RMSD
                     for bin_name, bin_rmsd in denoised_rmsd_by_bin.items():
-                        result[f'denoised_rmsd_{bin_name}'] = bin_rmsd
-                
-                all_results.append(result)
+                        denoised_result[f'rmsd_{bin_name}'] = bin_rmsd
+                    # 添加每个距离区间的点数（与predicted field相同）
+                    for bin_name, bin_count in counts_by_bin.items():
+                        denoised_result[f'count_{bin_name}'] = bin_count
+                    
+                    all_denoised_results.append(denoised_result)
                 
         except (RuntimeError, ValueError, IndexError) as e:
             print(f"警告: 处理batch {batch_idx} 时出错: {e}")
@@ -618,24 +786,9 @@ def main(config: DictConfig) -> None:
     print(f"  最小值: {df['rmsd'].min():.6f}")
     print(f"  最大值: {df['rmsd'].max():.6f}")
     
-    # 如果评估了denoised_field，打印其统计信息
-    if 'denoised_rmsd' in df.columns:
-        mean_denoised_rmsd = df['denoised_rmsd'].mean()
-        std_denoised_rmsd = df['denoised_rmsd'].std()
-        print("\n去噪场(Denoised Field) RMSD:")
-        print(f"  平均值: {mean_denoised_rmsd:.6f} ± {std_denoised_rmsd:.6f}")
-        print(f"  最小值: {df['denoised_rmsd'].min():.6f}")
-        print(f"  最大值: {df['denoised_rmsd'].max():.6f}")
-        print(f"\nRMSD差异 (Denoised - Predicted):")
-        diff = df['denoised_rmsd'] - df['rmsd']
-        print(f"  平均值: {diff.mean():.6f} ± {diff.std():.6f}")
-        print(f"  最小值: {diff.min():.6f}")
-        print(f"  最大值: {diff.max():.6f}")
     
     print("\n距离最近原子的距离统计:")
-    print(f"  平均距离: {df['mean_distance_to_atom'].mean():.4f} ± {df['mean_distance_to_atom'].std():.4f} Å")
     print(f"  最小距离: {df['min_distance_to_atom'].min():.4f} Å")
-    print(f"  最大距离: {df['max_distance_to_atom'].max():.4f} Å")
     
     # 打印各距离区间的predicted field RMSD统计
     print("\n各距离区间的预测场(Predicted Field) RMSD统计:")
@@ -651,25 +804,31 @@ def main(config: DictConfig) -> None:
         else:
             print(f"  {bin_name} Å: {mean_val:.6f} ± {std_val:.6f}")
     
-    # 如果评估了denoised_field，打印各距离区间的denoised field RMSD统计
-    if 'denoised_rmsd' in df.columns:
+    # 如果评估了denoised_field，打印denoised field的统计信息
+    if evaluate_denoised_field and len(all_denoised_results) > 0:
+        df_denoised = pd.DataFrame(all_denoised_results)
+        mean_denoised_rmsd = df_denoised['rmsd'].mean()
+        std_denoised_rmsd = df_denoised['rmsd'].std()
+        print("\n去噪场(Denoised Field) RMSD:")
+        print(f"  平均值: {mean_denoised_rmsd:.6f} ± {std_denoised_rmsd:.6f}")
+        print(f"  最小值: {df_denoised['rmsd'].min():.6f}")
+        print(f"  最大值: {df_denoised['rmsd'].max():.6f}")
+        print(f"\nRMSD差异 (Denoised - Predicted):")
+        diff = df_denoised['rmsd'].values - df['rmsd'].values
+        print(f"  平均值: {diff.mean():.6f} ± {diff.std():.6f}")
+        print(f"  最小值: {diff.min():.6f}")
+        print(f"  最大值: {diff.max():.6f}")
+        
         print("\n各距离区间的去噪场(Denoised Field) RMSD统计:")
-        denoised_rmsd_bin_cols = [col for col in df.columns if col.startswith('denoised_rmsd_')]
-        for col in sorted(denoised_rmsd_bin_cols, key=lambda x: float(x.split('_')[2].split('-')[0]) if '-' in x else float(x.split('_')[2].replace('+', ''))):
-            bin_name = col.replace('denoised_rmsd_', '')
-            mean_val = df[col].mean()
-            std_val = df[col].std()
+        denoised_rmsd_bin_cols = [col for col in df_denoised.columns if col.startswith('rmsd_')]
+        for col in sorted(denoised_rmsd_bin_cols, key=lambda x: float(x.split('_')[1].split('-')[0]) if '-' in x else float(x.split('_')[1].replace('+', ''))):
+            bin_name = col.replace('rmsd_', '')
+            mean_val = df_denoised[col].mean()
+            std_val = df_denoised[col].std()
             count_col = f'count_{bin_name}'
-            if count_col in df.columns:
-                total_points = df[count_col].sum()
-                # 计算与predicted field的差异
-                pred_col = f'rmsd_{bin_name}'
-                if pred_col in df.columns:
-                    diff = df[col] - df[pred_col]
-                    diff_mean = diff.mean()
-                    print(f"  {bin_name} Å: {mean_val:.6f} ± {std_val:.6f} (总点数: {total_points}, 差异: {diff_mean:+.6f})")
-                else:
-                    print(f"  {bin_name} Å: {mean_val:.6f} ± {std_val:.6f} (总点数: {total_points})")
+            if count_col in df_denoised.columns:
+                total_points = df_denoised[count_col].sum()
+                print(f"  {bin_name} Å: {mean_val:.6f} ± {std_val:.6f} (总点数: {total_points})")
             else:
                 print(f"  {bin_name} Å: {mean_val:.6f} ± {std_val:.6f}")
     
@@ -678,23 +837,29 @@ def main(config: DictConfig) -> None:
     print("保存结果")
     print("="*80)
     
-    output_dir = Path(config.get("output_dir", "exps/analysis/field_quality"))
+    # 获取输出目录，如果是相对路径则相对于项目根目录（funcmol的上一级）
+    output_dir_str = config.get("output_dir", "exps/analysis/field_quality")
+    if os.path.isabs(output_dir_str):
+        output_dir = Path(output_dir_str)
+    else:
+        # 相对于项目根目录（funcmol的上一级）
+        output_dir = PROJECT_ROOT.parent / output_dir_str
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # 保存CSV
+    # 保存CSV - predicted field
     dataset_type = config.get("dataset_type", "qm9")
-    csv_path = output_dir / f"field_quality_{dataset_type}.csv"
+    csv_path = output_dir / f"field_quality_predicted_{dataset_type}.csv"
     df.to_csv(csv_path, index=False)
-    print(f"详细结果已保存到: {csv_path}")
+    print(f"Predicted Field详细结果已保存到: {csv_path}")
     
-    # 保存汇总统计
+    # 保存汇总统计 - predicted field
     summary = {
         'dataset_type': dataset_type,
+        'field_type': 'predicted',
         'num_samples': len(all_results),
         'mean_rmsd': mean_rmsd,
         'std_rmsd': std_rmsd,
-        'mean_distance_to_atom': df['mean_distance_to_atom'].mean(),
-        'std_distance_to_atom': df['mean_distance_to_atom'].std(),
+        'min_distance_to_atom': df['min_distance_to_atom'].min(),
     }
     
     # 添加各距离区间的平均RMSD
@@ -703,40 +868,102 @@ def main(config: DictConfig) -> None:
         summary[f'mean_rmsd_{bin_name}'] = df[col].mean()
         summary[f'std_rmsd_{bin_name}'] = df[col].std()
     
-    # 如果评估了denoised_field，添加相关统计
-    if 'denoised_rmsd' in df.columns:
-        summary['mean_denoised_rmsd'] = df['denoised_rmsd'].mean()
-        summary['std_denoised_rmsd'] = df['denoised_rmsd'].std()
-        summary['mean_rmsd_diff'] = (df['denoised_rmsd'] - df['rmsd']).mean()
-        summary['std_rmsd_diff'] = (df['denoised_rmsd'] - df['rmsd']).std()
+    summary_df = pd.DataFrame([summary])
+    summary_path = output_dir / f"field_quality_summary_predicted_{dataset_type}.csv"
+    summary_df.to_csv(summary_path, index=False)
+    print(f"Predicted Field汇总统计已保存到: {summary_path}")
+    
+    # 如果评估了denoised_field，单独保存denoised field的CSV和统计
+    if evaluate_denoised_field and len(all_denoised_results) > 0:
+        df_denoised = pd.DataFrame(all_denoised_results)
+        denoised_csv_path = output_dir / f"field_quality_denoised_{dataset_type}.csv"
+        df_denoised.to_csv(denoised_csv_path, index=False)
+        print(f"Denoised Field详细结果已保存到: {denoised_csv_path}")
+        
+        # 保存denoised field的汇总统计
+        mean_denoised_rmsd = df_denoised['rmsd'].mean()
+        std_denoised_rmsd = df_denoised['rmsd'].std()
+        denoised_summary = {
+            'dataset_type': dataset_type,
+            'field_type': 'denoised',
+            'num_samples': len(all_denoised_results),
+            'mean_rmsd': mean_denoised_rmsd,
+            'std_rmsd': std_denoised_rmsd,
+            'min_distance_to_atom': df_denoised['min_distance_to_atom'].min(),
+        }
         
         # 添加各距离区间的denoised field RMSD
-        denoised_rmsd_bin_cols = [col for col in df.columns if col.startswith('denoised_rmsd_')]
-        for col in sorted(denoised_rmsd_bin_cols, key=lambda x: float(x.split('_')[2].split('-')[0]) if '-' in x else float(x.split('_')[2].replace('+', ''))):
-            bin_name = col.replace('denoised_rmsd_', '')
-            summary[f'mean_denoised_rmsd_{bin_name}'] = df[col].mean()
-            summary[f'std_denoised_rmsd_{bin_name}'] = df[col].std()
+        denoised_rmsd_bin_cols = [col for col in df_denoised.columns if col.startswith('rmsd_')]
+        for col in sorted(denoised_rmsd_bin_cols, key=lambda x: float(x.split('_')[1].split('-')[0]) if '-' in x else float(x.split('_')[1].replace('+', ''))):
+            bin_name = col.replace('rmsd_', '')
+            denoised_summary[f'mean_rmsd_{bin_name}'] = df_denoised[col].mean()
+            denoised_summary[f'std_rmsd_{bin_name}'] = df_denoised[col].std()
+        
+        denoised_summary_df = pd.DataFrame([denoised_summary])
+        denoised_summary_path = output_dir / f"field_quality_summary_denoised_{dataset_type}.csv"
+        denoised_summary_df.to_csv(denoised_summary_path, index=False)
+        print(f"Denoised Field汇总统计已保存到: {denoised_summary_path}")
     
-    summary_df = pd.DataFrame([summary])
-    summary_path = output_dir / f"field_quality_summary_{dataset_type}.csv"
-    summary_df.to_csv(summary_path, index=False)
-    print(f"汇总统计已保存到: {summary_path}")
-    
-    # 7. 绘制距离分组RMSD图表
+    # 7. 绘制Predicted Field的距离分组RMSD图表
     print("\n" + "="*80)
-    print("生成距离分组RMSD图表")
+    print("生成Predicted Field距离分组RMSD图表")
     print("="*80)
     
     if len(all_rmsd_by_distance) > 0:
-        plot_path = output_dir / f"rmsd_by_distance_{dataset_type}.png"
+        plot_path = output_dir / f"rmsd_by_distance_predicted_{dataset_type}.png"
         plot_rmsd_by_distance(
             all_rmsd_by_distance,
             all_counts_by_distance,
             plot_path,
-            title=f"RMSD Loss by Distance to Nearest Atom ({dataset_type})"
+            title=f"Predicted Field RMSD Loss by Distance ({dataset_type})"
         )
     else:
-        print("警告: 没有数据可以绘制")
+        print("警告: 没有数据可以绘制Predicted Field RMSD图")
+    
+    # 8. 绘制Predicted Field的距离分组相对误差图表
+    print("\n" + "="*80)
+    print("生成Predicted Field距离分组相对误差图表")
+    print("="*80)
+    
+    if len(all_relative_error_by_distance) > 0:
+        relative_error_plot_path = output_dir / f"relative_error_by_distance_predicted_{dataset_type}.png"
+        plot_relative_error_by_distance(
+            all_relative_error_by_distance,
+            all_counts_by_distance,
+            relative_error_plot_path,
+            title=f"Predicted Field Relative Error by Distance ({dataset_type})"
+        )
+    else:
+        print("警告: 没有数据可以绘制Predicted Field相对误差图")
+    
+    # 9. 如果评估了denoised_field，绘制Denoised Field的图表
+    if evaluate_denoised_field and len(all_denoised_rmsd_by_distance) > 0:
+        print("\n" + "="*80)
+        print("生成Denoised Field距离分组RMSD图表")
+        print("="*80)
+        
+        denoised_plot_path = output_dir / f"rmsd_by_distance_denoised_{dataset_type}.png"
+        plot_rmsd_by_distance(
+            all_denoised_rmsd_by_distance,
+            all_counts_by_distance,
+            denoised_plot_path,
+            title=f"Denoised Field RMSD Loss by Distance ({dataset_type})"
+        )
+        
+        print("\n" + "="*80)
+        print("生成Denoised Field距离分组相对误差图表")
+        print("="*80)
+        
+        if len(all_denoised_relative_error_by_distance) > 0:
+            denoised_relative_error_plot_path = output_dir / f"relative_error_by_distance_denoised_{dataset_type}.png"
+            plot_relative_error_by_distance(
+                all_denoised_relative_error_by_distance,
+                all_counts_by_distance,
+                denoised_relative_error_plot_path,
+                title=f"Denoised Field Relative Error by Distance ({dataset_type})"
+            )
+        else:
+            print("警告: 没有数据可以绘制Denoised Field相对误差图")
     
     print("\n" + "="*80)
     print("评估完成！")

@@ -15,9 +15,14 @@ from pathlib import Path
 from collections import Counter
 from typing import Dict, List, Tuple, Optional
 from tqdm import tqdm
-import matplotlib.pyplot as plt
 import hydra
 from omegaconf import DictConfig, OmegaConf
+
+# 设置项目根目录到 Python 路径
+import sys
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 # 禁用RDKit警告
 from rdkit import Chem, RDLogger
@@ -27,8 +32,10 @@ RDLogger.DisableLog('rdApp.*')
 # 导入项目模块
 from funcmol.dataset.dataset_code import CodeDataset, create_code_loaders
 from funcmol.utils.utils_nf import load_neural_field
-from funcmol.dataset.dataset_field import create_gnf_converter
+from funcmol.dataset.dataset_field import create_gnf_converter, create_field_loaders, FieldDataset
 from funcmol.utils.utils_base import add_bonds_with_openbabel
+from torch_geometric.data import Data, Batch
+from torch_geometric.loader import DataLoader as PyGDataLoader
 from funcmol.evaluate import (
     check_stable_mol,
     check_rdkit_validity,
@@ -40,7 +47,8 @@ from funcmol.evaluate import (
     compute_total_variation,
     compute_wasserstein1_distance,
     load_test_set_molecules,
-    compute_test_set_distributions
+    compute_test_set_distributions,
+    extract_largest_connected_component
 )
 
 
@@ -79,6 +87,13 @@ def coords_types_to_rdkit_mol(coords: np.ndarray, types: np.ndarray, elements: L
     try:
         # 使用MolFromMolBlock从字符串创建分子
         mol = Chem.MolFromMolBlock(sdf_content, sanitize=False)
+        if mol is None:
+            return None
+        
+        # 只保留最大连通分支
+        if mol.GetNumBonds() > 0:
+            mol = extract_largest_connected_component(mol)
+        
         return mol
     except Exception as e:
         print(f"警告: 从SDF创建RDKit分子失败: {e}")
@@ -155,6 +170,13 @@ def main(config: DictConfig) -> None:
     decoder.eval()
     print("模型加载完成")
     
+    # 设置输出目录（提前定义，供后续使用）
+    output_dir = Path(config.get("output_dir", "exps/analysis/noise_robustness"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 获取数据集类型（提前定义，供后续使用）
+    dataset_type = config.get("dataset_type", "qm9")
+    
     # 2. 创建GNFConverter
     print("\n" + "="*80)
     print("创建GNFConverter")
@@ -162,44 +184,119 @@ def main(config: DictConfig) -> None:
     converter = create_gnf_converter(config_dict)
     print("GNFConverter创建完成")
     
-    # 3. 加载验证集codes
+    # 3. 加载或计算codes
     print("\n" + "="*80)
-    print("加载验证集Codes")
-    print("="*80)
-    codes_dir = config.get("codes_dir")
-    if not codes_dir:
-        raise ValueError("配置文件中必须提供 codes_dir")
+    compute_codes_on_the_fly = config.get("compute_codes_on_the_fly", False)
+    save_computed_codes = config.get("save_computed_codes", False)
+    codes_save_dir = config.get("codes_save_dir", None)
     
-    # 创建CodeDataset
-    code_dataset = CodeDataset(
-        dset_name=config_dict.get("dset", {}).get("dset_name", "qm9"),
-        split="val",
-        codes_dir=codes_dir,
-        num_augmentations=None
-    )
+    if compute_codes_on_the_fly:
+        print("现场计算Codes（从test数据集）")
+        print("="*80)
+        
+        # 从test数据集加载分子并计算codes
+        num_codes_to_load = config.get("num_codes", 4000)
+        
+        # 创建FieldDataset来加载test数据集
+        field_dataset = FieldDataset(
+            gnf_converter=converter,
+            dset_name=config_dict.get("dset", {}).get("dset_name", "qm9"),
+            data_dir=config_dict.get("dset", {}).get("data_dir", "dataset/data"),
+            elements=config_dict.get("dset", {}).get("elements", None),
+            split="test",  # 使用test数据集
+            n_points=config_dict.get("dset", {}).get("n_points", 4000),
+            rotate=False,  # test集不旋转
+            resolution=config_dict.get("dset", {}).get("resolution", 0.25),
+            grid_dim=config_dict.get("dset", {}).get("grid_dim", 32),
+            sample_full_grid=False,
+            targeted_sampling_ratio=0,  # test集不使用targeted sampling
+            atom_distance_threshold=config_dict.get("dset", {}).get("atom_distance_threshold", 0.5),
+        )
+        
+        total_samples = len(field_dataset)
+        if total_samples < num_codes_to_load:
+            print(f"警告: test集只有 {total_samples} 个样本，将使用全部")
+            num_codes_to_load = total_samples
+        
+        # 随机选择样本（使用固定种子确保可重复）
+        indices = list(range(total_samples))
+        random.Random(seed).shuffle(indices)
+        selected_indices = indices[:num_codes_to_load]
+        
+        print(f"从 {total_samples} 个test样本中选择 {num_codes_to_load} 个")
+        
+        # 创建DataLoader（批次大小为1，因为我们逐个处理）
+        selected_dataset = torch.utils.data.Subset(field_dataset, selected_indices)
+        field_loader = PyGDataLoader(selected_dataset, batch_size=1, shuffle=False, num_workers=0)
+        
+        # 使用encoder计算codes
+        all_codes = []
+        encoder.eval()
+        with torch.no_grad():
+            for batch_idx, sample in enumerate(tqdm(field_loader, desc="计算codes")):
+                # sample已经是torch_geometric.data.Batch对象（DataLoader自动转换）
+                # 移动到设备
+                sample = sample.to(device)
+                
+                # 使用encoder计算codes
+                codes = encoder(sample)  # [1, grid_size³, code_dim]
+                all_codes.append(codes[0].cpu())  # 保存到CPU
+        
+        all_codes = torch.stack(all_codes).to(device)  # [num_codes, grid_size³, code_dim]
+        print(f"成功计算 {len(all_codes)} 个codes，形状: {all_codes.shape}")
+        
+        # 可选保存codes
+        if save_computed_codes:
+            if codes_save_dir is None:
+                codes_save_dir = output_dir / "computed_codes"
+            else:
+                codes_save_dir = Path(codes_save_dir)
+            
+            codes_save_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 保存为numpy格式（更小）
+            codes_np = all_codes.cpu().numpy()
+            codes_save_path = codes_save_dir / f"noise_robustness_codes_{dataset_type}.npz"
+            np.savez_compressed(codes_save_path, codes=codes_np, indices=selected_indices)
+            print(f"Codes已保存到: {codes_save_path} (形状: {codes_np.shape}, 大小: {codes_save_path.stat().st_size / 1024 / 1024:.2f} MB)")
     
-    # 加载至少4000个codes
-    num_codes_to_load = config.get("num_codes", 4000)
-    total_codes = len(code_dataset)
-    if total_codes < num_codes_to_load:
-        print(f"警告: 验证集只有 {total_codes} 个codes，将使用全部")
-        num_codes_to_load = total_codes
-    
-    # 随机选择codes（使用固定种子确保可重复）
-    indices = list(range(total_codes))
-    random.Random(seed).shuffle(indices)
-    selected_indices = indices[:num_codes_to_load]
-    
-    print(f"从 {total_codes} 个codes中选择 {num_codes_to_load} 个")
-    
-    # 加载选中的codes
-    all_codes = []
-    for idx in tqdm(selected_indices, desc="加载codes"):
-        code = code_dataset[idx]  # [grid_size³, code_dim]
-        all_codes.append(code)
-    
-    all_codes = torch.stack(all_codes).to(device)  # [num_codes, grid_size³, code_dim]
-    print(f"成功加载 {len(all_codes)} 个codes，形状: {all_codes.shape}")
+    else:
+        print("从文件加载Codes")
+        print("="*80)
+        codes_dir = config.get("codes_dir")
+        if not codes_dir:
+            raise ValueError("配置文件中必须提供 codes_dir（或设置 compute_codes_on_the_fly=True）")
+        
+        # 创建CodeDataset
+        code_dataset = CodeDataset(
+            dset_name=config_dict.get("dset", {}).get("dset_name", "qm9"),
+            split="test",
+            codes_dir=codes_dir,
+            num_augmentations=None
+        )
+        
+        # 加载至少4000个codes
+        num_codes_to_load = config.get("num_codes", 4000)
+        total_codes = len(code_dataset)
+        if total_codes < num_codes_to_load:
+            print(f"警告: 验证集只有 {total_codes} 个codes，将使用全部")
+            num_codes_to_load = total_codes
+        
+        # 随机选择codes（使用固定种子确保可重复）
+        indices = list(range(total_codes))
+        random.Random(seed).shuffle(indices)
+        selected_indices = indices[:num_codes_to_load]
+        
+        print(f"从 {total_codes} 个codes中选择 {num_codes_to_load} 个")
+        
+        # 加载选中的codes
+        all_codes = []
+        for idx in tqdm(selected_indices, desc="加载codes"):
+            code = code_dataset[idx]  # [grid_size³, code_dim]
+            all_codes.append(code)
+        
+        all_codes = torch.stack(all_codes).to(device)  # [num_codes, grid_size³, code_dim]
+        print(f"成功加载 {len(all_codes)} 个codes，形状: {all_codes.shape}")
     
     # 4. 定义噪声水平
     noise_levels = config.get("noise_levels", [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0])
@@ -210,7 +307,6 @@ def main(config: DictConfig) -> None:
     print("加载测试集分布")
     print("="*80)
     test_data_dir = config.get("test_data_dir")
-    dataset_type = config.get("dataset_type", "qm9")
     
     test_molecules = []
     test_distributions = None
@@ -435,57 +531,11 @@ def main(config: DictConfig) -> None:
     print("保存结果")
     print("="*80)
     
-    output_dir = Path(config.get("output_dir", "exps/analysis/noise_robustness"))
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
     # 保存CSV
     df = pd.DataFrame(results)
     csv_path = output_dir / f"noise_robustness_{dataset_type}.csv"
     df.to_csv(csv_path, index=False)
     print(f"结果已保存到: {csv_path}")
-    
-    # 9. 可视化
-    print("\n" + "="*80)
-    print("生成可视化图表")
-    print("="*80)
-    
-    fig, axes = plt.subplots(2, 4, figsize=(20, 10))
-    axes = axes.flatten()
-    
-    metrics_to_plot = [
-        ('stable_mol', 'Stable Mol Rate'),
-        ('stable_atom', 'Stable Atom %'),
-        ('valid', 'Valid Rate'),
-        ('valency_w1', 'Valency W1'),
-        ('atom_tv', 'Atom TV'),
-        ('bond_tv', 'Bond TV'),
-        ('bond_len_w1', 'Bond Length W1'),
-        ('bond_ang_w1', 'Bond Angle W1')
-    ]
-    
-    for idx, (metric, title) in enumerate(metrics_to_plot):
-        ax = axes[idx]
-        noise_levels_plot = [r['noise_level'] for r in results]
-        values = [r[metric] for r in results]
-        
-        # 过滤掉None值
-        valid_pairs = [(n, v) for n, v in zip(noise_levels_plot, values) if v is not None]
-        if valid_pairs:
-            noise_levels_valid, values_valid = zip(*valid_pairs)
-            ax.plot(noise_levels_valid, values_valid, 'o-', linewidth=2, markersize=8)
-            ax.set_xlabel('Noise Level', fontsize=12)
-            ax.set_ylabel(title, fontsize=12)
-            ax.set_title(title, fontsize=14, fontweight='bold')
-            ax.grid(True, alpha=0.3)
-        else:
-            ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
-            ax.set_title(title, fontsize=14, fontweight='bold')
-    
-    plt.tight_layout()
-    plot_path = output_dir / f"noise_robustness_{dataset_type}.png"
-    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-    print(f"图表已保存到: {plot_path}")
-    plt.close()
     
     print("\n" + "="*80)
     print("分析完成！")

@@ -20,11 +20,12 @@ sigma_ratios:
   O: 1.1    # 氧原子，中等 sigma
   'N': 1.0    # 氮原子，略小于氧原子
   F: 1.2    # 氟原子，略大于氧原子
-gradient_field_method: tanh # softmax, sfnorm, logsumexp, inverse_square, tanh, gaussian_mag, distance
+gradient_field_method: gaussian_hole # softmax, sfnorm, logsumexp, inverse_square, tanh, gaussian_mag, distance, gaussian_hole
 temperature: 0.01 # 温度越高，分布越尖锐，越容易收敛（很可能极端地收敛到单个原子）；温度越低，分布越平缓，越不易收敛
 logsumexp_eps: 1e-8  # logsumexp方法的数值稳定性参数
 inverse_square_strength: 1.0 # 距离平方反比方法的强度参数
 gradient_clip_threshold: 0.3 # 梯度模长截断阈值
+gaussian_hole_clip: 0.8 # gaussian_hole 方法中距离裁剪的上限
 
 # 采样基于field变化率（方差）
 gradient_sampling_candidate_multiplier: 3  # 候选点数量 = max_query_points * 此倍数

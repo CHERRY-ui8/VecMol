@@ -19,6 +19,7 @@ temperature: 0.01 # 温度越高，分布越尖锐，越容易收敛（很可能
 logsumexp_eps: 1e-8  # logsumexp方法的数值稳定性参数
 inverse_square_strength: 1.0 # 距离平方反比方法的强度参数
 gradient_clip_threshold: 0.3 # 梯度模长截断阈值
+gaussian_hole_clip: 0.8 # gaussian_hole 方法中距离裁剪的上限
 # 梯度采样相关参数
 gradient_sampling_candidate_multiplier: 10  # 梯度采样候选点倍数
 

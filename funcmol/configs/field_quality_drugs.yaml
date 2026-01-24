@@ -31,6 +31,24 @@ sample_full_grid: false
 # 输出目录
 output_dir: ../exps/analysis/field_quality/drugs
 
+# 是否评估denoised_field（从随机噪声完全去噪生成的field）
+evaluate_denoised_field: true
+
+# FuncMol checkpoint路径（评估denoised_field时需要）
+fm_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_drugs/20260116/lightning_logs/version_2/checkpoints/last.ckpt
+
+# Diffusion方法（用于创建FuncMol模型，评估denoised_field时需要）
+diffusion_method: "new_x0"  # "new" 或 "new_x0"
+
+# DDPM配置（用于创建FuncMol模型，评估denoised_field时需要）
+ddpm:
+  num_timesteps: 1000
+  beta_start: 0.0001
+  beta_end: 0.02
+  schedule: "cosine"
+  use_time_weight: false
+
+
 # Hydra 设置
 hydra:
   run:

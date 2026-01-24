@@ -9,8 +9,8 @@ seed: 1234
 # nf_pretrained_path: null  # 必须指定Lightning checkpoint文件路径，例如: /path/to/checkpoints/model-50.ckpt
 # nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/model-epoch=999.ckpt
 # nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20251024/lightning_logs/version_0/checkpoints/model-epoch=409.ckpt
-# nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260116/lightning_logs/version_0/checkpoints/model-epoch=275.ckpt
-nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260123/lightning_logs/version_1/checkpoints/last.ckpt
+nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260116/lightning_logs/version_0/checkpoints/model-epoch=275.ckpt
+# nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260123/lightning_logs/version_1/checkpoints/last.ckpt
 
 # debug options
 debug: False
@@ -20,7 +20,7 @@ debug_subset: False
 # dirname 将自动基于 nf_pretrained_path 的目录计算
 
 # overwrite
-split: val # train, val, test
+split: test # train, val, test
 dset:
   data_aug: True
   batch_size: 32
