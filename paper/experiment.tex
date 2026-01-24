@@ -239,3 +239,58 @@ FuncMol
 \bottomrule
 \end{tabular}
 \end{table*}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Field Definition Ablation
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\subsection{Necessity of Field Definition Components}
+\label{sec:field_definition_ablation}
+
+The gradient field definition introduced in \Cref{sec:field} consists of three essential components:
+(i) softmax-based direction selection, (ii) tanh-based magnitude control, and (iii) direction vector normalization.
+To demonstrate the necessity of each component, we analyze how the field behaves when any component is removed.
+
+Our field definition must satisfy four key requirements:
+\textbf{R1: Local single-atom dominance.} When a query point is very close to an atom, the gradient field should be dominated by that atom's contribution, with minimal interference from other atoms. This ensures precise convergence to individual atomic positions without ambiguity.
+
+\textbf{R2: Smooth gradient transitions.} The gradient field should vary smoothly across space without abrupt changes or discontinuities. Smooth transitions facilitate accurate learning by neural networks and prevent optimization instabilities.
+
+\textbf{R3: Bounded gradient magnitude.} Gradient magnitudes must remain bounded and well-conditioned, especially near atomic positions. Unbounded or rapidly varying gradients lead to numerical instabilities and make the field difficult for neural networks to learn accurately.
+
+\textbf{R4: Long-range gradient presence.} The gradient field should remain non-vanishing at moderate to large distances from atoms. While not strictly necessary for reconstruction, maintaining informative gradients across the spatial domain improves sampling efficiency by ensuring that query points always receive useful guidance, even when initialized far from atomic centers.
+
+The softmax weighting component (Equation~(1) in \Cref{sec:field}) addresses R1 and R2 by ensuring that nearby atoms dominate the field direction while maintaining smooth transitions. Without softmax, the field fails to achieve local dominance, leading to ambiguous convergence points between multiple atoms.
+
+The tanh magnitude control (Equation~(2) in \Cref{sec:field}) addresses R3 by bounding gradient magnitudes and preventing numerical instabilities near atomic positions. Without tanh, the field exhibits unbounded or rapidly varying magnitudes, making it difficult for neural networks to learn and causing optimization instabilities.
+
+The direction normalization (Equation~(3) in \Cref{sec:field}) ensures that the field magnitude is controlled solely by the weighting functions, not by the distance-dependent scaling of direction vectors. Without normalization, the field magnitude becomes distance-dependent in an uncontrolled manner, violating R3 and making the field harder to learn.
+
+Figure~\ref{fig:field_ablation_1d} visualizes the 1D field behavior for a simple two-atom system under four configurations:
+(i) the full definition with all three components,
+(ii) without softmax (using uniform weighting),
+(iii) without tanh (using constant magnitude),
+and (iv) without norm (using unnormalized direction vectors).
+
+The visualization clearly demonstrates that removing any component leads to violations of the requirements:
+removing softmax eliminates local dominance (R1 violation),
+removing tanh causes unbounded magnitudes near atoms (R3 violation),
+and removing norm introduces uncontrolled distance-dependent scaling (R3 violation).
+Only the full definition satisfies all four requirements simultaneously.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figures/field_ablation_1d_4in1.pdf}
+    \caption{
+    \textbf{Ablation study of field definition components in 1D.}
+    The figure shows the gradient field for a two-atom system (atoms at positions $-1$ and $+1$) under four configurations:
+    (i) full definition with softmax, tanh, and norm,
+    (ii) without softmax,
+    (iii) without tanh,
+    and (iv) without norm.
+    The full definition ensures local dominance near atoms (R1), smooth transitions (R2), bounded magnitudes (R3), and informative gradients at long range (R4).
+    Removing any component violates one or more requirements, demonstrating the necessity of all three components.
+    All curves are plotted as blue solid lines for clarity.
+    }
+    \label{fig:field_ablation_1d}
+\end{figure}

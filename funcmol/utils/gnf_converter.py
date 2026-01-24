@@ -42,13 +42,14 @@ class GNFConverter(nn.Module):
                 eps: float,  # DBSCAN的邻域半径参数
                 min_samples: int,  # DBSCAN的最小样本数参数
                 sigma_ratios: Dict[str, float],
-                gradient_field_method: str = "softmax",  # 梯度场计算方法: "gaussian", "softmax", "logsumexp", "inverse_square", "sigmoid", "gaussian_mag", "distance"
+                gradient_field_method: str = "softmax",  # 梯度场计算方法: "gaussian", "softmax", "logsumexp", "inverse_square", "sigmoid", "gaussian_mag", "distance", "gaussian_hole"
                 temperature: float = 1.0,  # softmax温度参数，控制分布尖锐程度
                 logsumexp_eps: float = 1e-8,  # logsumexp方法的数值稳定性参数
                 inverse_square_strength: float = 1.0,  # 距离平方反比方法的强度参数
                 gradient_clip_threshold: float = 0.3,  # 梯度模长截断阈值
                 sig_sf: float = 0.1,  # softmax field的sigma参数
                 sig_mag: float = 0.45,  # magnitude的sigma参数
+                gaussian_hole_clip: float = 0.8,  # gaussian_hole方法中距离裁剪的上限值
                 gradient_sampling_candidate_multiplier: int = 3,  # 梯度采样候选点倍数
                 field_variance_k_neighbors: int = 10,  # 计算field方差时使用的最近邻数量
                 field_variance_weight: float = 1.0,  # field方差在采样概率中的权重（作为softmax温度参数）
@@ -86,6 +87,7 @@ class GNFConverter(nn.Module):
         self.gradient_clip_threshold = gradient_clip_threshold  # 保存梯度模长截断阈值
         self.sig_sf = sig_sf  # 保存softmax field的sigma参数
         self.sig_mag = sig_mag  # 保存magnitude的sigma参数
+        self.gaussian_hole_clip = gaussian_hole_clip  # 保存gaussian_hole方法中距离裁剪的上限值
         self.gradient_sampling_candidate_multiplier = gradient_sampling_candidate_multiplier  # 保存梯度采样候选点倍数
         self.field_variance_k_neighbors = field_variance_k_neighbors  # 计算field方差时使用的最近邻数量
         self.field_variance_weight = field_variance_weight  # field方差在采样概率中的权重（作为softmax温度参数）
@@ -155,6 +157,7 @@ class GNFConverter(nn.Module):
             gradient_clip_threshold=gradient_clip_threshold,
             sig_sf=sig_sf,
             sig_mag=sig_mag,
+            gaussian_hole_clip=gaussian_hole_clip,
         )
         
         # 初始化梯度上升模块

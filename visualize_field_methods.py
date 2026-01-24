@@ -64,6 +64,12 @@ def compute_field(method, x, atoms):
         w_mag = np.exp(-dists**2 / (2*sig_mag**2)) * dists
         field = 2*np.sum(np.sign(diffs) * w_sf * w_mag, axis=0)
         
+    elif method == "gaussian hole":
+        w_sf = np.exp(-dists / sig_sf)
+        w_sf = w_sf / w_sf.sum(axis=0, keepdims=True)
+        w_mag = np.exp(-min(dists,)**2 / (2*sig_mag**2)) * dists
+        field = 2*np.sum(np.sign(diffs) * w_sf * w_mag, axis=0)
+
     elif method == "distance with clip":
         w_sf = np.exp(-dists / sig_sf)
         w_sf = w_sf / w_sf.sum(axis=0, keepdims=True)

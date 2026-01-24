@@ -19,6 +19,7 @@ class GradientFieldComputer:
         gradient_clip_threshold: float = 0.3,
         sig_sf: float = 0.1,
         sig_mag: float = 0.45,
+        gaussian_hole_clip: float = 0.8,
     ):
         """
         初始化梯度场计算器
@@ -33,6 +34,7 @@ class GradientFieldComputer:
             gradient_clip_threshold: 梯度模长截断阈值
             sig_sf: softmax field的sigma参数
             sig_mag: magnitude的sigma参数
+            gaussian_hole_clip: gaussian_hole方法中距离裁剪的上限值
         """
         self.sigma_params = sigma_params
         self.sigma = sigma
@@ -43,6 +45,7 @@ class GradientFieldComputer:
         self.gradient_clip_threshold = gradient_clip_threshold
         self.sig_sf = sig_sf
         self.sig_mag = sig_mag
+        self.gaussian_hole_clip = gaussian_hole_clip
     
     def compute_gradient_field_matrix(
         self, 
@@ -229,6 +232,25 @@ class GradientFieldComputer:
                     diff_normed = type_diff / (torch.norm(type_diff, dim=-1, keepdim=True) + 1e-8)  # [n_type_atoms, n_points, 3]
                     weighted_gradients = diff_normed * w_softmax.unsqueeze(-1) * w_mag.unsqueeze(-1)  # [n_type_atoms, n_points, 3]
                     vector_field[:, t, :] = torch.sum(weighted_gradients, dim=0)  # [n_points, 3]
+        
+        elif self.gradient_field_method == "gaussian_hole":
+            for t in range(n_atom_types):
+                type_mask = atom_type_mask[:, t]  # [n_atoms]
+                if type_mask.sum() > 0:
+                    type_diff = diff[type_mask]  # [n_type_atoms, n_points, 3]
+                    type_dist_sq = dist_sq[type_mask]  # [n_type_atoms, n_points, 1]
+                    
+                    distances = torch.sqrt(type_dist_sq.squeeze(-1))  # [n_type_atoms, n_points]
+                    # Softmax field weight (normalized)
+                    w_softmax = torch.softmax(-distances / self.sig_sf, dim=0)  # [n_type_atoms, n_points]
+                    # Clip distances from above
+                    dists_clipped = torch.clamp(distances, max=self.gaussian_hole_clip)  # [n_type_atoms, n_points]
+                    # Gaussian hole magnitude weight
+                    w_mag = torch.exp(-dists_clipped**2 / (2 * self.sig_mag**2)) * dists_clipped  # [n_type_atoms, n_points]
+                    # Normalize direction (equivalent to sign in 1D)
+                    diff_normed = type_diff / (torch.norm(type_diff, dim=-1, keepdim=True) + 1e-8)  # [n_type_atoms, n_points, 3]
+                    weighted_gradients = diff_normed * w_softmax.unsqueeze(-1) * w_mag.unsqueeze(-1)  # [n_type_atoms, n_points, 3]
+                    vector_field[:, t, :] = 2.0 * torch.sum(weighted_gradients, dim=0)  # [n_points, 3] (multiply by 2 as in 1D case)
         
         return vector_field
 
