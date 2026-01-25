@@ -2,7 +2,7 @@ defaults:
   - dset: drugs
   - encoder: gnn_large
   - decoder: decoder_global_large
-  - denoiser: gnn
+  - denoiser: cnn
   - converter: gnf_converter_drugs
   - override hydra/job_logging: custom
   - _self_
@@ -65,12 +65,12 @@ field_loss_finetune:
   field_loss_weight: 100.0  # field loss的权重（λ），用于组合损失：total_loss = denoiser_loss + λ * field_loss
   num_timesteps_for_field_loss: 500  # 从[0, num_timesteps_for_field_loss)中随机均匀采样一个timestep进行field loss计算（避免OOM）
 
-nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_drugs/20260113/lightning_logs/version_0/checkpoints/last.ckpt
+nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_drugs/20260113/lightning_logs/version_1/checkpoints/last.ckpt
 exp_dir: ../exps/funcmol
 exp_name: "fm_${dset.dset_name}/${now:%Y%m%d}" # NOTE: in lightning, no time stamp needed
 dirname: "${exp_dir}/${exp_name}"
-# reload_model_path: null
-reload_model_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_drugs/20260116/lightning_logs/version_2/checkpoints/model-epoch=09.ckpt
+reload_model_path: null
+# reload_model_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_drugs/20260116/lightning_logs/version_2/checkpoints/model-epoch=09.ckpt
 
 # data params
 smooth_sigma: 0.5
@@ -84,19 +84,19 @@ num_augmentations: 1  # null 或具体数字（如 3, 5, 10 等）
 use_sharded_lmdb: true  # 是否使用分片LMDB。null=自动检测（优先使用分片），true=强制使用分片，false=强制使用完整LMDB
 
 codes_dir_no_aug: "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_drugs/20260113/lightning_logs/version_1/checkpoints/code_no_aug/"
-# codes_dir_with_aug: "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_drugs/20260113/lightning_logs/version_0/checkpoints/codes_no_shuffle/"
+# codes_dir_with_aug: "/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_drugs/20260113/lightning_logs/version_1/checkpoints/codes_no_shuffle/"
 
 # code_stats 路径（可选）
 # 如果设置了此路径，且 reload_model_path 的 checkpoint 中没有 code_stats，则会从此路径加载
 # 如果都没有，则会重新计算 code_stats
-code_stats_path: /data/huayuchen/Neurl-voxel/exps/neural_field/nf_drugs/20260113/lightning_logs/version_0/checkpoints/code_stats_train_aug1_norm1.pt
+code_stats_path: /data/huayuchen/Neurl-voxel/exps/neural_field/nf_drugs/20260113/lightning_logs/version_1/checkpoints/code_stats_train_aug1_norm1.pt
 
 
 # training params
 num_epochs: 5000
 dset:
-  batch_size: 24
-  num_workers: 2
+  batch_size: 128
+  num_workers: 4
 
 ckpt_every_n_epochs: 1  # 每隔多少epoch保存一次ckpt
 decoder:

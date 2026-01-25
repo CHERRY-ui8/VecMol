@@ -73,7 +73,7 @@ method_configs:
 
   tanh:
     n_query_points: 2000 # 1000 deprecated
-    step_size: 0.1 # 0.05
+    step_size: 0.2 # 0.05
     sig_sf: 0.1
     sig_mag: 2
   

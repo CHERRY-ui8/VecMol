@@ -674,17 +674,17 @@ def create_field_loaders(
         # dset.field_idxs = torch.arange(min(128, len(dset.field_idxs)))  # 限制为128个分子
         dset.keys = torch.arange(min(32, len(dset.keys)))  # 限制为32个分子
 
-    # DataLoader配置：中和配置（80%情况最优）
+    # DataLoader配置：优化性能设置
     # num_workers从config文件读取，不在此处限制
     loader = DataLoader(
         dset,
         batch_size=min(config["dset"]["batch_size"], len(dset)),
         num_workers=config["dset"]["num_workers"],
         shuffle=True if split == "train" else False,
-        pin_memory=True,  # 中和配置：可以开启
-        persistent_workers=True,  # 中和配置：可以开启
-        prefetch_factor=2,  # 中和配置：推荐值
+        pin_memory=True,  # 加速GPU数据传输
+        persistent_workers=True if config["dset"]["num_workers"] > 0 else False,  # 保持worker进程，减少启动开销
         drop_last=True,
+        # 移除prefetch_factor限制，使用PyTorch默认值（通常为2），让系统自动优化
     )
     print(f">> {split} set size: {len(dset)}")
     return loader
@@ -798,9 +798,6 @@ def create_gnf_converter(config: dict) -> GNFConverter:
     sampling_range_min = gnf_config.get("sampling_range_min", -7.0)
     sampling_range_max = gnf_config.get("sampling_range_max", 7.0)
     
-    # 获取gaussian_hole方法的clip参数（可选，默认为0.8）
-    gaussian_hole_clip = gnf_config.get("gaussian_hole_clip", 0.8)
-    
     return GNFConverter(
         sigma=sigma,
         n_query_points=n_query_points,
@@ -816,7 +813,6 @@ def create_gnf_converter(config: dict) -> GNFConverter:
         gradient_clip_threshold=gradient_clip_threshold,
         sig_sf=sig_sf,
         sig_mag=sig_mag,
-        gaussian_hole_clip=gaussian_hole_clip,
         gradient_sampling_candidate_multiplier=gradient_sampling_candidate_multiplier,
         field_variance_k_neighbors=field_variance_k_neighbors,  # 添加field方差k最近邻参数
         field_variance_weight=field_variance_weight,  # 添加field方差权重参数

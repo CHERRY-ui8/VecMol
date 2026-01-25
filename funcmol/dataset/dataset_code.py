@@ -894,19 +894,19 @@ def create_code_loaders(
         if len(dset) > len(indexes):
             dset = Subset(dset, indexes)  # Smaller training set for debugging
 
-    # DataLoader配置：中和配置（80%情况最优）
+    # DataLoader配置：优化性能设置
     # num_workers从config文件读取，不在此处限制
     loader_kwargs = {
         "batch_size": min(config["dset"]["batch_size"], len(dset)),
         "num_workers": config["dset"]["num_workers"],
         "shuffle": True if split == "train" else False,
-        "pin_memory": True,  # 中和配置：可以开启
+        "pin_memory": True,  # 加速GPU数据传输
         "drop_last": True,
-        "persistent_workers": True,  # 中和配置：可以开启
-        "prefetch_factor": 2,  # 中和配置：推荐值
+        "persistent_workers": True if config["dset"]["num_workers"] > 0 else False,  # 保持worker进程，减少启动开销
+        # 移除prefetch_factor限制，使用PyTorch默认值（通常为2），让系统自动优化
     }
     
-    # 如果配置中显式指定了prefetch_factor，则使用配置值
+    # 如果配置中显式指定了prefetch_factor，则使用配置值（允许用户覆盖）
     if "prefetch_factor" in config["dset"]:
         loader_kwargs["prefetch_factor"] = config["dset"]["prefetch_factor"]
     
