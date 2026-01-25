@@ -798,6 +798,9 @@ def create_gnf_converter(config: dict) -> GNFConverter:
     sampling_range_min = gnf_config.get("sampling_range_min", -7.0)
     sampling_range_max = gnf_config.get("sampling_range_max", 7.0)
     
+    # 获取gaussian_hole方法的clip参数（可选，默认为0.8）
+    gaussian_hole_clip = gnf_config.get("gaussian_hole_clip", 0.8)
+    
     return GNFConverter(
         sigma=sigma,
         n_query_points=n_query_points,
@@ -813,6 +816,7 @@ def create_gnf_converter(config: dict) -> GNFConverter:
         gradient_clip_threshold=gradient_clip_threshold,
         sig_sf=sig_sf,
         sig_mag=sig_mag,
+        gaussian_hole_clip=gaussian_hole_clip,
         gradient_sampling_candidate_multiplier=gradient_sampling_candidate_multiplier,
         field_variance_k_neighbors=field_variance_k_neighbors,  # 添加field方差k最近邻参数
         field_variance_weight=field_variance_weight,  # 添加field方差权重参数

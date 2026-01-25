@@ -8,6 +8,7 @@ from funcmol.utils.utils_fm import add_noise_to_code
 from funcmol.utils.utils_nf import unnormalize_code
 from funcmol.models.unet1d import MLPResCode
 from funcmol.models.egnn_denoiser import GNNDenoiser
+from funcmol.models.cnn_denoiser import CNNDenoiser
 from funcmol.models.ddpm import (create_diffusion_constants, compute_ddpm_loss, 
     p_sample_loop, compute_ddpm_loss_x0, p_sample_loop_x0)
 
@@ -52,19 +53,48 @@ class FuncMol(nn.Module):
         if self.diffusion_method == "new" or self.diffusion_method == "new_x0":
             # 统一从denoiser配置读取所有模型参数
             denoiser_config = config.get("denoiser", {})
-            self.net = GNNDenoiser(
-                code_dim=config["decoder"]["code_dim"],
-                hidden_dim=denoiser_config.get("hidden_dim", 128),
-                num_layers=denoiser_config.get("num_layers", 4),
-                time_emb_dim=denoiser_config.get("time_emb_dim", 64),
-                cutoff=denoiser_config.get("cutoff", 5.0),
-                radius=denoiser_config.get("radius", 2.0),
-                dropout=denoiser_config.get("dropout", 0.1),
-                grid_size=config["dset"]["grid_size"],
-                anchor_spacing=config["dset"]["anchor_spacing"],
-                use_radius_graph=denoiser_config.get("use_radius_graph", True),
-                device=self.device
-            ).to(self.device)
+            use_cnn = denoiser_config.get("use_cnn", False)
+            use_gnn = denoiser_config.get("use_gnn", False)
+            
+            if use_cnn:
+                # 使用CNN denoiser
+                self.net = CNNDenoiser(
+                    code_dim=config["decoder"]["code_dim"],
+                    hidden_channels=denoiser_config.get("hidden_channels", [64, 128, 256]),
+                    num_layers=denoiser_config.get("num_layers", 3),
+                    kernel_size=denoiser_config.get("kernel_size", 3),
+                    dropout=denoiser_config.get("dropout", 0.1),
+                    grid_size=config["dset"]["grid_size"],
+                    time_emb_dim=denoiser_config.get("time_emb_dim", 256),
+                    num_conv_blocks_per_layer=denoiser_config.get("num_conv_blocks_per_layer", 2)
+                ).to(self.device)
+            elif use_gnn:
+                # 使用GNN denoiser
+                self.net = GNNDenoiser(
+                    code_dim=config["decoder"]["code_dim"],
+                    hidden_dim=denoiser_config.get("hidden_dim", 128),
+                    num_layers=denoiser_config.get("num_layers", 4),
+                    time_emb_dim=denoiser_config.get("time_emb_dim", 64),
+                    cutoff=denoiser_config.get("cutoff", 5.0),
+                    radius=denoiser_config.get("radius", 2.0),
+                    dropout=denoiser_config.get("dropout", 0.1),
+                    grid_size=config["dset"]["grid_size"],
+                    anchor_spacing=config["dset"]["anchor_spacing"],
+                    use_radius_graph=denoiser_config.get("use_radius_graph", True),
+                    device=self.device
+                ).to(self.device)
+            else:
+                # 使用MLP denoiser (不推荐用于DDPM)
+                print("Warning: Using MLP denoiser with DDPM may not work well. Consider using CNN or GNN instead.")
+                self.net = MLPResCode(
+                    code_dim=config["decoder"]["code_dim"],
+                    n_hidden_units=denoiser_config.get("n_hidden_units", 2048),
+                    num_blocks=denoiser_config.get("num_blocks", 4),
+                    n_groups=denoiser_config.get("n_groups", 32),
+                    dropout=denoiser_config.get("dropout", 0.1),
+                    bias_free=denoiser_config.get("bias_free", False),
+                ).to(self.device)
+            
             # 创建扩散常数并直接放在目标设备上（扩散过程参数仍从ddpm配置读取）
             self.diffusion_consts = create_diffusion_constants(config, device=self.device)
             # 扩散过程参数仍从ddpm配置读取
@@ -74,7 +104,22 @@ class FuncMol(nn.Module):
         else:
             # 使用原有方法
             denoiser_config = config.get("denoiser", {})
-            if denoiser_config.get("use_gnn", False):
+            use_cnn = denoiser_config.get("use_cnn", False)
+            use_gnn = denoiser_config.get("use_gnn", False)
+            
+            if use_cnn:
+                # 使用CNN denoiser（非DDPM模式，不使用时间嵌入）
+                self.net = CNNDenoiser(
+                    code_dim=config["decoder"]["code_dim"],
+                    hidden_channels=denoiser_config.get("hidden_channels", [64, 128, 256]),
+                    num_layers=denoiser_config.get("num_layers", 3),
+                    kernel_size=denoiser_config.get("kernel_size", 3),
+                    dropout=denoiser_config.get("dropout", 0.1),
+                    grid_size=config["dset"]["grid_size"],
+                    time_emb_dim=None,  # 非DDPM模式不使用时间嵌入
+                    num_conv_blocks_per_layer=denoiser_config.get("num_conv_blocks_per_layer", 2)
+                )
+            elif use_gnn:
                 # 使用GNN denoiser（统一使用hidden_dim和num_layers参数）
                 self.net = GNNDenoiser(
                     code_dim=config["decoder"]["code_dim"],

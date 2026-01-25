@@ -252,6 +252,81 @@ class GradientFieldComputer:
                     weighted_gradients = diff_normed * w_softmax.unsqueeze(-1) * w_mag.unsqueeze(-1)  # [n_type_atoms, n_points, 3]
                     vector_field[:, t, :] = 2.0 * torch.sum(weighted_gradients, dim=0)  # [n_points, 3] (multiply by 2 as in 1D case)
         
+        # 对于不存在的原子类型，在原点位置添加"负原子"，使field指向向外方向
+        # 检查哪些原子类型不存在
+        existing_types = atom_type_mask.sum(dim=0) > 0  # [n_atom_types]
+        
+        for t in range(n_atom_types):
+            if not existing_types[t]:
+                # 该原子类型不存在，添加"负原子"在原点
+                # 从原点到查询点的方向向量就是查询点本身
+                origin_to_query = query_points  # [n_points, 3]
+                
+                # 计算查询点到原点的距离
+                dist_to_origin = torch.norm(origin_to_query, dim=-1, keepdim=True)  # [n_points, 1]
+                dist_to_origin = torch.clamp(dist_to_origin, min=1e-8)  # 避免除零
+                
+                # 归一化方向（指向向外）
+                direction = origin_to_query / dist_to_origin  # [n_points, 3]
+                
+                # 根据不同的field计算方法，计算"负原子"的field贡献
+                if self.gradient_field_method == "gaussian":
+                    sigma = sigma_values[t]
+                    # 高斯权重：距离越远，权重越小
+                    gaussian_weight = torch.exp(-dist_to_origin.squeeze(-1)**2 / (2 * sigma**2)) / (sigma**2)
+                    # "负原子"的field指向向外（从原点到查询点的方向）
+                    vector_field[:, t, :] = direction * gaussian_weight.unsqueeze(-1)
+                    
+                elif self.gradient_field_method == "softmax":
+                    # 对于softmax，由于只有一个"原子"，权重就是1
+                    # 使用距离相关的magnitude，距离越近，magnitude越大（与正常原子类似）
+                    # 使用exp(-d/sig_sf)形式的衰减，距离越远，magnitude越小
+                    magnitude = torch.exp(-dist_to_origin.squeeze(-1) / self.sig_sf) * self.gradient_clip_threshold
+                    vector_field[:, t, :] = direction * magnitude.unsqueeze(-1)
+                    
+                elif self.gradient_field_method == "sfnorm":
+                    # 归一化方向，magnitude为1
+                    vector_field[:, t, :] = direction
+                    
+                elif self.gradient_field_method == "logsumexp":
+                    sigma = sigma_values[t]
+                    scale = 0.1
+                    # 计算单个"负原子"的梯度magnitude
+                    gradient_magnitude = torch.exp(-dist_to_origin.squeeze(-1)**2 / (2 * sigma**2)) / (sigma**2)
+                    log_sum_exp = torch.log(gradient_magnitude + self.logsumexp_eps)
+                    vector_field[:, t, :] = scale * direction * log_sum_exp.unsqueeze(-1)
+                    
+                elif self.gradient_field_method == "inverse_square":
+                    # 距离平方反比，距离越远，强度越小
+                    inverse_square_weight = self.inverse_square_strength / (dist_to_origin.squeeze(-1)**2 + 1e-8)
+                    vector_field[:, t, :] = direction * inverse_square_weight.unsqueeze(-1)
+                    
+                elif self.gradient_field_method == "tanh":
+                    # 使用tanh方法计算magnitude，距离越近，magnitude越大
+                    # 使用exp(-d/sig_sf)形式的衰减（softmax部分），然后乘以一个基于距离的magnitude
+                    w_softmax = torch.exp(-dist_to_origin.squeeze(-1) / self.sig_sf)  # 距离越远，权重越小
+                    w_mag = 1.0 / (1.0 + dist_to_origin.squeeze(-1) / self.sig_mag)  # 距离越远，magnitude越小
+                    vector_field[:, t, :] = direction * (w_softmax * w_mag).unsqueeze(-1)
+                    
+                elif self.gradient_field_method == "gaussian_mag":
+                    # 高斯magnitude，距离越近，magnitude越大
+                    # 使用纯高斯形式，不加距离因子
+                    w_mag = torch.exp(-dist_to_origin.squeeze(-1)**2 / (2 * self.sig_mag**2))
+                    vector_field[:, t, :] = direction * w_mag.unsqueeze(-1)
+                    
+                elif self.gradient_field_method == "distance":
+                    # 距离相关的magnitude，距离越近，magnitude越大
+                    # 使用1/(1+d)形式的衰减
+                    w_mag = 1.0 / (1.0 + dist_to_origin.squeeze(-1))
+                    vector_field[:, t, :] = direction * w_mag.unsqueeze(-1)
+                    
+                elif self.gradient_field_method == "gaussian_hole":
+                    # 使用gaussian_hole方法，距离越近，magnitude越大
+                    # 对于"负原子"，使用纯高斯形式（不加距离因子），确保距离越近field越强
+                    dists_clipped = torch.clamp(dist_to_origin.squeeze(-1), max=self.gaussian_hole_clip)
+                    w_mag = torch.exp(-dists_clipped**2 / (2 * self.sig_mag**2))
+                    vector_field[:, t, :] = 2.0 * direction * w_mag.unsqueeze(-1)
+        
         return vector_field
 
     def compute_field_variance(
