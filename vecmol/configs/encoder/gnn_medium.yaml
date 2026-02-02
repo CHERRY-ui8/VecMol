@@ -1,0 +1,8 @@
+_target_: vecmol.models.encoder.CrossGraphEncoder
+n_atom_types: 5 
+code_dim: 256
+hidden_dim: 256
+num_layers: 6
+k_neighbors: 24 # 原子-锚点（atom-anchor）：使用 knn，每个锚点连接最近的 k_neighbors 个原子
+atom_k_neighbors: 8 # 原子-原子（atom-atom）：使用 knn_graph，每个原子连接最近的 atom_k_neighbors 个原子
+cutoff: 8.0

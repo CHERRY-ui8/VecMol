@@ -1,8 +1,8 @@
-# FuncMol: Score-based 3D molecule generation with neural fields
-This repository contains implementation of [FuncMol](https://openreview.net/forum?id=9lGJrkqJUw), a model for unconditional 3D molecule generation using neural fields:
+# VecMol: Score-based 3D molecule generation with neural fields
+This repository contains implementation of [VecMol](https://openreview.net/forum?id=9lGJrkqJUw), a model for unconditional 3D molecule generation using neural fields:
 
 ```
-@inproceedings{kirchmeyer2024funcmol,
+@inproceedings{kirchmeyer2024vecmol,
   title={Score-based 3D molecule generation with neural fields},
   author={Kirchmeyer, Matthieu and Pinheiro, Pedro O and Saremi, Saeed},
   booktitle={NeurIPS},
@@ -10,7 +10,7 @@ This repository contains implementation of [FuncMol](https://openreview.net/foru
 }
 ```
 
-<img src="figures/funcmol.png" alt="Sample Image">
+<img src="figures/vecmol.png" alt="Sample Image">
 
 ## Workflow
 We assume the user have anaconda (or, preferably mamba) installed.
@@ -18,33 +18,33 @@ Multi GPU support is managed with Pytorch Lightning Fabric.
 Configs are managed with Hydra and logging is managed by WandB.
 
 ### 1. Install the environment
-Install the funcmol env and package:
+Install the vecmol env and package:
 ```bash
 mamba env create -f env.yml
-conda activate funcmol  # conda activate funcmol_oss
+conda activate vecmol  # conda activate vecmol_oss
 pip install -e . # 以开发模式安装当前目录下的Python包
 ```
 
 ### 2. Prepare data
 To preprocess the QM9 data, run:
 ```bash
-cd funcmol/dataset; python create_data_qm9.py
+cd vecmol/dataset; python create_data_qm9.py
 ```
 
 And to preprocess the GEOM-drugs data, run:
 ```bash
-cd funcmol/dataset; python create_data_geom_drugs.py
+cd vecmol/dataset; python create_data_geom_drugs.py
 ```
 
 These two scripts will preprocess the QM9 and the GEOM-drugs dataset (it will take dozens of minutes to process the GEOM-drugs dataset). We use the split on the official [MiDi's implementation](https://github.com/cvignac/MiDi).
 
 To preprocess CREMP data, first download `pickle.tar.gz` (and untar it) and `summary.csv` from [this link](https://zenodo.org/records/7931445) and place them in `dataset/data/cremp/`. Then, run the following command to generate the dataset with 50 conformers per molecule:
 ```bash
-cd funcmol/dataset; python create_data_cremp.py
+cd vecmol/dataset; python create_data_cremp.py
 ```
 
 ### 3. Train the neural field (NF)
-FuncMol is a generative model in latent space. We release the code for the setting where the latent space is constructed with an auto-encoder. The decoder is a conditional neural field and the encoder is a 3D CNN. To train the neural field-based auto-encoder on QM9, run the following command:
+VecMol is a generative model in latent space. We release the code for the setting where the latent space is constructed with an auto-encoder. The decoder is a conditional neural field and the encoder is a 3D CNN. To train the neural field-based auto-encoder on QM9, run the following command:
 ```bash
 python train_nf.py --config-name train_nf_qm9
 ```
@@ -57,15 +57,15 @@ python eval_nf.py nf_pretrained_path=$NF_PRETRAINED_PATH
 ```
 where `$NF_PRETRAINED_PATH` is the path where the neural field `model.pt` is saved. This script will save some reconstructed samples (in .sdf file format) on the NF folder.
 
-### 4. FuncMol training and sampling
+### 4. VecMol training and sampling
 
 #### 4.1. Train the denoiser
-To eg train funcmol on GEOM-drugs (assuming the neural field was trained, see above), run:
+To eg train vecmol on GEOM-drugs (assuming the neural field was trained, see above), run:
 ```bash
 python train_fm.py --config-name train_fm_drugs nf_pretrained_path=$NF_PRETRAINED_PATH dset.batch_size=1024
 ```
 
-This script will save the model/configs in  `exps/funcmol/` folder. We train the denoisers with 1 A100 GPU.
+This script will save the model/configs in  `exps/vecmol/` folder. We train the denoisers with 1 A100 GPU.
 
 We also include an option to pre-compute the codes, then train the denoiser on them. In this setting, we first infer the codes for multiple augmented versions of the dataset, save them on disk, then train the denoiser on the pre-computed codes. This approach save computation during training (by using a lot of disk space).
 
@@ -79,14 +79,14 @@ python train_fm.py --config-name train_fm_drugs nf_pretrained_path=$NF_PRETRAINE
 ```
 
 #### 4.2. Sample molecules
-To sample 1000 molecules with the above funcmol model, run:
+To sample 1000 molecules with the above vecmol model, run:
 ```bash
 python sample_fm.py --config-name sample_fm  fm_pretrained_path=$FM_PRETRAINED_PATH wjs.n_chains=200
 ```
-where `$FM_PRETRAINED_PATH` is the path ff the pretrained funcmol model  (section 4.1).
+where `$FM_PRETRAINED_PATH` is the path ff the pretrained vecmol model  (section 4.1).
 To change the number of walk steps (e.g. on CREMP) add `wjs.steps_wjs=10000 wjs.max_steps_wjs=10000`.
 
 ## License
 This code is released under the Genentech Non-Commercial Software License Version 1.0, October 2023. See LICENSE.txt for details.
 
-The Voxel class in funcmol/dataset/field_maker.py is a modified version of https://bitbucket.org/grogdrinker/pyuul/src/master/pyuul/VolumeMaker.py and is covered separately by the LGPLv3 license. See LICENCE_LGPLv3.txt for details.
+The Voxel class in vecmol/dataset/field_maker.py is a modified version of https://bitbucket.org/grogdrinker/pyuul/src/master/pyuul/VolumeMaker.py and is covered separately by the LGPLv3 license. See LICENCE_LGPLv3.txt for details.

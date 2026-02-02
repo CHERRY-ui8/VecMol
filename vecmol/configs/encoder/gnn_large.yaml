@@ -1,0 +1,7 @@
+_target_: vecmol.models.encoder.CrossGraphEncoder
+code_dim: 384
+hidden_dim: 384
+num_layers: 8
+k_neighbors: 24
+atom_k_neighbors: 8
+cutoff: 8.0

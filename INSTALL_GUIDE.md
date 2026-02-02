@@ -1,4 +1,4 @@
-# FuncMol 环境配置指南
+# VecMol 环境配置指南
 
 ## 当前状态
 - ✅ `env.yml` 文件已存在
@@ -46,11 +46,11 @@ conda env create -f env.yml
 ## 步骤 3: 激活环境
 
 ```bash
-# 根据 env.yml，环境名称是 funcmol_oss
-conda activate funcmol_oss
+# 根据 env.yml，环境名称是 vecmol_oss
+conda activate vecmol_oss
 
-# 或者如果环境名称是 funcmol
-conda activate funcmol
+# 或者如果环境名称是 vecmol
+conda activate vecmol
 ```
 
 ## 步骤 4: 安装包
@@ -70,7 +70,7 @@ pip install -e .
 conda env list
 
 # 检查包是否安装
-python -c "import funcmol; print('FuncMol 安装成功！')"
+python -c "import vecmol; print('VecMol 安装成功！')"
 ```
 
 ## 注意事项
@@ -84,6 +84,6 @@ python -c "import funcmol; print('FuncMol 安装成功！')"
    eval "$(/path/to/conda/bin/conda shell.bash hook)"
    ```
 
-2. `env.yml` 中定义的环境名称是 `funcmol_oss`，但 README 中提到可能是 `funcmol`，请根据实际情况使用正确的名称。
+2. `env.yml` 中定义的环境名称是 `vecmol_oss`，但 README 中提到可能是 `vecmol`，请根据实际情况使用正确的名称。
 
 3. 如果遇到权限问题，确保有写入权限。
