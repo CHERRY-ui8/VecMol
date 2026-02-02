@@ -36,6 +36,5 @@ funcmol/configs/train_nf_qm9_segnn.yaml
 funcmol/configs/sample_fm_drugs.yaml
 funcmol/configs/encoder/segnn_encoder.yaml
 funcmol/configs/decoder/segnn_decoder.yaml
-funcmol/models/cnn_denoiser.py
 funcmol/models/decoder_segnn.py
 funcmol/models/encoder_segnn.py

@@ -49,6 +49,7 @@ from funcmol.utils.utils_nf import load_neural_field
 from funcmol.dataset.dataset_field import FieldDataset
 from funcmol.utils.utils_base import xyz_to_sdf
 from funcmol.utils.misc import (
+    PROJECT_ROOT,
     parse_gpu_list_from_config,
     setup_multiprocessing_spawn,
     create_worker_process_with_gpu,
@@ -435,10 +436,17 @@ def main(config: DictConfig) -> None:
     # Load dataset using OmegaConf - much more elegant!
     # 从dset配置中读取atom_distance_threshold，如果没有则使用默认值0.5
     atom_distance_threshold = config_dict.get("dset", {}).get("atom_distance_threshold", 0.5)
+    
+    # 将 data_dir 转换为绝对路径（因为 Hydra 会改变工作目录）
+    data_dir = config.dset.data_dir
+    if not os.path.isabs(data_dir):
+        # 如果是相对路径，基于项目根目录转换为绝对路径
+        data_dir = str(PROJECT_ROOT / data_dir)
+    
     dataset = FieldDataset(
         gnf_converter=default_converter,
         dset_name=config.dset.dset_name,
-        data_dir=config.dset.data_dir,
+        data_dir=data_dir,
         elements=config.dset.elements,
         split=config.get('split', 'val'),  # train/val/test split
         n_points=config.dset.n_points,
@@ -585,7 +593,7 @@ def main(config: DictConfig) -> None:
                     all_tasks.append((
                         sample_idx, logical_gpu_id, physical_gpu_id, method_config, field_mode, field_method,
                         str(output_dir), str(csv_path), str(mol_save_dir), 
-                        config.dset.data_dir, config.dset.dset_name, config.dset.elements,
+                        data_dir, config.dset.dset_name, config.dset.elements,  # 使用转换后的绝对路径
                         nf_pretrained_path, nf_pretrained_path, config_dict
                     ))
         

@@ -1,9 +1,9 @@
 use_gnn: True
 
 # 模型架构参数（用于 GNNDenoiser）
-hidden_dim: 512  # GNN隐藏层维度，可选值：128, 256, 384, 512
+hidden_dim: 1024  # GNN隐藏层维度，可选值：128, 256, 384, 512
 num_layers: 10    # GNN层数，可选值：4, 6, 8, 10
-time_emb_dim: 256 # 时间嵌入维度（仅用于new/new_x0方法），可选值：64, 128, 192, 256
+time_emb_dim: 512 # 时间嵌入维度（仅用于new/new_x0方法），可选值：64, 128, 192, 256
 dropout: 0.15     # Dropout率，可选值：0.1, 0.15
 
 # hidden_dim: 384  # GNN隐藏层维度，可选值：128, 256, 384, 512

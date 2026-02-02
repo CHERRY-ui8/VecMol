@@ -209,7 +209,7 @@ def create_visualizations(gaussian_data, tanh_data, gaussian_rmsd, tanh_rmsd):
     plt.subplots_adjust(top=0.85, hspace=0.3)
     
     # 保存高质量图片
-    plt.savefig('/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/funcmol/field_methods_comparison.png', 
+    plt.savefig('/data/huayuchen/Neurl-voxel/funcmol/field_methods_comparison.png', 
                 dpi=300, bbox_inches='tight', facecolor=colors['background'])
     plt.show()
 
@@ -271,7 +271,7 @@ def comprehensive_evaluation(gaussian_data, tanh_data, gaussian_rmsd, tanh_rmsd,
 
 def main():
     """主函数"""
-    file_path = '/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/gt_field/field_evaluation_results.csv'
+    file_path = '/data/huayuchen/Neurl-voxel/exps/gt_field/field_evaluation_results.csv'
     
     print("开始分析field_evaluation_results.csv数据...")
     print("分析标准: RMSD越小越好，atom_count_mismatch为False的越多越好（重建成功）")

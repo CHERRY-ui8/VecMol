@@ -80,7 +80,7 @@ method_configs:
 
 default_config: # softmax, logsumexp, inverse_square
   n_query_points: 600
-  step_size: 0.02
+  step_size: 0.1
   sig_sf: 0.1
   sig_mag: 0.45
   eps: 0.1 # 0.05

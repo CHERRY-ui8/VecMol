@@ -136,52 +136,57 @@ def gpu_worker_process(
     
     # Worker主循环：持续从Queue取任务并处理
     processed_count = 0
-    while True:
-        try:
-            # 从队列取任务（timeout避免无限阻塞）
+    try:
+        while True:
             try:
-                task = task_queue.get(timeout=1.0)
-            except queue.Empty:
-                # 检查是否还有任务（通过特殊标记）
-                continue
+                # 从队列取任务（timeout避免无限阻塞）
+                try:
+                    task = task_queue.get(timeout=1.0)
+                except queue.Empty:
+                    # 检查是否还有任务（通过特殊标记）
+                    continue
+                
+                # 检查终止信号
+                if task is None:
+                    print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id}] Received termination signal, exiting...")
+                    break
+                
+                # 处理任务（GPU计算部分）
+                try:
+                    result = process_gpu_batch(
+                        task,
+                        funcmol,
+                        decoder,
+                        code_stats,
+                        config_dict,
+                        worker_id=logical_gpu_id
+                    )
+                    result_queue.put(result)
+                    processed_count += 1
+                except Exception as e:
+                    print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id}] Error processing task {task.get('task_id', 'unknown')}: {e}")
+                    traceback.print_exc()
+                    # 发送错误结果，确保每个任务都有结果返回
+                    result_queue.put({
+                        'success': False,
+                        'task_id': task.get('task_id', -1),
+                        'field_method': task.get('field_method', 'unknown'),
+                        'diffusion_method': task.get('diffusion_method', 'unknown'),
+                        'error': str(e),
+                        'gpu_id': logical_gpu_id
+                    })
+                    processed_count += 1
             
-            # 检查终止信号
-            if task is None:
-                print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id}] Received termination signal, exiting...")
+            except KeyboardInterrupt:
+                print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id}] Interrupted, exiting...")
                 break
-            
-            # 处理任务（GPU计算部分）
-            try:
-                result = process_gpu_batch(
-                    task,
-                    funcmol,
-                    decoder,
-                    code_stats,
-                    config_dict,
-                    worker_id=logical_gpu_id
-                )
-                result_queue.put(result)
-                processed_count += 1
             except Exception as e:
-                print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id}] Error processing task {task.get('task_id', 'unknown')}: {e}")
+                print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id}] Unexpected error in worker loop: {e}")
                 traceback.print_exc()
-                # 发送错误结果
-                result_queue.put({
-                    'success': False,
-                    'task_id': task.get('task_id', -1),
-                    'field_method': task.get('field_method', 'unknown'),
-                    'error': str(e),
-                    'gpu_id': logical_gpu_id
-                })
-        
-        except KeyboardInterrupt:
-            print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id}] Interrupted, exiting...")
-            break
-        except Exception as e:
-            print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id}] Unexpected error: {e}")
-            traceback.print_exc()
-    
-    print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id}] Processed {processed_count} tasks, shutting down...")
+                # 继续运行，不退出worker进程
+                continue
+    finally:
+        print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id}] Processed {processed_count} tasks, shutting down...")
 
 
 def process_gpu_batch(
@@ -231,17 +236,11 @@ def process_gpu_batch(
         converter = create_gnf_converter(method_config)
         
         # 2. 生成codes（单个分子，batch_size=1）
-        if diffusion_method == "new" or diffusion_method == "new_x0":
-            # DDPM采样
-            shape = (1, grid_size**3, code_dim)
-            with torch.no_grad():
-                denoised_codes_3d = funcmol.sample_ddpm(shape, code_stats=code_stats, progress=False)
-            denoised_codes = denoised_codes_3d.view(1, grid_size**3, code_dim)
-        else:
-            # 原有方法：随机噪声 + denoiser
-            noise_codes = torch.randn(1, grid_size**3, code_dim, device=next(funcmol.parameters()).device)
-            with torch.no_grad():
-                denoised_codes = funcmol(noise_codes)
+        # DDPM 采样
+        shape = (1, grid_size**3, code_dim)
+        with torch.no_grad():
+            denoised_codes_3d = funcmol.sample_ddpm(shape, code_stats=code_stats, progress=False)
+        denoised_codes = denoised_codes_3d.view(1, grid_size**3, code_dim)
         
         # 3. 重建分子（GPU计算）
         recon_coords, recon_types = converter.gnf2mol(
@@ -250,6 +249,13 @@ def process_gpu_batch(
             enable_timing=False,
             sample_id=task_id
         )
+        
+        # 检查是否有有效原子（-1是填充值）
+        recon_types_device = recon_types[0]
+        valid_mask = recon_types_device != -1
+        if not valid_mask.any():
+            # 如果没有有效原子，这是一个失败的重建
+            raise ValueError(f"Reconstruction failed: no valid atoms found for task {task_id} with method {field_method}")
         
         # 4. 将结果移到CPU（准备传输到主进程）
         denoised_codes_cpu = denoised_codes[0].cpu()
@@ -560,7 +566,7 @@ def main(config: DictConfig) -> None:
     mol_save_dir.mkdir(parents=True, exist_ok=True)
     
     # 检查使用的扩散方法
-    diffusion_method = config.get('diffusion_method', 'old')
+    diffusion_method = config.get('diffusion_method', 'ddpm_x0')
     print(f"Using diffusion method: {diffusion_method}")
     
     # 获取网格和编码维度
@@ -635,6 +641,9 @@ def main(config: DictConfig) -> None:
     csv_has_header = csv_file_exists
     
     # 收集结果（使用tqdm显示进度）
+    consecutive_empty_count = 0
+    max_consecutive_empty = 10  # 允许连续10次空队列，然后检查进程状态
+    
     with tqdm(total=total_tasks, desc="Generating molecules") as pbar:
         while len(results) < total_tasks:
             try:
@@ -649,6 +658,7 @@ def main(config: DictConfig) -> None:
                 )
                 
                 results.append(final_result)
+                consecutive_empty_count = 0  # 重置空队列计数
                 
                 if final_result['success']:
                     successful_tasks += 1
@@ -667,11 +677,22 @@ def main(config: DictConfig) -> None:
                 pbar.update(1)
             
             except queue.Empty:
+                consecutive_empty_count += 1
                 # 检查worker进程是否还在运行
                 alive_count = sum(1 for p in worker_processes if p.is_alive())
                 if alive_count == 0:
-                    print("\nWarning: All workers have exited, but not all results received")
+                    # 所有worker都已退出，检查是否还有未完成的任务
+                    if len(results) < total_tasks:
+                        print(f"\nWarning: All workers have exited, but only {len(results)}/{total_tasks} results received")
+                        print(f"Missing {total_tasks - len(results)} results. This may indicate worker crashes or incomplete processing.")
                     break
+                elif consecutive_empty_count >= max_consecutive_empty:
+                    # 连续多次空队列，检查进程状态
+                    print(f"\nWarning: Queue empty for {consecutive_empty_count} consecutive checks. Checking worker status...")
+                    for i, p in enumerate(worker_processes):
+                        if not p.is_alive():
+                            print(f"  Worker {i} (PID {p.pid}) is not alive (exitcode: {p.exitcode})")
+                    consecutive_empty_count = 0  # 重置计数，继续等待
                 continue
             except Exception as e:
                 print(f"\nError collecting result: {e}")

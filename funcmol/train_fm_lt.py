@@ -1,19 +1,11 @@
-# ========== 共享服务器线程限制配置（中和配置：80%情况最优）==========
-# 在 import torch 之前设置环境变量，限制底层库的线程数
 import os
-os.environ["OMP_NUM_THREADS"] = "2"
-os.environ["MKL_NUM_THREADS"] = "2"
-os.environ["OPENBLAS_NUM_THREADS"] = "2"
-os.environ["NUMEXPR_NUM_THREADS"] = "2"
-# ==========================================
-
 import sys
 sys.path.append("..")
 
 # Set GPU environment
 # os.environ['CUDA_VISIBLE_DEVICES'] = "1"
 # os.environ['CUDA_VISIBLE_DEVICES'] = "4,5,6,7"
-os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3,4,5,6,7"
+os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3,4,5,6"
 
 # Data visualization and processing
 import matplotlib.pyplot as plt
@@ -484,11 +476,11 @@ class FuncmolLightningModule(pl.LightningModule):
         
         # Denoise using the model (predict x0)
         # Note: We need gradients for decoder loss, so don't use torch.no_grad()
-        if self.funcmol.diffusion_method == "new_x0":
+        if self.funcmol.diffusion_method == "ddpm_x0":
             # Model predicts x0 directly
             predicted_x0 = self.funcmol.net(x_t, t)
         else:
-            # For "new" method, we need to use p_sample_x0 to get denoised codes
+            # ddpm_epsilon: predict noise, then get x0 via one-step denoise
             predicted_x0 = p_sample_x0(self.funcmol.net, x_t, t, diffusion_consts, clip_denoised=False)
         
         return predicted_x0
@@ -525,11 +517,11 @@ class FuncmolLightningModule(pl.LightningModule):
         
         # Denoise using the model (predict x0)
         # Note: We need gradients for field loss, so don't use torch.no_grad()
-        if self.funcmol.diffusion_method == "new_x0":
+        if self.funcmol.diffusion_method == "ddpm_x0":
             # Model predicts x0 directly
             predicted_x0 = self.funcmol.net(x_t, t)
         else:
-            # For "new" method, we need to use p_sample_x0 to get denoised codes
+            # ddpm_epsilon: predict noise, then get x0 via one-step denoise
             predicted_x0 = p_sample_x0(self.funcmol.net, x_t, t, diffusion_consts, clip_denoised=False)
         
         return predicted_x0
@@ -1025,12 +1017,7 @@ class FuncmolLightningModule(pl.LightningModule):
         # if batch_idx == 0:  # 只在第一个batch打印
         #     print(f"[DEBUG] Using diffusion_method: {self.funcmol.diffusion_method}")
         
-        if self.funcmol.diffusion_method == "new" or self.funcmol.diffusion_method == "new_x0":
-            # DDPM训练
-            return self._training_step_ddpm(batch, batch_idx)
-        else:
-            # 原有训练方法
-            return self._training_step_original(batch, batch_idx)
+        return self._training_step_ddpm(batch, batch_idx)
 
     def _training_step_ddpm(self, batch, batch_idx):
         """DDPM训练步骤"""
@@ -1117,74 +1104,9 @@ class FuncmolLightningModule(pl.LightningModule):
         
         return total_loss
 
-    def _training_step_original(self, batch, batch_idx):
-        """原有训练方法"""
-        # Get codes, smooth_codes, and position_weights (if precomputed)
-        codes, smooth_codes, position_weights_precomputed = self._process_batch(batch)
-        
-        # Forward pass through Funcmol
-        pred_codes = self.funcmol(smooth_codes)
-        
-        # Calculate loss with position weights if enabled
-        if self.use_position_weight:
-            position_weights = self._compute_position_weights(
-                batch, codes, batch_idx=batch_idx, is_training=True,
-                precomputed_weights=position_weights_precomputed
-            )
-            if position_weights is not None:
-                # Apply position weights to MSE loss
-                squared_diff = (pred_codes - codes) ** 2  # [B, n_grid, code_dim]
-                squared_diff_per_pos = squared_diff.mean(dim=-1)  # [B, n_grid]
-                weighted_loss_per_pos = position_weights * squared_diff_per_pos  # [B, n_grid]
-                denoiser_loss = weighted_loss_per_pos.mean()
-            else:
-                # Fallback to regular loss if weights cannot be computed
-                denoiser_loss = self.criterion(pred_codes, codes)
-        else:
-            # Calculate loss without position weights
-            denoiser_loss = self.criterion(pred_codes, codes)
-        
-        # Compute decoder loss if joint fine-tuning is enabled
-        if self.joint_finetune_enabled:
-            decoder_loss = self._compute_decoder_loss(codes, batch, batch_idx, is_training=True)
-            if decoder_loss is not None:
-                # Both denoiser and decoder are trained, combine losses
-                total_loss = denoiser_loss + self.decoder_loss_weight * decoder_loss
-                # Log decoder loss separately
-                self.log('train_decoder_loss', decoder_loss, batch_size=len(batch),
-                         on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
-            else:
-                # If decoder loss computation failed, use only denoiser loss
-                print("[WARNING] Decoder loss computation failed, using only denoiser loss")
-                total_loss = denoiser_loss
-        else:
-            # Standard training: only denoiser loss
-            total_loss = denoiser_loss
-        
-        # Update EMA model
-        self.funcmol_ema.update(self.funcmol)
-        
-        # Log metrics
-        # on_step=True: log every N steps (controlled by Trainer's log_every_n_steps=200)
-        # on_epoch=True: also log at the end of each epoch (for epoch-level statistics)
-        self.log('train_loss', total_loss, batch_size=len(batch),
-                 on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log('train_denoiser_loss', denoiser_loss, batch_size=len(batch),
-                 on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
-        
-        # Store loss for plotting
-        self.train_losses.append(total_loss.item())
-        
-        return total_loss
-    
     def validation_step(self, batch, batch_idx):
         """Validation step logic"""
-        if self.funcmol.diffusion_method == "new" or self.funcmol.diffusion_method == "new_x0":
-            # DDPM验证
-            return self._validation_step_ddpm(batch, batch_idx)
-        else:
-            # 原有验证方法
-            return self._validation_step_original(batch, batch_idx)
+        return self._validation_step_ddpm(batch, batch_idx)
 
     def _validation_step_ddpm(self, batch, batch_idx):
         """DDPM验证步骤"""
@@ -1241,61 +1163,6 @@ class FuncmolLightningModule(pl.LightningModule):
         
         return total_loss
 
-    def _validation_step_original(self, batch, batch_idx):
-        """原有验证方法"""
-        # Get codes, smooth_codes, and position_weights (if precomputed)
-        codes, smooth_codes, position_weights_precomputed = self._process_batch(batch)
-        
-        # Forward pass through EMA model
-        pred_codes = self.funcmol_ema(smooth_codes)
-        
-        # Calculate loss with position weights if enabled
-        if self.use_position_weight:
-            position_weights = self._compute_position_weights(
-                batch, codes, batch_idx=batch_idx, is_training=False,
-                precomputed_weights=position_weights_precomputed
-            )
-            if position_weights is not None:
-                # Apply position weights to MSE loss
-                squared_diff = (pred_codes - codes) ** 2  # [B, n_grid, code_dim]
-                squared_diff_per_pos = squared_diff.mean(dim=-1)  # [B, n_grid]
-                weighted_loss_per_pos = position_weights * squared_diff_per_pos  # [B, n_grid]
-                denoiser_loss = weighted_loss_per_pos.mean()
-            else:
-                # Fallback to regular loss if weights cannot be computed
-                denoiser_loss = self.criterion(pred_codes, codes)
-        else:
-            # Calculate loss without position weights
-            denoiser_loss = self.criterion(pred_codes, codes)
-        
-        # Compute decoder loss if joint fine-tuning is enabled
-        if self.joint_finetune_enabled:
-            # Get single-timestep codes for decoder training (randomly sampled from [0, num_timesteps_for_decoder))
-            single_timestep_codes = self._get_multi_timestep_codes(codes)  # [B, n_grid, code_dim]
-            
-            # Compute decoder loss using single-timestep codes
-            decoder_loss = self._compute_decoder_loss(single_timestep_codes, batch, batch_idx, is_training=False)
-            if decoder_loss is not None:
-                # Both denoiser and decoder are trained, combine losses
-                total_loss = denoiser_loss + self.decoder_loss_weight * decoder_loss
-                # Log decoder loss separately
-                self.log('val_decoder_loss', decoder_loss, batch_size=len(batch),
-                         on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
-            else:
-                # If decoder loss computation failed, use only denoiser loss
-                total_loss = denoiser_loss
-        else:
-            # Standard validation: only denoiser loss
-            total_loss = denoiser_loss
-        
-        # Log metrics
-        self.log('val_loss', total_loss, batch_size=len(batch),
-                 on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log('val_denoiser_loss', denoiser_loss, batch_size=len(batch),
-                 on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
-        
-        return total_loss
-    
     # ############# function for debug ##############
     # def on_before_optimizer_step(self, optimizer):
     #     """Print gradient norm before clipping"""
@@ -1471,8 +1338,8 @@ class FuncmolLightningModule(pl.LightningModule):
         if "best_loss" in checkpoint:
             self.best_loss = checkpoint["best_loss"]
 
-# @hydra.main(config_path="configs", config_name="train_fm_drugs", version_base=None)
-@hydra.main(config_path="configs", config_name="train_fm_qm9", version_base=None)
+@hydra.main(config_path="configs", config_name="train_fm_drugs", version_base=None)
+# @hydra.main(config_path="configs", config_name="train_fm_qm9", version_base=None)
 def main_hydra(config):
     """Entry point for Hydra configuration system"""
     main(config)
@@ -1640,8 +1507,12 @@ def main(config):
             # if isinstance(loader_val, list) and len(loader_val) > 0:
             #     loader_val = loader_val[0]
             
+            # 如果normalize_codes=False，不需要code_stats，直接设为None
+            if not config["normalize_codes"]:
+                print(f">> normalize_codes=False, skipping code_stats computation")
+                code_stats = None
             # 优先使用checkpoint中的code_stats（如果存在）
-            if checkpoint_code_stats is not None:
+            elif checkpoint_code_stats is not None:
                 print(f">> Using code_stats from checkpoint (resuming training)")
                 code_stats = checkpoint_code_stats
             else:
@@ -1676,8 +1547,67 @@ def main(config):
                     except (TypeError, AttributeError):
                         print(f">> Dataset info: batch size: {config_nf.get('dset', {}).get('batch_size', 'unknown')}")
                     print(f">> This may take a while, please wait...")
+                    # 创建简化的dataset，跳过target_field计算以加速
+                    print(f">> Creating simplified dataset for code stats computation (skipping target_field computation)...")
+                    from torch_geometric.data import Data
+                    from torch_geometric.loader import DataLoader
+                    
+                    class SimplifiedFieldDataset:
+                        """简化的dataset，只返回分子数据，跳过target_field计算"""
+                        def __init__(self, original_dataset):
+                            self.original_dataset = original_dataset
+                            
+                        def __len__(self):
+                            return len(self.original_dataset)
+                        
+                        def __getitem__(self, idx):
+                            # 直接从原始dataset获取数据，但跳过target_field计算
+                            if hasattr(self.original_dataset, 'use_lmdb') and self.original_dataset.use_lmdb:
+                                # LMDB模式
+                                if self.original_dataset.db is None:
+                                    self.original_dataset._connect_db()
+                                
+                                idx_actual = self.original_dataset.field_idxs[idx].item()
+                                key = self.original_dataset.keys[idx_actual]
+                                if isinstance(key, str):
+                                    key = key.encode('utf-8')
+                                
+                                with self.original_dataset.db.begin() as txn:
+                                    sample_raw = pickle.loads(txn.get(key))
+                            else:
+                                # 传统模式
+                                idx_actual = self.original_dataset.field_idxs[idx]
+                                sample_raw = self.original_dataset.data[idx_actual]
+                            
+                            # 预处理分子
+                            sample = self.original_dataset._preprocess_molecule(sample_raw)
+                            
+                            # 获取坐标和原子类型
+                            coords = sample["coords"]
+                            atoms_channel = sample["atoms_channel"]
+                            
+                            # 移除padding
+                            valid_mask = atoms_channel != PADDING_INDEX
+                            coords = coords[valid_mask]
+                            atoms_channel = atoms_channel[valid_mask]
+                            
+                            # 只返回encoder需要的数据，不计算target_field
+                            return Data(
+                                pos=coords.float(),
+                                x=atoms_channel.long(),
+                            )
+                    
+                    simplified_dataset = SimplifiedFieldDataset(loader_train.dataset)
+                    stats_loader = DataLoader(
+                        simplified_dataset,
+                        batch_size=min(loader_train.batch_size, 128),  # 使用稍大的batch size加速
+                        num_workers=0,  # 使用单进程避免死锁
+                        shuffle=False,
+                        pin_memory=False,
+                        drop_last=False,
+                    )
                     _, code_stats = compute_codes(
-                        loader_train, enc, config_nf, "train", config["normalize_codes"],
+                        stats_loader, enc, config_nf, "train", config["normalize_codes"],
                         code_stats=None
                     )
                     print(f">> Code stats computation completed!")
@@ -1799,8 +1729,12 @@ def main(config):
             else:
                 print(f">> num_augmentations not specified in config, will auto-infer from codes directory")
             
+            # 如果normalize_codes=False，不需要code_stats，直接设为None
+            if not config["normalize_codes"]:
+                print(f">> normalize_codes=False, skipping code_stats computation")
+                code_stats = None
             # 优先使用checkpoint中的code_stats（如果存在）
-            if checkpoint_code_stats is not None:
+            elif checkpoint_code_stats is not None:
                 print(f">> Using code_stats from checkpoint (resuming training)")
                 code_stats = checkpoint_code_stats
             else:

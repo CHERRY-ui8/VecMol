@@ -1,8 +1,6 @@
 use_gnn: True
 
-# 模型架构参数（用于所有diffusion_method）
-# 当diffusion_method为"new"或"new_x0"时，这些参数用于GNNDenoiser
-# 当diffusion_method为"old"时，这些参数也用于GNNDenoiser（如果use_gnn=True）
+# 模型架构参数（用于 GNNDenoiser）
 hidden_dim: 1024  # GNN隐藏层维度，可选值：128, 256, 384, 512
 num_layers: 10    # GNN层数，可选值：4, 6, 8, 10
 time_emb_dim: 512 # 时间嵌入维度（仅用于new/new_x0方法），可选值：64, 128, 192, 256

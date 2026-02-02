@@ -60,7 +60,7 @@ method_configs:
 
 default_config: # softmax, logsumexp, inverse_square
   n_query_points: 1000  # 增加查询点数量
-  step_size: 0.02     # 适当减小步长
+  step_size: 0.1     # 适当减小步长
   sig_sf: 0.1
   sig_mag: 0.45
   eps: 0.1      # DBSCAN邻域半径参数

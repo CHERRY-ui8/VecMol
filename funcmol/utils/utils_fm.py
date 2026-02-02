@@ -175,9 +175,15 @@ def load_checkpoint_fm(
     # Load Lightning checkpoint
     lightning_checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     # Convert Lightning checkpoint format to expected format
+    # Handle code_stats: if None or empty dict, set to None (for normalize_codes=False case)
+    code_stats = lightning_checkpoint.get("code_stats", None)
+    # If code_stats is an empty dict (from old checkpoints without code_stats), treat as None
+    if code_stats is not None and isinstance(code_stats, dict) and len(code_stats) == 0:
+        code_stats = None
+    
     checkpoint = {
         "funcmol_ema_state_dict": lightning_checkpoint.get("funcmol_ema_state_dict", {}),
-        "code_stats": lightning_checkpoint.get("code_stats", {}),
+        "code_stats": code_stats,
         "epoch": lightning_checkpoint.get("epoch", 0)
     }
     
@@ -226,7 +232,7 @@ def compute_codes(
         config_nf,
         to_cpu=True,
         code_stats=code_stats,
-        n_samples=100_000,
+        n_samples=5_000,
     )
     if code_stats is None:
         code_stats = process_codes(codes, split, normalize_codes)

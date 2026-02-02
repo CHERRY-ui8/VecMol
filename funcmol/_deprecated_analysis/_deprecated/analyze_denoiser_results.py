@@ -383,7 +383,7 @@ def main():
     # 如果没有指定CSV路径，使用默认路径
     if args.csv_path is None:
         # 默认路径
-        csv_path = '/datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20251212/denoiser_evaluation_results.csv'
+        csv_path = '/data/huayuchen/Neurl-voxel/exps/funcmol/fm_qm9/20251212/denoiser_evaluation_results.csv'
     else:
         csv_path = args.csv_path
     

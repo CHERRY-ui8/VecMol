@@ -23,7 +23,7 @@ targeted_sampling_ratio: 0.5  # 默认值：grid点:邻近点 = 2:1
 # 如果未设置，将从joint_finetune配置中读取，最后使用默认值0.5
 atom_distance_threshold: 1.0
 
-num_workers: 4
-batch_size: 24
+num_workers: 8
+batch_size: 16
 lr_enc: 2e-4
 lr_dec: 2e-4 # 非微调模式下是2e-4

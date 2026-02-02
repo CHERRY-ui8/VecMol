@@ -6,7 +6,7 @@ import os
 
 # Set GPU environment BEFORE importing torch (must be before any CUDA initialization)
 # TODO: set gpus based on server id
-os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3,4,5,6,7"
+os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3,4,5,6"
 # os.environ['CUDA_VISIBLE_DEVICES'] = "0,2,3,4,5"
 # os.environ['CUDA_VISIBLE_DEVICES'] = "0"
 
@@ -173,7 +173,7 @@ class NeuralFieldLightningModule(pl.LightningModule):
                 
                 # Ensure required keys exist (use current config as fallback, then defaults)
                 denoiser_config.setdefault("smooth_sigma", config.get("smooth_sigma", 0.0))
-                denoiser_config.setdefault("diffusion_method", config.get("diffusion_method", "new_x0"))
+                denoiser_config.setdefault("diffusion_method", config.get("diffusion_method", "ddpm_x0"))
                 denoiser_config.setdefault("denoiser", config.get("denoiser", {}))
                 denoiser_config.setdefault("ddpm", config.get("ddpm", {"num_timesteps": 1000, "use_time_weight": True}))
                 denoiser_config.setdefault("decoder", config.get("decoder", {}))
@@ -334,11 +334,11 @@ class NeuralFieldLightningModule(pl.LightningModule):
         # Denoise using the model (predict x0)
         # CRITICAL: We want the predicted x_0 directly, not x_{t-1}
         with torch.no_grad():
-            if self.denoiser.diffusion_method == "new_x0":
+            if self.denoiser.diffusion_method == "ddpm_x0":
                 # Model directly predicts x0
                 predicted_x0 = self.denoiser.net(x_t, t)
             else:
-                # For "new" method, model predicts noise (epsilon)
+                # ddpm_epsilon: model predicts noise (epsilon)
                 # We need to convert from noise prediction to x0 prediction
                 # Formula: x_0 = (x_t - √(1 - α̅_t) · ε_θ) / √(α̅_t)
                 predicted_noise = self.denoiser.net(x_t, t)  # [B, n_grid, code_dim]
@@ -751,7 +751,7 @@ class NeuralFieldLightningModule(pl.LightningModule):
         
         # Log metrics
         self.log('train_loss', loss, batch_size=len(batch),
-                 on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+                 on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
         
         # Store batch loss for later visualization
         # batch_loss_item = {"total_loss": loss.item()}
@@ -1026,8 +1026,8 @@ class NeuralFieldLightningModule(pl.LightningModule):
         checkpoint["dec_state_dict"] = dec_state_dict
                     
 
-@hydra.main(config_path="configs", config_name="train_nf_qm9", version_base=None)
-# @hydra.main(config_path="configs", config_name="train_nf_drugs", version_base=None)
+# @hydra.main(config_path="configs", config_name="train_nf_qm9", version_base=None)
+@hydra.main(config_path="configs", config_name="train_nf_drugs", version_base=None)
 def main_hydra(config):
     """Entry point for Hydra configuration system"""
     main(config)

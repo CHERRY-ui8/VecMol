@@ -11,9 +11,9 @@ debug: False
 wandb: False
 seed: 1234
 
-diffusion_method: "new_x0"  # "old" (WJS) 或 "new" (DDPM) 或 "new_x0" (DDPM with x0)
+diffusion_method: "ddpm_x0"  # ddpm_epsilon（预测噪声）或 ddpm_x0（预测 x0）
 
-# DDPM配置（仅当diffusion_method为"new"或"new_x0"时使用）
+# DDPM 配置
 # 注意：模型参数（hidden_dim, num_layers, time_emb_dim, dropout）已移至 denoiser/gnn.yaml
 # 这里只保留扩散过程相关的参数
 ddpm:
@@ -37,7 +37,7 @@ ddpm:
   sT: 0.008
   w: 1.0
   
-  # 损失权重配置（仅当diffusion_method为"new_x0"时使用）
+  # 损失权重配置（仅当 diffusion_method 为 ddpm_x0 时使用）
   use_time_weight: False  # 是否使用时间步权重 1 + num_timesteps/(t+1)
 
 # NOTE: 位置权重配置
@@ -77,15 +77,15 @@ field_loss_finetune:
 
 # nf_pretrained_path: ../exps/neural_field/nf_qm9
 # nf_pretrained_path: ../exps/neural_field/nf_qm9_20250812_181425_750832
-nf_pretrained_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/neural_field/nf_qm9/20260124/lightning_logs/version_0/checkpoints/last.ckpt
+nf_pretrained_path: /data/huayuchen/Neurl-voxel/exps/neural_field/nf_qm9/20260124/lightning_logs/version_0/checkpoints/last.ckpt
 exp_dir: ../exps/funcmol
 exp_name: "fm_${dset.dset_name}/${now:%Y%m%d}"
 dirname: "${exp_dir}/${exp_name}"
 
-reload_model_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20260125/lightning_logs/version_0/checkpoints/last.ckpt
-# reload_model_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20260124/lightning_logs/version_1/checkpoints/last.ckpt
-# reload_model_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20260120/lightning_logs/version_2/checkpoints/last.ckpt
-# reload_model_path: /datapool/data2/home/pxg/data/hyc/funcmol-main-neuralfield/exps/funcmol/fm_qm9/20260105/lightning_logs/version_1/checkpoints
+reload_model_path: /data/huayuchen/Neurl-voxel/exps/funcmol/fm_qm9/20260125/lightning_logs/version_0/checkpoints/last.ckpt
+# reload_model_path: /data/huayuchen/Neurl-voxel/exps/funcmol/fm_qm9/20260124/lightning_logs/version_1/checkpoints/last.ckpt
+# reload_model_path: /data/huayuchen/Neurl-voxel/exps/funcmol/fm_qm9/20260120/lightning_logs/version_2/checkpoints/last.ckpt
+# reload_model_path: /data/huayuchen/Neurl-voxel/exps/funcmol/fm_qm9/20260105/lightning_logs/version_1/checkpoints
   # Funcmol (denoiser) checkpoint 路径，支持两种格式：
   # 1. Lightning checkpoint 文件路径（.ckpt 文件），例如：/path/to/model-epoch=100.ckpt
   # 2. 目录路径，会自动查找 last.ckpt 或最新的 .ckpt 文件，例如：/path/to/checkpoint_dir

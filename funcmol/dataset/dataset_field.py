@@ -603,6 +603,67 @@ def _random_rot_matrix() -> torch.Tensor:
 
 
 ################################################################################
+# Batch field computation helper
+def batch_compute_fields(gnf_converter, batch_data_list):
+    """
+    批量计算多个样本的 target_field，提升性能
+    
+    Args:
+        gnf_converter: GNFConverter 实例
+        batch_data_list: 包含多个样本数据的列表，每个元素是 (coords, atoms_channel, query_points) 的元组
+    
+    Returns:
+        list: 每个样本的 target_field 列表
+    """
+    if len(batch_data_list) == 0:
+        return []
+    
+    # 收集所有样本的数据
+    coords_list = []
+    atoms_list = []
+    query_points_list = []
+    
+    for coords, atoms_channel, query_points in batch_data_list:
+        coords_list.append(coords)
+        atoms_list.append(atoms_channel)
+        query_points_list.append(query_points)
+    
+    # 批量计算：将所有样本堆叠成 batch
+    # 注意：由于每个样本的原子数可能不同，我们需要填充到相同长度
+    max_n_atoms = max(c.shape[0] for c in coords_list)
+    max_n_points = max(q.shape[0] for q in query_points_list)
+    
+    batch_size = len(batch_data_list)
+    device = query_points_list[0].device
+    n_atom_types = gnf_converter.n_atom_types
+    
+    # 填充 coords 和 atoms_channel
+    padded_coords = torch.zeros(batch_size, max_n_atoms, 3, device=device)
+    padded_atoms = torch.full((batch_size, max_n_atoms), PADDING_INDEX, device=device, dtype=torch.long)
+    padded_query_points = torch.zeros(batch_size, max_n_points, 3, device=device)
+    
+    for i, (coords, atoms, q_points) in enumerate(zip(coords_list, atoms_list, query_points_list)):
+        n_atoms = coords.shape[0]
+        n_points = q_points.shape[0]
+        padded_coords[i, :n_atoms] = coords
+        padded_atoms[i, :n_atoms] = atoms
+        padded_query_points[i, :n_points] = q_points
+    
+    # 批量计算 field
+    with torch.no_grad():
+        batch_fields = gnf_converter.mol2gnf(padded_coords, padded_atoms, padded_query_points)
+        # batch_fields: [batch_size, max_n_points, n_atom_types, 3]
+    
+    # 提取每个样本的实际 field（去除填充部分）
+    result_fields = []
+    for i, (_, _, q_points) in enumerate(zip(coords_list, atoms_list, query_points_list)):
+        n_points = q_points.shape[0]
+        result_fields.append(batch_fields[i, :n_points])
+    
+    return result_fields
+
+
+################################################################################
 # create loaders
 def create_field_loaders(
     config: dict,

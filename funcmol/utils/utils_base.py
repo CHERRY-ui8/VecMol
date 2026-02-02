@@ -376,9 +376,21 @@ def get_bond_order_value(bond_type):
         return 1
 
 def calculate_atom_valency(mol, atom_idx):
-    """计算原子的当前价态（键级之和）"""
-    valency = 0
+    """计算原子的当前价态（优先使用 RDKit 的总价，失败时按键级之和）"""
     atom = mol.GetAtomWithIdx(atom_idx)
+    
+    # 优先使用 RDKit 内部计算的价态
+    try:
+        valency = float(atom.GetTotalValence())
+        # 对于某些未sanitize或信息不完整的分子，RDKit 可能返回 0 或负值，
+        # 这种情况下回退到根据键级求和的旧实现。
+        if valency > 0:
+            return valency
+    except Exception:
+        pass
+    
+    # 回退：根据当前键级求和（与旧逻辑保持兼容）
+    valency = 0.0
     for bond in atom.GetBonds():
         bond_order = get_bond_order_value(bond.GetBondType())
         valency += bond_order
@@ -470,32 +482,69 @@ def _calculate_hydrogen_positions_3d(atom_pos, existing_bond_vectors, num_h, ato
         h_positions.append(h_pos.tolist())
         
     elif total_bonds == 3:
-        # 三角锥：键角约120度
+        # 三键情况（例如 sp2 / 三角平面 或 三角锥）
         if existing_bond_vectors:
-            # 已有键的方向
-            existing_dir = existing_bond_vectors[0]
-            # 计算垂直于已有键的方向
-            if abs(existing_dir[2]) < 0.9:
-                perp1 = np.cross(existing_dir, np.array([0, 0, 1]))
-            else:
-                perp1 = np.cross(existing_dir, np.array([1, 0, 0]))
-            perp1 = perp1 / np.linalg.norm(perp1)
-            perp2 = np.cross(existing_dir, perp1)
-            perp2 = perp2 / np.linalg.norm(perp2)
-            
-            # 在垂直于已有键的平面内均匀分布H
-            for i in range(num_h):
-                angle = 2 * np.pi * i / num_h
-                h_direction = np.cos(angle) * perp1 + np.sin(angle) * perp2
-                # 调整角度，使其与已有键形成约120度角
-                h_direction = 0.5 * (-existing_dir) + 0.866 * h_direction  # cos(120°) ≈ -0.5, sin(120°) ≈ 0.866
-                h_direction = h_direction / np.linalg.norm(h_direction)
+            n_existing = len(existing_bond_vectors)
+            # 情形 A: 已有 2 个键，只缺 1 个 H（最常见：=CH-，sp2）
+            # 目标：让新的 H 方向大致指向两个已有键的“对面”，
+            # 即与 v1、v2 都约 120 度：h_dir ≈ -normalize(v1 + v2)
+            if n_existing >= 2 and num_h == 1:
+                v_sum = np.sum(existing_bond_vectors, axis=0)
+                v_norm = np.linalg.norm(v_sum)
+                if v_norm > 1e-2:
+                    h_direction = -v_sum / v_norm
+                else:
+                    # 如果两个键几乎对消（数值退化），退回到任意一个键的反方向
+                    h_direction = -existing_bond_vectors[0]
                 h_pos = atom_center + bond_length * h_direction
                 h_positions.append(h_pos.tolist())
+            # 情形 B: 已有 1 个键，需要补 2 个 H
+            # 目标：与已有键一起构成三角平面（或近似），三条键之间两两约 120 度。
+            elif n_existing == 1 and num_h == 2:
+                existing_dir = existing_bond_vectors[0]
+                # 计算一个与已有键垂直的方向 u
+                if abs(existing_dir[2]) < 0.9:
+                    u = np.cross(existing_dir, np.array([0, 0, 1]))
+                else:
+                    u = np.cross(existing_dir, np.array([1, 0, 0]))
+                u = u / np.linalg.norm(u)
+                # 利用 v2 = -0.5*v1 + (√3/2)*u, v3 = -0.5*v1 - (√3/2)*u
+                # 保证 v1,v2,v3 两两夹角约 120°
+                h_dir1 = -0.5 * existing_dir + (np.sqrt(3) / 2.0) * u
+                h_dir2 = -0.5 * existing_dir - (np.sqrt(3) / 2.0) * u
+                h_dir1 = h_dir1 / np.linalg.norm(h_dir1)
+                h_dir2 = h_dir2 / np.linalg.norm(h_dir2)
+                for h_direction in (h_dir1, h_dir2):
+                    h_pos = atom_center + bond_length * h_direction
+                    h_positions.append(h_pos.tolist())
+            else:
+                # 其他较少见的组合，退回到原有逻辑：
+                # 以已有键方向的平均向量作为“主方向”，在其垂直平面内均匀分布 H，
+                # 并调节到与已有键约 120 度。
+                avg_vec = np.sum(existing_bond_vectors, axis=0)
+                if np.linalg.norm(avg_vec) < 1e-2:
+                    existing_dir = existing_bond_vectors[0]
+                else:
+                    existing_dir = avg_vec / np.linalg.norm(avg_vec)
+                # 计算垂直于已有键平均方向的两个基向量
+                if abs(existing_dir[2]) < 0.9:
+                    perp1 = np.cross(existing_dir, np.array([0, 0, 1]))
+                else:
+                    perp1 = np.cross(existing_dir, np.array([1, 0, 0]))
+                perp1 = perp1 / np.linalg.norm(perp1)
+                perp2 = np.cross(existing_dir, perp1)
+                perp2 = perp2 / np.linalg.norm(perp2)
+                # 在垂直平面内均匀分布 H，并使其与已有键形成约 120 度
+                for i in range(num_h):
+                    angle = 2 * np.pi * i / num_h
+                    h_direction = np.cos(angle) * perp1 + np.sin(angle) * perp2
+                    h_direction = 0.5 * (-existing_dir) + 0.866 * h_direction  # cos(120°) ≈ -0.5, sin(120°) ≈ 0.866
+                    h_direction = h_direction / np.linalg.norm(h_direction)
+                    h_pos = atom_center + bond_length * h_direction
+                    h_positions.append(h_pos.tolist())
         else:
-            # 需要添加3个H，形成三角锥
-            # 使用标准三角锥几何（键角约109.5度）
-            # 创建一个垂直于某个方向的平面
+            # 没有已有键，需要添加3个H：使用标准三角锥几何（键角约109.5度）
+            # 创建一个垂直于 main_direction 的平面
             base_normal = np.array([0, 0, 1])
             if np.abs(np.dot(main_direction, base_normal)) > 0.9:
                 base_normal = np.array([1, 0, 0])
