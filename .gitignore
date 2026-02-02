@@ -16,6 +16,9 @@ debug.log
 *.pyc
 
 graphs/*
+figures/*
+zzz_rubbish_analyze/*
 zzz_trash/*
-temp.py
 outputs/*
+REPORT/*
+paper/*
