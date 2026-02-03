@@ -40,3 +40,5 @@ vecmol/models/decoder_segnn.py
 vecmol/models/encoder_segnn.py
 vecmol/models/segnn
 
+*.ipynb
+vecmol/notebooks/*

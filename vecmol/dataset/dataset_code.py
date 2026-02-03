@@ -7,7 +7,7 @@ import torch
 import lmdb
 from torch.utils.data import Dataset, Subset
 
-# 进程本地存储，用于在多进程环境下管理LMDB连接
+# Process-local storage for LMDB connections in multi-process environment
 _thread_local = threading.local()
 
 
@@ -31,66 +31,61 @@ class CodeDataset(Dataset):
         dset_name: str = "qm9",
         split: str = "train",
         codes_dir: str = None,
-        num_augmentations = None,  # 数据增强数量，用于查找对应的LMDB文件
-        use_sharded_lmdb: bool = None,  # 是否使用分片LMDB。None表示自动检测，True强制使用分片，False强制使用完整LMDB
-        load_position_weights: bool = True,  # 是否加载position_weights文件
+        num_augmentations = None,  # Number of augmentations; used to find corresponding LMDB
+        use_sharded_lmdb: bool = None,  # Use sharded LMDB: None=auto, True=force sharded, False=force full LMDB
+        load_position_weights: bool = True,  # Whether to load position_weights
     ):
         self.dset_name = dset_name
         self.split = split
         self.codes_dir = os.path.join(codes_dir, self.split)
         self.num_augmentations = num_augmentations
-        self.load_position_weights = load_position_weights  # 保存配置
-        
-        # 检查是否存在position_weights文件
+        self.load_position_weights = load_position_weights  # Store config
+
+        # Check for position_weights file
         self.position_weights = None
         self.use_position_weights = False
 
-        # 检查是否存在LMDB数据库
-        # 只有 train split 使用数据增强格式（codes_aug{num}.lmdb）
-        # val/test split 始终使用默认格式（codes.lmdb），不需要数据增强
+        # Check for LMDB database
+        # Only train split uses augmentation format (codes_aug{num}.lmdb); val/test use default (codes.lmdb)
         if num_augmentations is not None and self.split == "train":
             lmdb_path = os.path.join(self.codes_dir, f"codes_aug{num_augmentations}.lmdb")
             keys_path = os.path.join(self.codes_dir, f"codes_aug{num_augmentations}_keys.pt")
         else:
-            # val/test split 或未指定 num_augmentations 时，使用默认格式
+            # val/test or no num_augmentations: use default format
             lmdb_path = os.path.join(self.codes_dir, "codes.lmdb")
             keys_path = os.path.join(self.codes_dir, "codes_keys.pt")
         
-        # 根据配置决定是否使用分片LMDB
-        # use_sharded_lmdb: None=自动检测, True=强制使用分片, False=强制使用完整LMDB
+        # Whether to use sharded LMDB: None=auto, True=force sharded, False=force full LMDB
         lmdb_loaded = False
-        
+
         if use_sharded_lmdb is False:
-            # 强制使用完整LMDB，跳过分片检测
+            # Force full LMDB, skip shard detection
             if os.path.exists(lmdb_path) and os.path.exists(keys_path):
                 self._use_lmdb_database(lmdb_path, keys_path)
                 lmdb_loaded = True
         else:
-            # 检查是否存在分片LMDB（更高效）
-            # 检查两个可能的位置：
-            # 1. 直接在codes_dir下：codes_dir/shard_info.pt
-            # 2. 在sharded子目录下：codes_dir/sharded/shard_info.pt
+            # Check for sharded LMDB (more efficient)
+            # Two possible locations: codes_dir/shard_info.pt or codes_dir/sharded/shard_info.pt
             shard_info_path = os.path.join(self.codes_dir, "shard_info.pt")
             shard_info_path_sharded = os.path.join(self.codes_dir, "sharded", "shard_info.pt")
             
             shard_found = False
             if os.path.exists(shard_info_path):
-                # 使用分片LMDB（直接在codes_dir下）
+                # Use sharded LMDB (directly under codes_dir)
                 self._use_sharded_lmdb_database(self.codes_dir, num_augmentations)
                 shard_found = True
                 lmdb_loaded = True
             elif os.path.exists(shard_info_path_sharded):
-                # 使用分片LMDB（在sharded子目录下）
+                # Use sharded LMDB (in sharded subdir)
                 sharded_dir = os.path.join(self.codes_dir, "sharded")
                 self._use_sharded_lmdb_database(sharded_dir, num_augmentations)
                 shard_found = True
                 lmdb_loaded = True
             
-            # 如果没有找到分片LMDB，尝试使用完整LMDB
+            # If no sharded LMDB found, try full LMDB
             if not shard_found:
                 if use_sharded_lmdb is True:
-                    # 强制使用分片但未找到
-                    # 对于val/test split，允许回退到完整LMDB（因为数据量通常较小，不需要分片）
+                    # Forced sharded but not found; for val/test allow fallback to full LMDB
                     if self.split in ["val", "test"]:
                         if os.path.exists(lmdb_path) and os.path.exists(keys_path):
                             print(f"Warning: use_sharded_lmdb=True but no sharded LMDB found for {self.split} split. "
@@ -106,7 +101,7 @@ class CodeDataset(Dataset):
                                 f"  - {self.codes_dir}/sharded/shard_info.pt"
                             )
                     else:
-                        # train split必须使用分片，如果找不到则报错
+                        # train split must use sharded; error if not found
                         raise FileNotFoundError(
                             f"use_sharded_lmdb=True but no sharded LMDB found in {self.codes_dir}.\n"
                             f"Expected shard_info.pt in either:\n"
@@ -114,27 +109,25 @@ class CodeDataset(Dataset):
                             f"  - {self.codes_dir}/sharded/shard_info.pt"
                         )
                 elif os.path.exists(lmdb_path) and os.path.exists(keys_path):
-                    # 使用单个LMDB数据库
+                    # Use single LMDB database
                     self._use_lmdb_database(lmdb_path, keys_path)
                     lmdb_loaded = True
         
-        # 如果LMDB都没有加载成功，继续后续的文件检测逻辑
+        # If LMDB not loaded, continue with file-based detection
         if not lmdb_loaded:
-            # 检查是否有多个 codes 文件
-            # 查找 codes_aug{num}_XXX.pt 格式的文件
-            # 排除 keys 文件（codes_keys.pt, codes_aug*_keys.pt 等）
+            # Check for multiple codes files (codes_aug{num}_XXX.pt); exclude _keys.pt
             list_codes = [
                 f for f in os.listdir(self.codes_dir)
                 if os.path.isfile(os.path.join(self.codes_dir, f)) and \
                 f.startswith("codes") and f.endswith(".pt") and \
-                not f.endswith("_keys.pt")  # 排除 keys 文件
+                not f.endswith("_keys.pt")
             ]
-            
-            # 如果提供了num_augmentations 且是 train split，查找对应格式的文件
+
+            # If num_augmentations and train split, look for matching format
             if num_augmentations is not None and self.split == "train":
                 numbered_codes = [f for f in list_codes if f.startswith(f"codes_aug{num_augmentations}_") and f.endswith(".pt")]
             else:
-                # 向后兼容：查找所有格式的codes文件
+                # Backward compat: find all codes file formats
                 numbered_codes_aug = [f for f in list_codes if f.startswith("codes_aug") and f.endswith(".pt")]
                 numbered_codes_old = [f for f in list_codes if f.startswith("codes_") and f.endswith(".pt") and not f.startswith("codes_aug")]
                 single_code_old = ["codes.pt"] if "codes.pt" in list_codes else []
@@ -148,15 +141,13 @@ class CodeDataset(Dataset):
                 else:
                     numbered_codes = []
             
-            # 如果有多个文件，要求使用 LMDB 格式
+            # Multiple files require LMDB format
             if numbered_codes and len(numbered_codes) > 1:
-                # 多个文件，要求转换为 LMDB
-                # 尝试从文件名推断数据增强数量
+                # Try to infer num_augmentations from filename
                 inferred_num_aug = None
                 if numbered_codes[0].startswith("codes_aug"):
-                    # 从文件名中提取数据增强数量：codes_aug{num}_{idx}.pt
                     try:
-                        prefix = numbered_codes[0].split("_")[1]  # 获取 "aug{num}" 部分
+                        prefix = numbered_codes[0].split("_")[1]  # "aug{num}" part
                         inferred_num_aug = int(prefix.replace("aug", ""))
                     except:
                         pass
@@ -176,14 +167,14 @@ class CodeDataset(Dataset):
                         f"Or ensure codes_aug{{num}}.lmdb and codes_aug{{num}}_keys.pt exist in: {self.codes_dir}"
                     )
             elif numbered_codes and len(numbered_codes) == 1:
-                # 单个 codes 文件，向后兼容
+                # Single codes file (backward compat)
                 self.list_codes = numbered_codes
                 self.num_augmentations = 0
                 self.use_lmdb = False
                 self.load_codes()
                 self._load_position_weights_files()
             else:
-                # 没有找到 codes 文件
+                # No codes files found
                 raise FileNotFoundError(
                     f"No codes files found in {self.codes_dir}.\n"
                     f"Expected either:\n"
@@ -193,7 +184,7 @@ class CodeDataset(Dataset):
                 )
 
     def _use_sharded_lmdb_database(self, codes_dir, num_augmentations):
-        """使用分片LMDB数据库加载数据（更高效，减少多进程竞争）"""
+        """Load data from sharded LMDB (more efficient, less multi-process contention)."""
         shard_info_path = os.path.join(codes_dir, "shard_info.pt")
         shard_info = torch.load(shard_info_path, weights_only=False)
         
@@ -202,7 +193,7 @@ class CodeDataset(Dataset):
         self.samples_per_shard = shard_info['samples_per_shard']
         self.shard_keys = shard_info['shard_keys']
         
-        # 构建分片路径和keys
+        # Build shard paths and keys
         self.shard_lmdb_paths = []
         self.shard_keys_list = []
         
@@ -220,22 +211,21 @@ class CodeDataset(Dataset):
             else:
                 raise FileNotFoundError(f"Shard {shard_id} not found: {shard_lmdb_path}")
         
-        # 构建全局keys（用于兼容性）
+        # Build global keys (for compatibility)
         self.keys = []
         for shard_keys in self.shard_keys_list:
             self.keys.extend(shard_keys)
         
-        # 初始化分片数据库连接（延迟加载）
+        # Initialize shard DB connections (lazy)
         self.shard_dbs = [None] * self.num_shards
         self.use_lmdb = True
         self.use_sharded = True
         
-        # 设置兼容的lmdb_path属性（用于缓存路径等）
-        # 使用第一个分片的路径作为代表，或者使用codes_dir
+        # Set compatible lmdb_path (for cache path etc.); use first shard or codes_dir
         if self.shard_lmdb_paths:
-            self.lmdb_path = self.shard_lmdb_paths[0]  # 用于兼容性，指向第一个分片
+            self.lmdb_path = self.shard_lmdb_paths[0]  # Compatibility: first shard
         else:
-            self.lmdb_path = codes_dir  # 回退到目录路径
+            self.lmdb_path = codes_dir  # Fallback to directory
         
         print(f"  | Using SHARDED LMDB database: {self.num_shards} shards")
         print(f"  | Total samples: {self.total_samples}")
@@ -245,27 +235,25 @@ class CodeDataset(Dataset):
             print(f"  |   Shard {i}: {len(self.shard_keys_list[i])} samples, {shard_size:.1f} GB")
     
     def _use_lmdb_database(self, lmdb_path, keys_path):
-        """使用LMDB数据库加载数据"""
+        """Load data from LMDB database."""
         self.lmdb_path = lmdb_path
-        self.keys = torch.load(keys_path, weights_only=False)  # 直接加载keys文件
+        self.keys = torch.load(keys_path, weights_only=False)  # Load keys file
         self.db = None
         self.use_lmdb = True
-        self.use_sharded = False  # 标记不是分片模式
+        self.use_sharded = False  # Not sharded mode
         
         print(f"  | Using LMDB database: {lmdb_path}")
         print(f"  | Database contains {len(self.keys)} codes")
         
-        # 如果配置中禁用了position_weights，跳过加载
+        # Skip loading if position_weights disabled in config
         if not self.load_position_weights:
             print(f"  | Position weights loading disabled, skipping")
             return
         
-        # 检查是否存在position_weights文件（LMDB格式）
-        # 只有 train split 使用数据增强格式（position_weights_aug{num}.lmdb）
-        # val/test split 使用默认格式（position_weights.lmdb 或 position_weights_v2.lmdb）
+        # Check for position_weights (LMDB): train uses position_weights_aug{num}.lmdb; val/test use default
         dirname = os.path.dirname(lmdb_path)
-        
-        # 如果提供了num_augmentations 且是 train split，使用新格式：position_weights_aug{num}.lmdb
+
+        # If num_augmentations and train split, use position_weights_aug{num}.lmdb
         if self.num_augmentations is not None and self.split == "train":
             weights_lmdb_path = os.path.join(dirname, f"position_weights_aug{self.num_augmentations}.lmdb")
             weights_keys_path = os.path.join(dirname, f"position_weights_aug{self.num_augmentations}_keys.pt")
@@ -279,17 +267,17 @@ class CodeDataset(Dataset):
                 print(f"  | Found position_weights_aug{self.num_augmentations} LMDB database: {weights_lmdb_path}")
                 print(f"  | Position weights database contains {len(self.position_weights_keys)} entries")
             else:
-                # 如果找不到对应版本，检查是否存在position_weights文件（文件格式）
+                # If no matching version, try file format
                 print(f"  | Position weights LMDB not found for aug{self.num_augmentations}, trying file format...")
                 self._load_position_weights_files()
         else:
-            # 向后兼容：尝试旧格式（position_weights_v2.lmdb 和 position_weights.lmdb）
+            # Backward compat: try old format (position_weights_v2.lmdb, position_weights.lmdb)
             weights_lmdb_path_v2 = os.path.join(dirname, "position_weights_v2.lmdb")
             weights_keys_path_v2 = os.path.join(dirname, "position_weights_v2_keys.pt")
             weights_lmdb_path_old = os.path.join(dirname, "position_weights.lmdb")
             weights_keys_path_old = os.path.join(dirname, "position_weights_keys.pt")
             
-            # 优先检查新格式
+            # Prefer new format first
             if os.path.exists(weights_lmdb_path_v2) and os.path.exists(weights_keys_path_v2):
                 self.position_weights_lmdb_path = weights_lmdb_path_v2
                 self.position_weights_keys_path = weights_keys_path_v2
@@ -299,7 +287,7 @@ class CodeDataset(Dataset):
                 print(f"  | Found position_weights_v2 LMDB database: {weights_lmdb_path_v2}")
                 print(f"  | Position weights database contains {len(self.position_weights_keys)} entries")
             elif os.path.exists(weights_lmdb_path_old) and os.path.exists(weights_keys_path_old):
-                # 回退到旧格式
+                # Fallback to old format
                 self.position_weights_lmdb_path = weights_lmdb_path_old
                 self.position_weights_keys_path = weights_keys_path_old
                 self.position_weights_keys = torch.load(weights_keys_path_old, weights_only=False)
@@ -308,41 +296,33 @@ class CodeDataset(Dataset):
                 print(f"  | Found position_weights LMDB database: {weights_lmdb_path_old}")
                 print(f"  | Position weights database contains {len(self.position_weights_keys)} entries")
             else:
-                # 检查是否存在position_weights文件（文件格式）
+                # Check for position_weights file format
                 self._load_position_weights_files()
-    
+
     def _connect_db(self):
-        """建立只读数据库连接 - 进程安全版本"""
+        """Create read-only DB connection (process-safe)."""
         if self.db is None:
-            # 使用线程本地存储确保每个worker进程有独立的连接
+            # Use thread-local storage so each worker has its own connection
             if not hasattr(_thread_local, 'lmdb_connections'):
                 _thread_local.lmdb_connections = {}
             
-            # 为每个LMDB路径创建独立的连接
+            # Create one connection per LMDB path
             if self.lmdb_path not in _thread_local.lmdb_connections:
-                # 动态计算map_size：至少是文件大小的1.2倍，最大10TB
-                # 对于大型LMDB文件（如drugs数据集574GB），需要足够大的map_size
-                # 注意：map_size必须>=文件大小，否则LMDB无法正确映射，会导致性能严重下降
+                # map_size: at least 1.2x file size, max 10TB; must be >= file size for correct mapping
                 try:
                     file_size = os.path.getsize(self.lmdb_path) if os.path.isfile(self.lmdb_path) else 0
-                    # 如果是目录，尝试获取目录大小（LMDB subdir=True时）
                     if os.path.isdir(self.lmdb_path):
-                        # 估算：检查data.mdb文件大小
                         data_file = os.path.join(self.lmdb_path, "data.mdb")
                         if os.path.exists(data_file):
                             file_size = os.path.getsize(data_file)
                     
-                    # map_size至少是文件大小的1.2倍，最大10TB
-                    # 注意：map_size必须>=文件大小，否则LMDB无法正确映射
                     if file_size > 0:
-                        map_size = int(file_size * 1.2)  # 文件大小的1.2倍
-                        map_size = min(map_size, 10 * 1024**4)  # 最大10TB
+                        map_size = int(file_size * 1.2)
+                        map_size = min(map_size, 10 * 1024**4)  # Max 10TB
                     else:
-                        # 如果无法获取文件大小，使用较大的默认值（针对大型数据集）
-                        map_size = 1024 * (1024**3)  # 1TB，足够大多数情况
+                        map_size = 1024 * (1024**3)  # 1TB default for large datasets
                 except Exception:
-                    # 如果出错，使用较大的默认值
-                    map_size = 1024 * (1024**3)  # 1TB
+                    map_size = 1024 * (1024**3)  # 1TB default on error
                 
                 _thread_local.lmdb_connections[self.lmdb_path] = lmdb.open(
                     self.lmdb_path,
@@ -351,9 +331,9 @@ class CodeDataset(Dataset):
                     subdir=True,
                     readonly=True,
                     lock=False,
-                    readahead=True,  # 启用readahead以提高读取性能
+                    readahead=True,  # Improve read performance
                     meminit=False,
-                    max_readers=256,  # 增加最大读取器数量，支持更多并发worker
+                    max_readers=256,  # More concurrent workers
                 )
             
             self.db = _thread_local.lmdb_connections[self.lmdb_path]
@@ -361,7 +341,7 @@ class CodeDataset(Dataset):
     def __len__(self):
         if hasattr(self, 'use_lmdb') and self.use_lmdb:
             return len(self.keys)
-        # 处理 curr_codes 可能是 list 或数组的情况
+        # curr_codes may be list or array
         if hasattr(self.curr_codes, 'shape'):
             return self.curr_codes.shape[0]
         else:
@@ -376,10 +356,10 @@ class CodeDataset(Dataset):
         else:
             code = self.curr_codes[index]
         
-        # 确保 code 是 tensor，如果不是则转换或报错
+        # Ensure code is tensor; convert or raise
         if not isinstance(code, torch.Tensor):
             if isinstance(code, str):
-                # 如果 code 是字符串，可能是 key 被错误返回了，或者是数据损坏
+                # String may mean wrong key returned or corrupted data
                 raise TypeError(
                     f"Expected tensor but got string at index {index}. "
                     f"This might indicate:\n"
@@ -389,10 +369,9 @@ class CodeDataset(Dataset):
                     f"Code value (first 200 chars): {code[:200] if len(code) > 200 else code}\n"
                     f"Code type: {type(code)}"
                 )
-            # 尝试转换为 tensor（适用于 numpy array 等情况）
+            # Try converting to tensor (e.g. numpy array)
             try:
                 if hasattr(code, '__array__'):
-                    # 如果是 numpy array 或其他可转换为 tensor 的类型
                     code = torch.from_numpy(code.__array__()) if hasattr(code, '__array__') else torch.tensor(code)
                 else:
                     code = torch.tensor(code)
@@ -404,7 +383,7 @@ class CodeDataset(Dataset):
                     f"  Original error: {e}"
                 ) from e
         
-        # 如果存在position_weights，一起返回
+        # Return with position_weights if present
         if self.use_position_weights:
             if hasattr(self, 'use_lmdb') and self.use_lmdb:
                 position_weight = self._get_position_weight_lmdb(index)
@@ -416,31 +395,27 @@ class CodeDataset(Dataset):
             if position_weight is not None:
                 return code, position_weight
             else:
-                # 如果position_weight为None，只返回code（向后兼容）
+                # If position_weight is None, return code only (backward compat)
                 return code
         else:
             return code
     
     def _getitem_sharded_lmdb(self, index):
-        """从分片LMDB中获取数据"""
-        # 确定数据在哪个分片
+        """Get item from sharded LMDB."""
         shard_id = index // self.samples_per_shard
         shard_index = index % self.samples_per_shard
-        
-        # 确保分片ID有效
+
         if shard_id >= self.num_shards:
             raise IndexError(f"Index {index} out of range for {self.total_samples} samples")
         
-        # 获取该分片的数据库连接
         if self.shard_dbs[shard_id] is None:
             self._connect_shard_db(shard_id)
-        
-        # 获取该分片的key
+
         key = self.shard_keys_list[shard_id][shard_index]
         if isinstance(key, str):
             key = key.encode('utf-8')
-        
-        # 从分片数据库读取
+
+        # Read from shard DB
         try:
             with self.shard_dbs[shard_id].begin(buffers=True) as txn:
                 value = txn.get(key)
@@ -459,28 +434,26 @@ class CodeDataset(Dataset):
         return code_raw
     
     def _connect_shard_db(self, shard_id, force_reconnect=False):
-        """建立分片数据库连接"""
+        """Create shard database connection."""
         if self.shard_dbs[shard_id] is not None and not force_reconnect:
             return
-        
+
         shard_lmdb_path = self.shard_lmdb_paths[shard_id]
-        
-        # 使用线程本地存储
+
         if not hasattr(_thread_local, 'lmdb_connections'):
             _thread_local.lmdb_connections = {}
         
         if shard_lmdb_path not in _thread_local.lmdb_connections or force_reconnect:
-            # 计算map_size
             try:
                 data_file = os.path.join(shard_lmdb_path, "data.mdb")
                 if os.path.exists(data_file):
                     file_size = os.path.getsize(data_file)
                     map_size = int(file_size * 1.2)
-                    map_size = min(map_size, 10 * 1024**4)  # 最大10TB
+                    map_size = min(map_size, 10 * 1024**4)  # Max 10TB
                 else:
-                    map_size = 100 * (1024**3)  # 默认100GB
+                    map_size = 100 * (1024**3)  # Default 100GB
             except Exception:
-                map_size = 100 * (1024**3)  # 默认100GB
+                map_size = 100 * (1024**3)  # Default 100GB
             
             _thread_local.lmdb_connections[shard_lmdb_path] = lmdb.open(
                 shard_lmdb_path,
@@ -497,27 +470,22 @@ class CodeDataset(Dataset):
         self.shard_dbs[shard_id] = _thread_local.lmdb_connections[shard_lmdb_path]
     
     def _getitem_lmdb(self, index):
-        """LMDB模式下的数据获取 - 进程安全版本（优化版）"""
-        # 确保数据库连接在worker进程中建立
+        """Get item from LMDB (process-safe, optimized)."""
         if self.db is None:
             self._connect_db()
-        
+
         key = self.keys[index]
-        # 确保key是bytes格式，因为LMDB需要bytes
         if isinstance(key, str):
             key = key.encode('utf-8')
-        
-        # 优化：使用buffers=True避免额外的内存拷贝
-        # 使用更安全的事务处理
+
         try:
             with self.db.begin(buffers=True) as txn:
                 value = txn.get(key)
                 if value is None:
                     raise KeyError(f"Key not found: {key}")
-                # 直接反序列化，避免额外的内存拷贝
                 code_raw = pickle.loads(value)
         except Exception as e:
-            # 如果事务失败，重新连接数据库
+            # On transaction failure, reconnect
             print(f"LMDB transaction failed, reconnecting: {e}")
             self._close_db()
             self._connect_db()
@@ -530,15 +498,12 @@ class CodeDataset(Dataset):
         return code_raw
     
     def _close_db(self):
-        """关闭数据库连接"""
+        """Close DB handle (shared connection left open for other workers)."""
         if self.db is not None:
             self.db = None
-            # 注意：不关闭共享连接，让其他worker继续使用
 
     def _load_position_weights_files(self):
-        """加载position_weights文件（文件格式，非LMDB）"""
-        # 查找position_weights文件（支持多个augmentation版本）
-        # 排除 _keys.pt 文件（这些是索引文件，不是权重文件）
+        """Load position_weights from files (not LMDB). Exclude _keys.pt (index files)."""
         list_weights = [
             f for f in os.listdir(self.codes_dir)
             if os.path.isfile(os.path.join(self.codes_dir, f)) and \
@@ -547,32 +512,27 @@ class CodeDataset(Dataset):
         ]
         
         if list_weights:
-            # 如果有多个position_weights文件（对应多个augmentation版本），需要合并
-            # NOTE：现在使用新格式：position_weights_v2_000.pt, position_weights_v2_001.pt, ...
-            # 如果没有新格式，则使用旧格式：position_weights_000.pt, position_weights_001.pt, ...
+            # New format: position_weights_v2_*.pt; fallback: position_weights_*.pt
             numbered_weights_v2 = [f for f in list_weights if f.startswith("position_weights_v2_") and f.endswith(".pt")]
             numbered_weights_old = [f for f in list_weights if f.startswith("position_weights_") and f.endswith(".pt") and not f.startswith("position_weights_v2_")]
-            
-            # 优先使用新格式（v2），如果没有则使用旧格式
+
             numbered_weights = numbered_weights_v2 if numbered_weights_v2 else numbered_weights_old
-            
+
             if numbered_weights:
-                numbered_weights.sort()  # 按编号排序
+                numbered_weights.sort()
                 print(f"  | Found {len(numbered_weights)} position_weights files (augmentation versions)")
-                
-                # 合并所有augmentation版本的position_weights
+
                 all_weights = []
                 for weights_file in numbered_weights:
                     weights_path = os.path.join(self.codes_dir, weights_file)
                     weights = torch.load(weights_path, weights_only=False)
-                    # 确保加载的是tensor，而不是list或其他类型
+                    # Ensure loaded value is tensor
                     if not isinstance(weights, torch.Tensor):
                         print(f"  | WARNING: {weights_file} is not a tensor (type: {type(weights)}), skipping")
                         continue
                     all_weights.append(weights)
                     print(f"  |   - {weights_file}: shape {weights.shape}")
                 
-                # 合并所有augmentation版本
                 if len(all_weights) > 0:
                     self.position_weights = torch.cat(all_weights, dim=0)
                     self.use_position_weights = True
@@ -581,35 +541,30 @@ class CodeDataset(Dataset):
                     print(f"  | WARNING: No valid position_weights files found, skipping position weights")
                     self.use_position_weights = False
                 
-                # 验证长度是否匹配
-                if hasattr(self, 'curr_codes'):
-                    if len(self.position_weights) != len(self.curr_codes):
-                        print(f"  | WARNING: Position weights length ({len(self.position_weights)}) != codes length ({len(self.curr_codes)})")
-                        self.use_position_weights = False
+                if hasattr(self, 'curr_codes') and len(self.position_weights) != len(self.curr_codes):
+                    print(f"  | WARNING: Position weights length ({len(self.position_weights)}) != codes length ({len(self.curr_codes)})")
+                    self.use_position_weights = False
             elif len(list_weights) == 1:
-                # 单个position_weights文件（向后兼容）
+                # Single position_weights file (backward compat)
                 weights_path = os.path.join(self.codes_dir, list_weights[0])
                 print(f"  | Loading position_weights from: {weights_path}")
                 self.position_weights = torch.load(weights_path, weights_only=False)
                 self.use_position_weights = True
                 print(f"  | Position weights shape: {self.position_weights.shape}")
                 
-                # 验证长度是否匹配
-                if hasattr(self, 'curr_codes'):
-                    if len(self.position_weights) != len(self.curr_codes):
-                        print(f"  | WARNING: Position weights length ({len(self.position_weights)}) != codes length ({len(self.curr_codes)})")
-                        self.use_position_weights = False
+                if hasattr(self, 'curr_codes') and len(self.position_weights) != len(self.curr_codes):
+                    print(f"  | WARNING: Position weights length ({len(self.position_weights)}) != codes length ({len(self.curr_codes)})")
+                    self.use_position_weights = False
             else:
                 print(f"  | WARNING: Found {len(list_weights)} position_weights files, expected 1 or numbered files. Disabling position_weights.")
         else:
             print(f"  | No position_weights files found in {self.codes_dir}")
     
     def _get_position_weight_lmdb(self, index):
-        """从LMDB获取position_weight"""
+        """Get position_weight from LMDB."""
         if not self.use_position_weights:
             return None
-        
-        # 确保数据库连接在worker进程中建立
+
         if not hasattr(self, 'position_weights_db') or self.position_weights_db is None:
             self._connect_position_weights_db()
         
@@ -630,15 +585,14 @@ class CodeDataset(Dataset):
         return weight
     
     def _connect_position_weights_db(self):
-        """建立position_weights LMDB数据库连接"""
+        """Create position_weights LMDB connection (same map_size logic as codes LMDB)."""
         if not hasattr(self, 'position_weights_lmdb_path'):
             return
-        
+
         if not hasattr(_thread_local, 'lmdb_connections'):
             _thread_local.lmdb_connections = {}
-        
+
         if self.position_weights_lmdb_path not in _thread_local.lmdb_connections:
-            # 动态计算map_size（与codes LMDB相同逻辑）
             import os
             try:
                 file_size = os.path.getsize(self.position_weights_lmdb_path) if os.path.isfile(self.position_weights_lmdb_path) else 0
@@ -646,14 +600,14 @@ class CodeDataset(Dataset):
                     data_file = os.path.join(self.position_weights_lmdb_path, "data.mdb")
                     if os.path.exists(data_file):
                         file_size = os.path.getsize(data_file)
-                
+
                 if file_size > 0:
-                    map_size = int(file_size * 1.2)  # 文件大小的1.2倍
-                    map_size = min(map_size, 10 * 1024**4)  # 最大10TB
+                    map_size = int(file_size * 1.2)
+                    map_size = min(map_size, 10 * 1024**4)
                 else:
-                    map_size = 1024 * (1024**3)  # 1TB默认值
+                    map_size = 1024 * (1024**3)
             except Exception:
-                map_size = 1024 * (1024**3)  # 1TB默认值
+                map_size = 1024 * (1024**3)
             
             _thread_local.lmdb_connections[self.position_weights_lmdb_path] = lmdb.open(
                 self.position_weights_lmdb_path,
@@ -689,7 +643,7 @@ class CodeDataset(Dataset):
         code_path = os.path.join(self.codes_dir, self.list_codes[0])
         print(">> loading codes: ", code_path)
         
-        # 检查文件名，防止误加载 keys 文件
+        # Avoid loading keys file by mistake
         filename = os.path.basename(code_path)
         if filename.endswith("_keys.pt") or "keys" in filename.lower():
             raise ValueError(
@@ -703,15 +657,13 @@ class CodeDataset(Dataset):
         
         loaded_data = torch.load(code_path, weights_only=False)
         
-        # 检查加载的数据格式
+        # Check loaded data format
         if isinstance(loaded_data, torch.Tensor):
-            # 正常情况：tensor 格式
             self.curr_codes = loaded_data
             print(f"  | Loaded codes as tensor: shape {self.curr_codes.shape}")
         elif isinstance(loaded_data, list):
-            # 可能是旧版本格式：list of tensors
             if len(loaded_data) > 0 and isinstance(loaded_data[0], torch.Tensor):
-                # 尝试将 list of tensors 转换为单个 tensor
+                # Convert list of tensors to single tensor
                 try:
                     self.curr_codes = torch.stack(loaded_data) if len(loaded_data) > 0 else torch.tensor([])
                     print(f"  | Converted list of {len(loaded_data)} tensors to single tensor: shape {self.curr_codes.shape}")
@@ -723,14 +675,13 @@ class CodeDataset(Dataset):
                         f"Please check the codes file format or regenerate codes files."
                     ) from e
             else:
-                # 检查是否是 keys 文件被错误加载
                 first_elem_type = type(loaded_data[0]) if len(loaded_data) > 0 else 'empty list'
                 is_keys_file = (isinstance(loaded_data, list) and 
                                len(loaded_data) > 0 and 
                                isinstance(loaded_data[0], str) and
-                               all(isinstance(x, str) for x in loaded_data[:10]))  # 检查前10个元素
-                
-                # 构建详细的错误信息
+                               all(isinstance(x, str) for x in loaded_data[:10]))
+
+                # Build detailed error message
                 error_msg = f"\n{'='*80}\n"
                 error_msg += f"ERROR: Loaded file contains list of strings, not tensors!\n"
                 error_msg += f"{'='*80}\n"
@@ -799,28 +750,24 @@ def create_code_loaders(
     Returns:
         DataLoader: A PyTorch DataLoader object for the specified dataset split.
     """
-    # 获取数据增强数量
-    # 只有 train split 使用数据增强，val/test split 不使用数据增强
-    # 因此 val/test split 的 num_augmentations 始终为 None，使用默认的 codes.lmdb 格式
+    # num_augmentations: only train uses augmentation; val/test use default codes.lmdb
+    dset_cfg = config.get("dset", {})
+    _dget = lambda c, k, default=None: c.get(k, default) if hasattr(c, "get") else getattr(c, k, default)
     if split == "train":
-        # train split：优先使用配置中明确指定的 num_augmentations
-        num_augmentations = config.get("num_augmentations", None)
-        
-        # 如果未提供num_augmentations，尝试从codes目录的文件名推断
-        if num_augmentations is None and config.get("codes_dir") is not None:
-            split_dir = os.path.join(config["codes_dir"], split)
+        num_augmentations = _dget(dset_cfg, "num_augmentations", None) or config.get("num_augmentations", None)
+
+        if num_augmentations is None and (config.get("codes_dir") or _dget(dset_cfg, "codes_dir_no_aug")) is not None:
+            codes_dir = config.get("codes_dir") or _dget(dset_cfg, "codes_dir_no_aug")
+            split_dir = os.path.join(codes_dir, split)
             if os.path.exists(split_dir):
-                # 首先尝试查找 LMDB 文件：codes_aug{num}.lmdb
                 list_lmdb = [
                     f for f in os.listdir(split_dir)
                     if os.path.isfile(os.path.join(split_dir, f)) and \
                     f.startswith("codes_aug") and f.endswith(".lmdb")
                 ]
                 if list_lmdb:
-                    # 从LMDB文件名中提取数据增强数量：codes_aug{num}.lmdb
                     try:
                         first_lmdb = sorted(list_lmdb)[0]
-                        # 提取 "aug{num}" 部分
                         parts = first_lmdb.replace(".lmdb", "").split("_")
                         if len(parts) >= 2 and parts[1].startswith("aug"):
                             num_augmentations = int(parts[1].replace("aug", ""))
@@ -828,7 +775,6 @@ def create_code_loaders(
                     except Exception:
                         pass
                 
-                # 如果还没找到，尝试查找 codes_aug{num}_*.pt 格式的文件
                 if num_augmentations is None:
                     list_codes = [
                         f for f in os.listdir(split_dir)
@@ -836,10 +782,8 @@ def create_code_loaders(
                         f.startswith("codes_aug") and f.endswith(".pt")
                     ]
                     if list_codes:
-                        # 从第一个文件名中提取数据增强数量：codes_aug{num}_{idx}.pt
                         try:
                             first_file = sorted(list_codes)[0]
-                            # 提取 "aug{num}" 部分
                             parts = first_file.split("_")
                             if len(parts) >= 2 and parts[1].startswith("aug"):
                                 num_augmentations = int(parts[1].replace("aug", ""))
@@ -847,26 +791,21 @@ def create_code_loaders(
                         except Exception:
                             pass
     else:
-        # val/test split：不使用数据增强，num_augmentations 为 None
         num_augmentations = None
         print(f">> {split} split: using default codes.lmdb format (no augmentation)")
     
-    # 从配置中读取是否使用分片LMDB（可选参数）
-    # 对于 train split：使用配置中的值（如果配置了 True，就使用 True）
-    # 对于 val/test split：强制不使用分片LMDB（设置为 None 或 False），使用完整的 LMDB
-    use_sharded_lmdb_config = config.get("use_sharded_lmdb", None)
+    # use_sharded_lmdb: train uses config value; val/test force full LMDB (None)
+    use_sharded_lmdb_config = _dget(dset_cfg, "use_sharded_lmdb", None) or config.get("use_sharded_lmdb", None)
     if split == "train":
         use_sharded_lmdb = use_sharded_lmdb_config
     else:
-        # val/test split 不使用分片LMDB，设置为 None 以自动回退到完整LMDB
         use_sharded_lmdb = None
         if use_sharded_lmdb_config is True:
             print(f">> {split} split: use_sharded_lmdb is set to None (auto-detect, will fallback to full LMDB)")
     
-    # 检查是否应该加载 position_weights
-    position_weight_config = config.get("position_weight", {})
+    # Single source: dset.position_weight; top-level config.position_weight overrides
+    position_weight_config = config.get("position_weight") or (config.get("dset") or {}).get("position_weight", {})
     position_weight_enabled = position_weight_config.get("enabled", False)
-    # 根据配置决定是否加载 position_weights
     load_position_weights = position_weight_enabled
     
     dset = CodeDataset(
@@ -878,9 +817,9 @@ def create_code_loaders(
         load_position_weights=load_position_weights,
     )
 
-    # 如果在配置中显式关闭了 use_augmented_codes 或 position_weight.enabled=False，则不使用预计算的 position_weights
-    # 这样可以避免在没有对应 LMDB / 文件时仍然尝试访问 position_weights_keys 等属性
-    if not config.get("use_augmented_codes", False) or not position_weight_enabled:
+    # If use_augmented_codes or position_weight.enabled=False, do not use precomputed position_weights
+    use_augmented_codes = _dget(dset_cfg, "use_augmented_codes", False) or config.get("use_augmented_codes", False)
+    if not use_augmented_codes or not position_weight_enabled:
         if isinstance(dset, CodeDataset):
             dset.use_position_weights = False
             if not position_weight_enabled:
@@ -894,19 +833,16 @@ def create_code_loaders(
         if len(dset) > len(indexes):
             dset = Subset(dset, indexes)  # Smaller training set for debugging
 
-    # DataLoader配置：优化性能设置
-    # num_workers从config文件读取，不在此处限制
+    # DataLoader: num_workers from config
     loader_kwargs = {
         "batch_size": min(config["dset"]["batch_size"], len(dset)),
         "num_workers": config["dset"]["num_workers"],
         "shuffle": True if split == "train" else False,
-        "pin_memory": True,  # 加速GPU数据传输
+        "pin_memory": True,
         "drop_last": True,
-        "persistent_workers": True if config["dset"]["num_workers"] > 0 else False,  # 保持worker进程，减少启动开销
-        # 移除prefetch_factor限制，使用PyTorch默认值（通常为2），让系统自动优化
+        "persistent_workers": True if config["dset"]["num_workers"] > 0 else False,
     }
-    
-    # 如果配置中显式指定了prefetch_factor，则使用配置值（允许用户覆盖）
+
     if "prefetch_factor" in config["dset"]:
         loader_kwargs["prefetch_factor"] = config["dset"]["prefetch_factor"]
     

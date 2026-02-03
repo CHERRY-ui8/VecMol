@@ -4,7 +4,7 @@ from torch_geometric.nn import MessagePassing, knn_graph, knn, radius
 from vecmol.models.encoder import create_grid_coords
 import math
 
-# 添加torch.compile兼容性处理
+# torch.compile compatibility
 try:
     from torch._dynamo import disable
 except ImportError:
@@ -14,35 +14,29 @@ except ImportError:
 class EGNNLayer(MessagePassing):
     def __init__(self, in_channels, hidden_channels, out_channels, radius=2.0, out_x_dim=1, cutoff=None, k_neighbors=32):
         """
-            EGNN等变层实现：
-            - 只用h_i, h_j, ||x_i-x_j||作为边特征输入
-            - 用message的标量加权方向向量更新坐标
-            - 不用EGNN论文里的a_ij（在这个模型里无化学键信息）
-            - 添加cutoff参数进行距离过滤
-            - 使用radius而不是k_neighbors来构建图
+            EGNN equivariant layer: edge input h_i, h_j, ||x_i-x_j||; scalar-weighted direction for coord update; cutoff for distance filter; radius/k_neighbors for graph.
         """
         super().__init__(aggr='mean')
         self.in_channels = in_channels
         self.hidden_channels = hidden_channels
         self.out_channels = out_channels
-        # self.radius = radius  # 注释掉radius参数
-        self.radius = radius  # 保留但不使用
+        self.radius = radius
         self.out_x_dim = out_x_dim
         self.cutoff = cutoff
-        self.k_neighbors = k_neighbors  # 添加k_neighbors参数
+        self.k_neighbors = k_neighbors
 
-        # 用于message计算的MLP，输入[h_i, h_j, ||x_i-x_j||]，输出hidden_channels
+        # Edge MLP: [h_i, h_j, ||x_i-x_j||] -> hidden_channels
         self.edge_mlp = nn.Sequential(
             nn.Linear(2 * in_channels + 1, hidden_channels),  # 2*512+1=1025 -> 512
             nn.SiLU(),
             nn.Linear(hidden_channels, hidden_channels),
             nn.SiLU(),
         )
-        # 用于坐标更新的MLP，输入hidden_channels，输出1（标量）
+        # Coord MLP: hidden_channels -> scalar
         self.coord_mlp = nn.Sequential(
             nn.Linear(hidden_channels, out_x_dim),
         )
-        # 节点特征更新
+        # Node feature update
         self.node_mlp = nn.Sequential(
             nn.Linear(in_channels + hidden_channels, hidden_channels),
             nn.SiLU(),
@@ -51,51 +45,42 @@ class EGNNLayer(MessagePassing):
 
     def forward(self, x, h, edge_index):
         """
-            x: [N, 3] 坐标
-            h: [N, in_channels] 节点特征
-            edge_index: [2, E]
-            返回: h_new, x_new
+            x: [N, 3] coords; h: [N, in_channels] node features; edge_index: [2, E]. Returns h_new, x_new.
         """
         row, col = edge_index
-        # 计算距离和方向
         rel = x[row] - x[col]  # [E, 3]
         dist = torch.norm(rel, dim=-1, keepdim=True)  # [E, 1]
         
-        # 构造message输入
         h_i = h[row]
-        h_j = h[col] # h_j 应该恒等于0，但是不是。发现h_j的从第501个开始不是0
+        h_j = h[col]
         edge_input = torch.cat([h_i, h_j, dist], dim=-1)  # [E, 2*in_channels+1]
         m_ij = self.edge_mlp(edge_input)  # [E, hidden_channels]
         
-        # 应用cutoff过滤
+        # Apply cutoff filter
         if self.cutoff is not None:
             PI = torch.pi
             C = 0.5 * (torch.cos(dist.squeeze(-1) * PI / self.cutoff) + 1.0)
             C = C * (dist.squeeze(-1) <= self.cutoff) * (dist.squeeze(-1) >= 0.0)
             m_ij = m_ij * C.view(-1, 1)
         
-        # 坐标更新：用message生成标量，乘以方向
+        # Coord update: scalar * direction
         coord_coef = self.coord_mlp(m_ij)  # [E, out_x_dim]
-        direction = rel / (dist + 1e-8)  # 单位向量 [E, 3]
-        # 聚合到每个节点
+        direction = rel / (dist + 1e-8)  # unit vector [E, 3]
         if self.out_x_dim == 1:
             coord_message = coord_coef * direction  # [E, 3]
-            # 添加size参数确保输出维度正确，size应该是元组
             delta_x = self.propagate(edge_index, x=x, message=coord_message, size=(x.size(0), x.size(0)))  # [N, 3]
-            x_new = x + delta_x  # 残差连接
+            x_new = x + delta_x
         else:
             coord_message = coord_coef[..., None] * direction[:, None, :]  # [E, out_x_dim, 3]
             x = x[:, None, :]  # [N, 1, 3]
-            # 添加size参数确保输出维度正确，size应该是元组
-            delta_x = self.propagate(edge_index, x=None, message=coord_message.view(len(row), -1), size=(x.size(0), x.size(0)))  # [N, out_x_dim * 3]
-            delta_x = delta_x.view(x.size(0), self.out_x_dim, 3)  # [N, out_x_dim, 3]
-            x_new = x + delta_x  # 残差连接, [N, out_x_dim, 3]
+            delta_x = self.propagate(edge_index, x=None, message=coord_message.view(len(row), -1), size=(x.size(0), x.size(0)))
+            delta_x = delta_x.view(x.size(0), self.out_x_dim, 3)
+            x_new = x + delta_x
         
-        # 节点特征更新
-        # 添加size参数确保输出维度正确，size应该是元组
-        m_aggr = self.propagate(edge_index, x=x, message=m_ij, size=(x.size(0), x.size(0)))  # [N, hidden_channels]
+        # Node feature update
+        m_aggr = self.propagate(edge_index, x=x, message=m_ij, size=(x.size(0), x.size(0)))
         h_delta = self.node_mlp(torch.cat([h, m_aggr], dim=-1))
-        h_new = h + h_delta  # 残差连接
+        h_new = h + h_delta
         return h_new, x_new
 
     def message(self, message):
@@ -111,7 +96,7 @@ class EGNNVectorField(nn.Module):
                  code_dim: int = 128,
                  cutoff: float = None,
                  anchor_spacing: float = 2.0,
-                 k_neighbors: int = 32):  # 添加k_neighbors参数
+                 k_neighbors: int = 32):
         """
         Initialize the EGNN Vector Field model.
         Each query point predicts a 3D vector for every atom type.
@@ -132,21 +117,19 @@ class EGNNVectorField(nn.Module):
         self.grid_size = grid_size
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
-        self.radius = radius  # 保留但不使用
+        self.radius = radius
         self.n_atom_types = n_atom_types
         self.code_dim = code_dim
-        # 如果cutoff为None，则使用radius作为cutoff
         self.cutoff = cutoff if cutoff is not None else radius
-        self.k_neighbors = k_neighbors  # 添加k_neighbors参数
+        self.k_neighbors = k_neighbors
 
-        # Create learnable grid points and features for G_L
-        # 指定batch_size=1：只存储一份网格坐标，而不是为每个可能的 batch_size 都存储一份
+        # batch_size=1: store one grid coords copy
         self.register_buffer('grid_points',
                 create_grid_coords(
                     batch_size=1, grid_size=self.grid_size, device='cpu', anchor_spacing=anchor_spacing
                 ).squeeze(0)
             )
-        # self.grid_features = nn.Parameter(torch.randn(self.grid_size**3, self.code_dim, requires_grad=True) / math.sqrt(self.code_dim)) # TODO: 是否需要初始化？
+        # self.grid_features = nn.Parameter(...)  # TODO: init?
 
         # type embedding
         self.type_embed = nn.Embedding(self.n_atom_types, self.code_dim)
@@ -159,11 +142,11 @@ class EGNNVectorField(nn.Module):
                 out_channels=code_dim,
                 radius=radius,
                 cutoff=cutoff,
-                k_neighbors=k_neighbors  # 添加k_neighbors参数
+                k_neighbors=k_neighbors
             ) for _ in range(num_layers)
         ])
         
-        # 基准场预测层
+        # Field prediction layer
         self.field_layer = EGNNLayer(
             in_channels=code_dim,
             hidden_channels=hidden_dim,
@@ -171,7 +154,7 @@ class EGNNVectorField(nn.Module):
             radius=radius,
             out_x_dim=n_atom_types,
             cutoff=cutoff,
-            k_neighbors=k_neighbors  # 添加k_neighbors参数
+            k_neighbors=k_neighbors
         )
         
     def forward(self, query_points, codes):
@@ -195,32 +178,27 @@ class EGNNVectorField(nn.Module):
         grid_coords = grid_points.repeat(batch_size, 1)  # [B * grid_size**3, 3]
         n_points_total = query_points.size(0)
         
-        # 1. 初始化节点特征
+        # 1. Init node features
         query_features = torch.zeros(n_points_total, self.code_dim, device=device)
         grid_features = codes.reshape(-1, self.code_dim)  # [B * grid_size**3, code_dim]
         
-        # 3. 合并节点
-        combined_features = torch.cat([query_features, grid_features], dim=0)  # [B*N + B*grid_size**3, code_dim]
-        combined_coords = torch.cat([query_points, grid_coords], dim=0)  # [B*N + B*grid_size**3, 3]
+        # 3. Merge nodes
+        combined_features = torch.cat([query_features, grid_features], dim=0)
+        combined_coords = torch.cat([query_points, grid_coords], dim=0)
 
-        # 5. 构建边 - 使用radius而不是knn
+        # 5. Build edges (knn)
         query_batch = torch.arange(batch_size, device=device).repeat_interleave(n_points)
         grid_batch = torch.arange(batch_size, device=device).repeat_interleave(n_grid)
 
-        # 确保所有输入都在正确的设备上
-        # grid_coords = grid_coords.to(device)
-        # query_points = query_points.to(device)
-
-        # 使用knn构建 query -> grid edges，确保每个query point都能从最近的k个grid获取信息
-        # edge_grid_query = radius(  # 注释掉radius实现
+        # knn for query -> grid edges
+        # edge_grid_query = radius(
         #     x=grid_coords,
         #     y=query_points,
         #     r=self.radius,
         #     batch_x=grid_batch,
         #     batch_y=query_batch
-        # ) # [2, E] where E is variable depending on radius
+        # ) # [2, E]
 
-        # 使用knn替代radius
         edge_grid_query = knn(
             x=grid_coords,
             y=query_points,
@@ -231,15 +209,15 @@ class EGNNVectorField(nn.Module):
 
         edge_grid_query[1] += n_points_total # bias
         
-        edge_grid_query = torch.stack([edge_grid_query[1], edge_grid_query[0]], dim=0) # 交换边的方向
+        edge_grid_query = torch.stack([edge_grid_query[1], edge_grid_query[0]], dim=0)  # swap edge direction
         
-        # 7. 逐层EGNN消息传递
+        # 7. EGNN message passing
         h = combined_features
         x = combined_coords
         for layer in self.layers:
-            h, x = layer(x, h, edge_grid_query) # [total_nodes, code_dim], [total_nodes, 3]
+            h, x = layer(x, h, edge_grid_query)
 
-        # 8. 预测矢量场
+        # 8. Predict vector field
         
         _, predicted_sources = self.field_layer(x, h, edge_grid_query)  # [total_nodes, n_atom_types, 3]
         predicted_sources = predicted_sources[:n_points_total]  # keep only query points

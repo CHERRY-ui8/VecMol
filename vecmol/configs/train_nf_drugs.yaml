@@ -7,8 +7,6 @@ defaults:
   - _self_
 
 debug: False
-debug_one_mol: False
-debug_subset: False
 wandb: False
 seed: 1234
 exp_dir: ../exps/neural_field
@@ -16,7 +14,7 @@ exp_dir: ../exps/neural_field
 exp_name: "nf_${dset.dset_name}/${now:%Y%m%d}"
 dirname: "${exp_dir}/${exp_name}"
 
-reload_model_path: /data/huayuchen/Neurl-voxel/exps/neural_field/nf_drugs/20260126/lightning_logs/version_0/checkpoints/last.ckpt
+reload_model_path: exps/neural_field/nf_drugs/20260126/lightning_logs/version_0/checkpoints/last.ckpt
 auto_resume: True  # 是否自动加载最新的checkpoint继续训练
 
 # training params

@@ -80,7 +80,7 @@ class NeuralFieldLightningModule(pl.LightningModule):
         if self.loss_weighting_enabled:
             # Use reduction='none' to apply weights element-wise
             self.criterion = nn.MSELoss(reduction='none')
-            self.atom_distance_scale = loss_weight_config.get("atom_distance_scale", 1.0)  # 距离衰减尺度
+            self.atom_distance_scale = loss_weight_config.get("atom_distance_scale", 1.0)  # Distance decay scale
             # Weighting mode: "exp" (exponential decay) or "inverse_square" (1/distance^2)
             self.weighting_mode = loss_weight_config.get("mode", "exp")
             # Epsilon for inverse_square mode to avoid division by zero
@@ -117,26 +117,26 @@ class NeuralFieldLightningModule(pl.LightningModule):
         # Configuration for use_denoiser_for_codes mode
         if self.use_denoiser_for_codes:
             self.sample_near_atoms_only = finetune_config.get("sample_near_atoms_only", True)
-            # atom_distance_threshold 现在从 dset 配置中读取，不再从 finetune_config 读取
+            # atom_distance_threshold is now read from dset config, not finetune_config
             self.atom_distance_threshold = config.get("dset", {}).get("atom_distance_threshold", 0.5)
-            self.cosine_loss_weight = finetune_config.get("cosine_loss_weight", 0.0)  # cosine loss权重，>0则使用cosine loss，0则不使用cosine loss。总loss=cosine_loss_weight*cosine_loss+length_loss_weight*length_loss+magnitude_loss
-            self.length_loss_weight = finetune_config.get("length_loss_weight", 0.0)  # 模长损失权重，默认0（不使用）
+            self.cosine_loss_weight = finetune_config.get("cosine_loss_weight", 0.0)  # Cosine loss weight; >0 uses cosine loss. Total loss = cosine_loss_weight*cosine_loss + length_loss_weight*length_loss + magnitude_loss
+            self.length_loss_weight = finetune_config.get("length_loss_weight", 0.0)  # Length (magnitude) loss weight; default 0 (disabled)
             self.n_points = finetune_config.get("n_points", None)  # If None, use dset.n_points
-            self.max_timestep_for_decoder = finetune_config.get("max_timestep_for_decoder", 5)  # 使用很小的timestep范围（0到max_timestep_for_decoder-1）进行轻微加噪
-            # 真实 codes 的使用比例（0.0-1.0），剩余比例使用 denoised codes
-            # 例如：0.5 表示 50% 使用真实 codes，50% 使用 denoised codes
-            self.real_code_ratio = finetune_config.get("real_code_ratio", 0.5)  # 默认 50% 真实 codes，50% denoised codes
+            self.max_timestep_for_decoder = finetune_config.get("max_timestep_for_decoder", 5)  # Small timestep range (0 to max_timestep_for_decoder-1) for light noise
+            # Ratio of real codes (0.0-1.0); remainder uses denoised codes
+            # e.g. 0.5 = 50% real codes, 50% denoised codes
+            self.real_code_ratio = finetune_config.get("real_code_ratio", 0.5)  # Default 50% real, 50% denoised codes
             
             print(f"use_denoiser_for_codes mode enabled:")
             print(f"  - sample_near_atoms_only: {self.sample_near_atoms_only}")
             print(f"  - atom_distance_threshold: {self.atom_distance_threshold}Å")
             if self.cosine_loss_weight > 0:
-                print(f"  - cosine_loss_weight: {self.cosine_loss_weight} (使用cosine loss)")
+                print(f"  - cosine_loss_weight: {self.cosine_loss_weight} (using cosine loss)")
             else:
-                print(f"  - cosine_loss_weight: {self.cosine_loss_weight} (不使用cosine loss)")
-            print(f"  - 总loss公式: cosine_loss_weight*cosine_loss + length_loss_weight*length_loss + magnitude_loss")
+                print(f"  - cosine_loss_weight: {self.cosine_loss_weight} (not using cosine loss)")
+            print(f"  - Total loss: cosine_loss_weight*cosine_loss + length_loss_weight*length_loss + magnitude_loss")
             if self.length_loss_weight > 0:
-                print(f"  - length_loss_weight: {self.length_loss_weight} (模长损失)")
+                print(f"  - length_loss_weight: {self.length_loss_weight} (length/magnitude loss)")
             if self.n_points is not None:
                 print(f"  - n_points: {self.n_points}")
             print(f"  - max_timestep_for_decoder: {self.max_timestep_for_decoder} (randomly sample one timestep from [0, {self.max_timestep_for_decoder}) for slight noise perturbation, then denoising)")
@@ -172,7 +172,9 @@ class NeuralFieldLightningModule(pl.LightningModule):
                     pass
                 
                 # Ensure required keys exist (use current config as fallback, then defaults)
-                denoiser_config.setdefault("smooth_sigma", config.get("smooth_sigma", 0.0))
+                _dset = config.get("dset", {})
+                _smooth = _dset.get("smooth_sigma", 0.0) if hasattr(_dset, "get") else getattr(_dset, "smooth_sigma", 0.0)
+                denoiser_config.setdefault("smooth_sigma", config.get("smooth_sigma", _smooth))
                 denoiser_config.setdefault("diffusion_method", config.get("diffusion_method", "ddpm_x0"))
                 denoiser_config.setdefault("denoiser", config.get("denoiser", {}))
                 denoiser_config.setdefault("ddpm", config.get("ddpm", {"num_timesteps": 1000, "use_time_weight": True}))
@@ -207,7 +209,8 @@ class NeuralFieldLightningModule(pl.LightningModule):
                 # CRITICAL: Load code_stats from denoiser checkpoint for code normalization
                 # Denoiser was trained on normalized codes, so we must normalize encoder-generated codes
                 self.denoiser_code_stats = checkpoint.get("code_stats", None)
-                denoiser_normalize_codes = denoiser_config.get("normalize_codes", False)
+                _dn = denoiser_config.get("dset", {})
+                denoiser_normalize_codes = (_dn.get("normalize_codes", False) if hasattr(_dn, "get") else getattr(_dn, "normalize_codes", False)) or denoiser_config.get("normalize_codes", False)
                 
                 if denoiser_normalize_codes:
                     if self.denoiser_code_stats is None:
@@ -518,21 +521,21 @@ class NeuralFieldLightningModule(pl.LightningModule):
                                length_loss_weight=0.0,
                                use_weighting=False, batch=None, query_points=None):
         """
-        分别计算grid点和邻近点的loss
+        Compute loss separately for grid points and neighbor points.
         
         Args:
-            pred_field: [B, n_points, n_atom_types, 3] 预测的field
-            target_field: [B, n_points, n_atom_types, 3] 目标field
-            point_types: [B, n_points] 或 [N_total_points] 点类型标记，0=grid点，1=邻近点
-            cosine_loss_weight: cosine loss的权重，>0则使用cosine loss，0则使用MSE loss。同时作为magnitude loss的权重
-            length_loss_weight: 模长损失的权重
-            use_weighting: 是否使用距离加权
-            batch: batch对象（用于计算权重）
-            query_points: [B, n_points, 3] query点坐标（用于计算权重）
+            pred_field: [B, n_points, n_atom_types, 3] predicted field
+            target_field: [B, n_points, n_atom_types, 3] target field
+            point_types: [B, n_points] or [N_total_points] point type mask, 0=grid point, 1=neighbor point
+            cosine_loss_weight: weight for cosine loss; >0 uses cosine loss, 0 uses MSE. Also used as magnitude loss weight
+            length_loss_weight: weight for length (magnitude) loss
+            use_weighting: whether to use distance weighting
+            batch: batch object (for computing weights)
+            query_points: [B, n_points, 3] query point coordinates (for weighting)
             
         Returns:
-            loss: 总loss（标量）
-            loss_dict: 包含各种loss的字典
+            loss: total loss (scalar)
+            loss_dict: dict of individual loss terms
         """
         B, n_points, n_atom_types, _ = pred_field.shape
         device = pred_field.device
@@ -952,9 +955,9 @@ class NeuralFieldLightningModule(pl.LightningModule):
             
             if scheduler_type == "plateau":
                 # Use ReduceLROnPlateau: reduce LR when val_loss stops decreasing
-                factor = self.config.get("lr_factor", 0.5)  # 学习率衰减因子
-                patience = self.config.get("lr_patience", 10)  # 等待多少个epoch没有改善
-                min_lr = self.config.get("lr_min", 1e-6)  # 最小学习率
+                factor = self.config.get("lr_factor", 0.5)  # Learning rate decay factor
+                patience = self.config.get("lr_patience", 10)  # Epochs to wait for improvement
+                min_lr = self.config.get("lr_min", 1e-6)  # Minimum learning rate
                 mode = self.config.get("lr_mode", "min")  # 'min' for val_loss (default)
                 
                 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -963,7 +966,7 @@ class NeuralFieldLightningModule(pl.LightningModule):
                     factor=factor,
                     patience=patience,
                     min_lr=min_lr,
-                    verbose=True  # 打印学习率变化信息
+                    verbose=True  # Print learning rate changes
                 )
                 
                 print(f"Using ReduceLROnPlateau scheduler:")
@@ -1018,7 +1021,7 @@ class NeuralFieldLightningModule(pl.LightningModule):
             return {"optimizer": optimizer, "lr_scheduler": schedulers}
     
     def on_save_checkpoint(self, checkpoint):        
-        # 保存前去掉多余的封装（但是lightning模式理论上会自动处理好，不需要去除，只是以防万一）
+        # Strip extra wrapper before saving (Lightning usually handles this; kept as safeguard)
         enc_state_dict = self.enc.module.state_dict() if hasattr(self.enc, "module") else self.enc.state_dict()
         dec_state_dict = self.dec.module.state_dict() if hasattr(self.dec, "module") else self.dec.state_dict()
         
@@ -1081,8 +1084,8 @@ def main(config):
             config["joint_finetune"] = {}
         config["joint_finetune"]["enabled"] = True  # Enable joint_finetune mode for sampling
         config["joint_finetune"]["sample_near_atoms_only"] = finetune_config.get("sample_near_atoms_only", True)
-        # atom_distance_threshold 现在在 dset 配置中设置，不再在此处设置
-        # 如果 finetune_config 中指定了 atom_distance_threshold，则设置到 dset 中
+        # atom_distance_threshold is now set in dset config, not here
+        # If finetune_config specifies atom_distance_threshold, set it in dset
         if "atom_distance_threshold" in finetune_config:
             config["dset"]["atom_distance_threshold"] = finetune_config["atom_distance_threshold"]
         if "n_points" in finetune_config and finetune_config["n_points"] is not None:
@@ -1179,7 +1182,7 @@ def main(config):
             monitor="val_loss",
             mode="min",
             save_last=True,
-            save_top_k=-1  # 每ckpt_every_n_epochs保存所有checkpoint，不限制数量
+            save_top_k=-1  # Save all checkpoints every ckpt_every_n_epochs, no limit
         ),
         LearningRateMonitor(logging_interval="epoch"),
         # ProgressBarCallback()

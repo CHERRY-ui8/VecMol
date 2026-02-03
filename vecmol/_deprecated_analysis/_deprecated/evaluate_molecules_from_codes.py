@@ -3,8 +3,8 @@
 
 使用方法:
     python -m vecmol.analysis.evaluate_molecules_from_codes \
-        --molecule_dir /data/huayuchen/Neurl-voxel/exps/vecmol/fm_qm9/20251108/molecule \
-        --output_dir /data/huayuchen/Neurl-voxel/vecmol/analysis/analysis_metrics
+        --molecule_dir exps/vecmol/fm_qm9/20251108/molecule \
+        --output_dir vecmol/analysis/analysis_metrics
 """
 
 import sys

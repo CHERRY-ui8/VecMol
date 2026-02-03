@@ -7,15 +7,13 @@ defaults:
 wandb: False
 seed: 1234
 # nf_pretrained_path: null  # 必须指定Lightning checkpoint文件路径，例如: /path/to/checkpoints/model-50.ckpt
-# nf_pretrained_path: /data/huayuchen/Neurl-voxel/exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/model-epoch=999.ckpt
-# nf_pretrained_path: /data/huayuchen/Neurl-voxel/exps/neural_field/nf_qm9/20251024/lightning_logs/version_0/checkpoints/model-epoch=409.ckpt
-# nf_pretrained_path: /data/huayuchen/Neurl-voxel/exps/neural_field/nf_qm9/20260116/lightning_logs/version_0/checkpoints/model-epoch=275.ckpt
-nf_pretrained_path: /data/huayuchen/Neurl-voxel/exps/neural_field/nf_qm9/20260124/lightning_logs/version_0/checkpoints/last.ckpt
+# nf_pretrained_path: exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/model-epoch=999.ckpt
+# nf_pretrained_path: exps/neural_field/nf_qm9/20251024/lightning_logs/version_0/checkpoints/model-epoch=409.ckpt
+# nf_pretrained_path: exps/neural_field/nf_qm9/20260116/lightning_logs/version_0/checkpoints/model-epoch=275.ckpt
+nf_pretrained_path: exps/neural_field/nf_qm9/20260124/lightning_logs/version_0/checkpoints/last.ckpt
 
 # debug options
 debug: False
-debug_one_mol: False
-debug_subset: False
 
 # dirname 将自动基于 nf_pretrained_path 的目录计算
 

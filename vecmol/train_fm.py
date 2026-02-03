@@ -14,7 +14,7 @@ import pickle
     
 # PyTorch and related libraries
 import torch
-# 限制 PyTorch 自己的线程数（中和配置：80%情况最优）
+# Limit PyTorch thread count (balanced for ~80% of cases)
 torch.set_num_threads(2)
 torch.set_num_interop_threads(2)
 
@@ -52,6 +52,20 @@ from vecmol.dataset.dataset_code import create_code_loaders
 from vecmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
 from vecmol.models.encoder import create_grid_coords
 from vecmol.utils.constants import PADDING_INDEX
+
+
+def _dget(config, key, default=None):
+    """Read key from config.dset; compatible with OmegaConf and dict."""
+    d = config.get("dset", {})
+    if hasattr(d, "get"):
+        return d.get(key, default)
+    return getattr(d, key, default)
+
+
+def _get_position_weight_config(config):
+    """Single source: dset.position_weight; top-level config.position_weight overrides."""
+    dset_pw = (config.get("dset") or {}).get("position_weight", {})
+    return config.get("position_weight") or dset_pw
 
 
 def plot_loss_curve(train_losses, val_losses, save_path, title_suffix=""):
@@ -113,16 +127,15 @@ class VecmolLightningModule(pl.LightningModule):
         
         # New configuration for enhanced joint fine-tuning
         self.num_timesteps_for_decoder = joint_finetune_config.get("num_timesteps_for_decoder", 50)
-        # atom_distance_threshold: 优先从 joint_finetune 读取，否则从 dset 读取
+        # atom_distance_threshold: prefer joint_finetune, else dset
         if "atom_distance_threshold" in joint_finetune_config and joint_finetune_config["atom_distance_threshold"] is not None:
             self.atom_distance_threshold = joint_finetune_config["atom_distance_threshold"]
         else:
             self.atom_distance_threshold = config.get("dset", {}).get("atom_distance_threshold", 0.5)
         self.magnitude_loss_weight = joint_finetune_config.get("magnitude_loss_weight", 0.1)
-        self.use_cosine_loss = joint_finetune_config.get("use_cosine_loss", False)  # 默认使用MSE loss
+        self.use_cosine_loss = joint_finetune_config.get("use_cosine_loss", False)  # Default MSE loss
         
-        # atom_distance_scale: 用于 loss weighting 的指数衰减
-        # 优先从 joint_finetune 读取，否则从 loss_weighting 读取，最后使用默认值
+        # atom_distance_scale: exponential decay for loss weighting; prefer joint_finetune, else loss_weighting, else default
         if "atom_distance_scale" in joint_finetune_config and joint_finetune_config["atom_distance_scale"] is not None:
             self.atom_distance_scale = joint_finetune_config["atom_distance_scale"]
         else:
@@ -166,7 +179,7 @@ class VecmolLightningModule(pl.LightningModule):
         self._freeze_nf()
         
         # Position weight configuration
-        self.position_weight_config = config.get("position_weight", {})
+        self.position_weight_config = _get_position_weight_config(config)
         self.use_position_weight = self.position_weight_config.get("enabled", False)
         
         # Position weight augmentation info (for modulo mapping when codes are augmented)
@@ -218,10 +231,10 @@ class VecmolLightningModule(pl.LightningModule):
             tuple: (codes, smooth_codes, position_weights) or (codes, smooth_codes, None)
         """
         # Check if batch contains position_weights (from dataset)
-        # DataLoader会将多个样本的返回值组合：如果dataset返回tuple，DataLoader返回tuple of lists
+        # DataLoader stacks batch: if dataset returns tuple, DataLoader returns tuple of lists
         position_weights = None
         if isinstance(batch, (list, tuple)) and len(batch) == 2:
-            # Dataset returns (codes, position_weights), DataLoader返回(codes_list, position_weights_list)
+            # Dataset returns (codes, position_weights), DataLoader returns (codes_list, position_weights_list)
             codes_list, position_weights_list = batch
             # Stack codes
             if isinstance(codes_list, list):
@@ -240,19 +253,19 @@ class VecmolLightningModule(pl.LightningModule):
             else:
                 codes = batch
         
-        if self.config["on_the_fly"]:
+        if _dget(self.config, "on_the_fly", True):
             with torch.no_grad():
                 codes = infer_codes_occs_batch(
                     batch, self.enc, self.config, to_cpu=False,
-                    code_stats=self.code_stats if self.config["normalize_codes"] else None
+                    code_stats=self.code_stats if _dget(self.config, "normalize_codes", False) else None
                 )
         else:
             # Only normalize codes if normalize_codes is enabled and code_stats is available
-            if self.config["normalize_codes"] and self.code_stats is not None:
+            if _dget(self.config, "normalize_codes", False) and self.code_stats is not None:
                 codes = normalize_code(codes, self.code_stats)
         
         with torch.no_grad():
-            smooth_codes = add_noise_to_code(codes, smooth_sigma=self.config["smooth_sigma"])
+            smooth_codes = add_noise_to_code(codes, smooth_sigma=_dget(self.config, "smooth_sigma", 0.5))
         
         # Move position_weights to the same device as codes
         if position_weights is not None:
@@ -293,7 +306,7 @@ class VecmolLightningModule(pl.LightningModule):
         grid_coords = create_grid_coords(1, grid_size, device=device, anchor_spacing=anchor_spacing)
         grid_coords = grid_coords.squeeze(0)  # [n_grid, 3]
         
-        if self.config["on_the_fly"]:
+        if _dget(self.config, "on_the_fly", True):
             # Extract atom coordinates from batch (PyTorch Geometric Batch)
             atom_coords = batch.pos  # [N_total_atoms, 3]
             batch_idx_atoms = batch.batch  # [N_total_atoms]
@@ -648,7 +661,7 @@ class VecmolLightningModule(pl.LightningModule):
         n_atom_types = self.config["dset"]["n_channels"]
         
         # Get query points and target field
-        if self.config["on_the_fly"]:
+        if _dget(self.config, "on_the_fly", True):
             # on_the_fly=True: batch contains molecule data with target_field
             if not hasattr(batch, 'xs') or not hasattr(batch, 'target_field'):
                 print("[WARNING] Batch does not contain xs or target_field, skipping decoder loss")
@@ -858,7 +871,7 @@ class VecmolLightningModule(pl.LightningModule):
             all_query_points = []
             all_atom_coords = []  # Store atom coordinates for weight computation
             
-            if self.config["on_the_fly"]:
+            if _dget(self.config, "on_the_fly", True):
                 # on_the_fly=True: batch contains molecule data (PyTorch Geometric Batch)
                 if not hasattr(batch, 'pos') or not hasattr(batch, 'x'):
                     print("[WARNING] Batch does not contain pos or x, skipping field loss")
@@ -1013,26 +1026,25 @@ class VecmolLightningModule(pl.LightningModule):
     
     def training_step(self, batch, batch_idx):
         """Training step logic"""
-        # 添加调试信息
-        # if batch_idx == 0:  # 只在第一个batch打印
+        # Debug: uncomment to log first batch only
+        # if batch_idx == 0:
         #     print(f"[DEBUG] Using diffusion_method: {self.vecmol.diffusion_method}")
         
         return self._training_step_ddpm(batch, batch_idx)
 
     def _training_step_ddpm(self, batch, batch_idx):
-        """DDPM训练步骤"""
-        # 获取codes和position_weights（如果已预计算）
+        """DDPM training step."""
+        # Get codes and position_weights (if precomputed)
         codes, _, position_weights_precomputed = self._process_batch(batch)
         
-        # 获取位置权重（优先使用预计算的，否则重新计算）
+        # Get position weights (prefer precomputed, else recompute)
         position_weights = self._compute_position_weights(
             batch, codes, batch_idx=batch_idx, is_training=True,
             precomputed_weights=position_weights_precomputed
         )
         
-        # 已移除：对codes的数据增强（使用bilinear插值）
-        # 注意：在infer_codes.py中对分子坐标的增强（生成10个pt文件）仍然保留
-        # 这里移除的是训练时对已生成codes的插值增强，避免bilinear插值误差
+        # Removed: code augmentation (bilinear interpolation). infer_codes.py coordinate augmentation (10 pt files) still used.
+        # Training-time interpolation on codes was removed to avoid bilinear interpolation error.
         # if self.training and self.config.get("use_data_augmentation", True):
         #     grid_size = self.config["dset"]["grid_size"]
         #     anchor_spacing = self.config["dset"]["anchor_spacing"]
@@ -1047,12 +1059,12 @@ class VecmolLightningModule(pl.LightningModule):
         #         apply_translation=apply_translation
         #     )
         
-        # 添加调试信息
-        # if batch_idx == 0:  # 只在第一个batch打印
+        # Debug: uncomment to log first batch only
+        # if batch_idx == 0:
         #     print(f"[DEBUG] DDPM training step - input shape: {codes.shape}")
         #     print(f"[DEBUG] Using diffusion constants: {list(self.vecmol.diffusion_consts.keys())}")
         
-        # DDPM训练步骤 - 直接使用3维输入 [B, N*N*N, code_dim]
+        # DDPM training step - 3D input [B, N*N*N, code_dim]
         denoiser_loss = self.vecmol.train_ddpm_step(codes, position_weights=position_weights)
         
         # Compute decoder loss if joint fine-tuning is enabled
@@ -1109,17 +1121,17 @@ class VecmolLightningModule(pl.LightningModule):
         return self._validation_step_ddpm(batch, batch_idx)
 
     def _validation_step_ddpm(self, batch, batch_idx):
-        """DDPM验证步骤"""
-        # 获取codes和position_weights（如果已预计算）
+        """DDPM validation step."""
+        # Get codes and position_weights (if precomputed)
         codes, _, position_weights_precomputed = self._process_batch(batch)
         
-        # 获取位置权重（优先使用预计算的，否则重新计算）
+        # Get position weights (prefer precomputed, else recompute)
         position_weights = self._compute_position_weights(
             batch, codes, batch_idx=batch_idx, is_training=False,
             precomputed_weights=position_weights_precomputed
         )
         
-        # DDPM验证步骤 - 直接使用3维输入 [B, N*N*N, code_dim]
+        # DDPM validation step - 3D input [B, N*N*N, code_dim]
         denoiser_loss = self.vecmol.train_ddpm_step(codes, position_weights=position_weights)
         
         # Compute decoder loss if joint fine-tuning is enabled
@@ -1295,7 +1307,7 @@ class VecmolLightningModule(pl.LightningModule):
             return max(lr_ratio, min_ratio)
 
     def on_save_checkpoint(self, checkpoint):
-        # 保存前去掉多余的封装（但是lightning模式理论上会自动处理好，不需要去除，只是以防万一）
+        # Strip extra wrapper before saving (Lightning usually handles this; kept as safeguard)
         vecmol_state_dict = self.vecmol.module.state_dict() if hasattr(self.vecmol, "module") else self.vecmol.state_dict()
         vecmol_ema_state_dict = self.vecmol_ema.module.state_dict() if hasattr(self.vecmol_ema, "module") else self.vecmol_ema.state_dict()
         
@@ -1392,8 +1404,7 @@ def main(config):
     
     dec_module = dec.module if hasattr(dec, "module") else dec
     
-    # Note: decoder 默认使用 neural field checkpoint 中的 decoder
-    # 如果从 reload_model_path 加载的 checkpoint 中包含 decoder_state_dict，则会在 on_load_checkpoint 中自动加载
+    # Note: decoder defaults to neural field checkpoint decoder; if reload_model_path checkpoint has decoder_state_dict, it is loaded in on_load_checkpoint
     
     ##############################
     # Code loaders
@@ -1419,11 +1430,11 @@ def main(config):
                 checkpoint_config = checkpoint_hparams["config"]
                 print(f">> Checkpoint config loaded: grid_size={checkpoint_config.get('dset', {}).get('grid_size', 'N/A')}")
                 # Get codes_dir from checkpoint
-                use_augmented_codes_ckpt = checkpoint_config.get("use_augmented_codes", False)
+                use_augmented_codes_ckpt = checkpoint_config.get("use_augmented_codes", False) or _dget(checkpoint_config, "use_augmented_codes", False)
                 if use_augmented_codes_ckpt:
-                    checkpoint_codes_dir = checkpoint_config.get("codes_dir_with_aug")
+                    checkpoint_codes_dir = checkpoint_config.get("codes_dir_with_aug") or _dget(checkpoint_config, "codes_dir_with_aug")
                 else:
-                    checkpoint_codes_dir = checkpoint_config.get("codes_dir_no_aug") or checkpoint_config.get("codes_dir")
+                    checkpoint_codes_dir = checkpoint_config.get("codes_dir_no_aug") or checkpoint_config.get("codes_dir") or _dget(checkpoint_config, "codes_dir_no_aug")
                 if checkpoint_codes_dir:
                     print(f">> Found codes_dir in checkpoint: {checkpoint_codes_dir}")
             
@@ -1442,47 +1453,46 @@ def main(config):
             print(f">> Warning: Failed to load checkpoint config: {e}")
             print(">> Will use current config instead")
     
-    # 根据配置选择使用数据增强的codes还是原始codes
-    if not config["on_the_fly"]:
-        use_augmented_codes = config.get("use_augmented_codes", False)
+    # Choose augmented vs original codes based on config
+    if not _dget(config, "on_the_fly", True):
+        use_augmented_codes = _dget(config, "use_augmented_codes", False)
         
-        # 优先使用配置文件中的设置（如果明确指定了）
-        # 只有当配置文件中没有明确设置时，才使用checkpoint中的codes_dir
+        # Prefer config; use checkpoint codes_dir only if config does not set it
         if use_augmented_codes:
-            codes_dir = config.get("codes_dir_with_aug")
+            codes_dir = _dget(config, "codes_dir_with_aug")
             if codes_dir is None:
-                # 如果配置文件中没有设置，尝试使用checkpoint中的
+                # If not in config, try checkpoint
                 if checkpoint_codes_dir is not None:
                     codes_dir = checkpoint_codes_dir
-                    print(f">> 使用checkpoint中的codes_dir: {codes_dir}")
+                    print(f">> Using codes_dir from checkpoint: {codes_dir}")
                 else:
                     raise ValueError(
-                        "use_augmented_codes=True 但未指定 codes_dir_with_aug。\n"
-                        "请在配置文件中设置 codes_dir_with_aug 路径。"
+                        "use_augmented_codes=True but codes_dir_with_aug not set.\n"
+                        "Set codes_dir_with_aug in dset config."
                     )
             else:
-                print(f">> 使用数据增强的codes: {codes_dir}")
+                print(f">> Using augmented codes: {codes_dir}")
         else:
-            codes_dir = config.get("codes_dir_no_aug")
+            codes_dir = _dget(config, "codes_dir_no_aug")
             if codes_dir is None:
-                # 如果配置文件中没有设置，尝试使用旧的codes_dir或checkpoint中的
-                codes_dir = config.get("codes_dir")
+                # If not in config, try old codes_dir or checkpoint
+                codes_dir = config.get("codes_dir") or _dget(config, "codes_dir")
                 if codes_dir is None:
-                    # 最后尝试使用checkpoint中的
+                    # Last resort: checkpoint
                     if checkpoint_codes_dir is not None:
                         codes_dir = checkpoint_codes_dir
-                        print(f">> 使用checkpoint中的codes_dir: {codes_dir}")
+                        print(f">> Using codes_dir from checkpoint: {codes_dir}")
                     else:
                         raise ValueError(
-                            "use_augmented_codes=False 但未指定 codes_dir_no_aug 或 codes_dir。\n"
-                            "请在配置文件中设置 codes_dir_no_aug 路径。"
+                            "use_augmented_codes=False but codes_dir_no_aug/codes_dir not set.\n"
+                            "Set codes_dir_no_aug in dset config."
                         )
                 else:
-                    print(f">> 使用兼容的codes_dir: {codes_dir}")
+                    print(f">> Using compatible codes_dir: {codes_dir}")
             else:
-                print(f">> 使用原始codes（无数据增强）: {codes_dir}")
+                print(f">> Using original codes (no augmentation): {codes_dir}")
         
-        # 设置config中的codes_dir，供create_code_loaders使用
+        # Set codes_dir in config for create_code_loaders
         config["codes_dir"] = codes_dir
     
     # Create data loaders
@@ -1490,7 +1500,7 @@ def main(config):
     field_loader_val = None
     
     try:
-        if config["on_the_fly"]:
+        if _dget(config, "on_the_fly", True):
             # Create GNFConverter instance for data loading
             gnf_converter = create_gnf_converter(config)
             
@@ -1507,17 +1517,17 @@ def main(config):
             # if isinstance(loader_val, list) and len(loader_val) > 0:
             #     loader_val = loader_val[0]
             
-            # 如果normalize_codes=False，不需要code_stats，直接设为None
-            if not config["normalize_codes"]:
+            # If normalize_codes=False, no code_stats needed
+            if not _dget(config, "normalize_codes", False):
                 print(f">> normalize_codes=False, skipping code_stats computation")
                 code_stats = None
-            # 优先使用checkpoint中的code_stats（如果存在）
+            # Prefer code_stats from checkpoint if present
             elif checkpoint_code_stats is not None:
                 print(f">> Using code_stats from checkpoint (resuming training)")
                 code_stats = checkpoint_code_stats
             else:
-                # 尝试从指定路径加载code_stats
-                code_stats_path = config.get("code_stats_path", None)
+                # Load code_stats from specified path
+                code_stats_path = _dget(config, "code_stats_path", None) or config.get("code_stats_path", None)
                 if code_stats_path is not None and os.path.exists(code_stats_path):
                     try:
                         print(f">> Loading code_stats from specified path: {code_stats_path}")
@@ -1534,26 +1544,26 @@ def main(config):
                 else:
                     code_stats = None
                 
-                # 如果仍未加载到code_stats，则重新计算
+                # If still no code_stats, recompute
                 if code_stats is None:
                     # Compute codes for normalization
                     print(f">> Computing code_stats from data (new training or checkpoint has no code_stats)")
-                    # 显示数据集信息
+                    # Show dataset info
                     try:
                         dataset_size = len(loader_train.dataset)
                         batch_size = loader_train.batch_size
                         num_batches = len(loader_train)
                         print(f">> Dataset info: {dataset_size:,} samples, batch size: {batch_size}, total batches: {num_batches:,}")
                     except (TypeError, AttributeError):
-                        print(f">> Dataset info: batch size: {config_nf.get('dset', {}).get('batch_size', 'unknown')}")
+                        print(f">> Dataset info: batch size: {config_nf.get('dset', {}).get('batch_size', 'unknown') if isinstance(config_nf.get('dset'), dict) else getattr(config_nf.get('dset'), 'batch_size', 'unknown')}")
                     print(f">> This may take a while, please wait...")
-                    # 创建简化的dataset，跳过target_field计算以加速
+                    # Create simplified dataset, skip target_field for speed
                     print(f">> Creating simplified dataset for code stats computation (skipping target_field computation)...")
                     from torch_geometric.data import Data
                     from torch_geometric.loader import DataLoader
                     
                     class SimplifiedFieldDataset:
-                        """简化的dataset，只返回分子数据，跳过target_field计算"""
+                        """Simplified dataset: return molecule data only, skip target_field."""
                         def __init__(self, original_dataset):
                             self.original_dataset = original_dataset
                             
@@ -1561,9 +1571,9 @@ def main(config):
                             return len(self.original_dataset)
                         
                         def __getitem__(self, idx):
-                            # 直接从原始dataset获取数据，但跳过target_field计算
+                            # Get data from original dataset but skip target_field
                             if hasattr(self.original_dataset, 'use_lmdb') and self.original_dataset.use_lmdb:
-                                # LMDB模式
+                                # LMDB mode
                                 if self.original_dataset.db is None:
                                     self.original_dataset._connect_db()
                                 
@@ -1575,23 +1585,23 @@ def main(config):
                                 with self.original_dataset.db.begin() as txn:
                                     sample_raw = pickle.loads(txn.get(key))
                             else:
-                                # 传统模式
+                                # Non-LMDB mode
                                 idx_actual = self.original_dataset.field_idxs[idx]
                                 sample_raw = self.original_dataset.data[idx_actual]
                             
-                            # 预处理分子
+                            # Preprocess molecule
                             sample = self.original_dataset._preprocess_molecule(sample_raw)
                             
-                            # 获取坐标和原子类型
+                            # Get coords and atom types
                             coords = sample["coords"]
                             atoms_channel = sample["atoms_channel"]
                             
-                            # 移除padding
+                            # Remove padding
                             valid_mask = atoms_channel != PADDING_INDEX
                             coords = coords[valid_mask]
                             atoms_channel = atoms_channel[valid_mask]
                             
-                            # 只返回encoder需要的数据，不计算target_field
+                            # Return only encoder inputs, no target_field
                             return Data(
                                 pos=coords.float(),
                                 x=atoms_channel.long(),
@@ -1600,14 +1610,14 @@ def main(config):
                     simplified_dataset = SimplifiedFieldDataset(loader_train.dataset)
                     stats_loader = DataLoader(
                         simplified_dataset,
-                        batch_size=min(loader_train.batch_size, 128),  # 使用稍大的batch size加速
-                        num_workers=0,  # 使用单进程避免死锁
+                        batch_size=min(loader_train.batch_size, 128),  # Slightly larger batch for speed
+                        num_workers=0,  # Single process to avoid deadlock
                         shuffle=False,
                         pin_memory=False,
                         drop_last=False,
                     )
                     _, code_stats = compute_codes(
-                        stats_loader, enc, config_nf, "train", config["normalize_codes"],
+                        stats_loader, enc, config_nf, "train", _dget(config, "normalize_codes", False),
                         code_stats=None
                     )
                     print(f">> Code stats computation completed!")
@@ -1616,7 +1626,7 @@ def main(config):
             loader_val = create_code_loaders(config, split="val")
             
             # Check if field loaders are needed (for position weighting or field loss finetune)
-            position_weight_config = config.get("position_weight", {})
+            position_weight_config = _get_position_weight_config(config)
             field_loss_finetune_config = config.get("field_loss_finetune", {})
             joint_finetune_config = config.get("joint_finetune", {})
             joint_finetune_enabled = joint_finetune_config.get("enabled", False)
@@ -1717,29 +1727,27 @@ def main(config):
                     import traceback
                     traceback.print_exc()
             
-            # 获取数据增强数量（如果使用数据增强的codes）
-            # 优先使用配置中明确指定的 num_augmentations
-            # 如果没有指定，会由 create_code_loaders 自动推断
-            num_augmentations = config.get("num_augmentations", None)
+            # num_augmentations: prefer config; else inferred by create_code_loaders
+            num_augmentations = _dget(config, "num_augmentations", None)
             
-            # 如果配置中指定了 num_augmentations，打印信息
+            # Log if num_augmentations set in config
             if num_augmentations is not None:
                 print(f">> Using specified num_augmentations={num_augmentations} for codes loading")
                 print(f">> Will load: codes_aug{num_augmentations}.lmdb and position_weights_aug{num_augmentations}.lmdb")
             else:
                 print(f">> num_augmentations not specified in config, will auto-infer from codes directory")
             
-            # 如果normalize_codes=False，不需要code_stats，直接设为None
-            if not config["normalize_codes"]:
+            # If normalize_codes=False, no code_stats needed
+            if not _dget(config, "normalize_codes", False):
                 print(f">> normalize_codes=False, skipping code_stats computation")
                 code_stats = None
-            # 优先使用checkpoint中的code_stats（如果存在）
+            # Prefer code_stats from checkpoint if present
             elif checkpoint_code_stats is not None:
                 print(f">> Using code_stats from checkpoint (resuming training)")
                 code_stats = checkpoint_code_stats
             else:
-                # 尝试从指定路径加载code_stats
-                code_stats_path = config.get("code_stats_path", None)
+                # Load code_stats from specified path
+                code_stats_path = _dget(config, "code_stats_path", None) or config.get("code_stats_path", None)
                 if code_stats_path is not None and os.path.exists(code_stats_path):
                     try:
                         print(f">> Loading code_stats from specified path: {code_stats_path}")
@@ -1756,15 +1764,14 @@ def main(config):
                 else:
                     code_stats = None
                 
-                # 如果仍未加载到code_stats，则重新计算
+                # If still no code_stats, recompute
                 if code_stats is None:
-                    # NOTE: 这里可以通过 max_samples 近似统计，加速大规模 codes 的统计过程
-                    # 例如使用前约 200000w 样本来估计 mean/std (200000w个float)
+                    # NOTE: Can use max_samples for approximate stats to speed up large-scale code statistics
                     print(f">> Computing code_stats from codes directory (new training or checkpoint has no code_stats)")
                     code_stats = compute_code_stats_offline(
                         loader_train,
                         "train",
-                        config["normalize_codes"],
+                        _dget(config, "normalize_codes", False),
                         num_augmentations=num_augmentations,
                         max_samples=None,
                     )
@@ -1831,7 +1838,7 @@ def main(config):
             monitor="val_loss",
             mode="min",
             save_last=True,
-            save_top_k=-1  # 保存所有checkpoint，不限制数量
+            save_top_k=-1  # Save all checkpoints, no limit
         ),
         LearningRateMonitor(logging_interval="epoch"),
     ]
@@ -1859,7 +1866,7 @@ def main(config):
         # Use built-in gradient clipping
         gradient_clip_val=config.get("max_grad_norm", 1.0),
         gradient_clip_algorithm="norm",
-        # overfit_batches=1, TODO：可以通过修改这里，开启调试模式
+        # overfit_batches=1, TODO: enable debug mode by changing here
     )
     
     # Train the model

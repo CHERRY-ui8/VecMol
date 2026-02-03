@@ -61,7 +61,7 @@ def create_neural_field(config: dict) -> tuple:
         "hidden_dim": config["decoder"]["hidden_dim"],
         "n_layers": config["decoder"]["n_layers"],
         "radius": config["decoder"].get("radius", 3.0),
-        "cutoff": config["decoder"].get("cutoff", None),  # 如果是None，则使用radius作为cutoff
+        "cutoff": config["decoder"].get("cutoff", None),  # If None, use radius as cutoff
         "n_channels": config["dset"]["n_channels"],
         "code_dim": config["decoder"]["code_dim"]
     })
@@ -112,77 +112,77 @@ def train_nf(
     total_loss = 0.0
     max_grad_norm = 1.0
     
-    # 清理CUDA缓存
+    # Clear CUDA cache
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         fabric.print(f"CUDA memory allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
         fabric.print(f"CUDA memory cached: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
     
-    # 创建进度条
+    # Create progress bar
     pbar = tqdm(enumerate(loader), total=len(loader), desc=f'Epoch {epoch}')
     running_loss = 0.0
     
-    # 初始化时间跟踪变量
+    # Initialize time-tracking variables
     last_time = time.time()
     last_step = global_step
     
     for i, data_batch in pbar:
-        # 数据预处理
+        # Data preprocessing
         data_batch = data_batch.to(fabric.device)
-        B = data_batch.batch.max().item() + 1 # 可以直接从data_batch中获取B
-        # 获取query_points
+        B = data_batch.batch.max().item() + 1  # Get B from data_batch
+        # Get query_points
         query_points = data_batch.xs.to(fabric.device)
         if query_points.dim() == 2:
             n_points = config["dset"]["n_points"]
             query_points = query_points.view(B, n_points, 3)
-        # 前向传播
+        # Forward pass
         codes = enc(data_batch)
         pred_field = dec(query_points, codes)
-        # 使用预计算的目标梯度场（从数据集中获取）
+        # Use precomputed target gradient field (from dataset)
         target_field = data_batch.target_field.to(fabric.device)
-        if target_field.dim() == 2: # TODO：看看这里的view有没有问题
+        if target_field.dim() == 2:  # TODO: verify view logic here
             target_field = target_field.view(B, n_points, -1, 3)  # [B, n_points, n_atom_types, 3]
         elif target_field.dim() == 3:
-            # 如果target_field是[n_points, n_atom_types, 3]，需要添加batch维度
+            # If target_field is [n_points, n_atom_types, 3], add batch dimension
             if target_field.shape[0] == n_points:
                 target_field = target_field.unsqueeze(0).expand(B, -1, -1, -1)  # [B, n_points, n_atom_types, 3]
             else:
-                # 如果已经是batch格式，确保维度正确
+                # If already in batch format, ensure dimensions are correct
                 target_field = target_field.view(B, n_points, -1, 3)
         
-        # # 确保pred_field和target_field的维度匹配
+        # # Ensure pred_field and target_field dimensions match
         # if pred_field.shape != target_field.shape:
         #     fabric.print(f"[Warning] Shape mismatch: pred_field {pred_field.shape} vs target_field {target_field.shape}")
-        #     # 尝试调整target_field的维度以匹配pred_field
+        #     # Try to adjust target_field dimensions to match pred_field
         #     if target_field.shape[1] != pred_field.shape[1]:
-        #         # 如果点数不匹配，取较小的那个
+        #         # If point counts differ, take the smaller one
         #         min_points = min(pred_field.shape[1], target_field.shape[1])
         #         pred_field = pred_field[:, :min_points, :, :]
         #         target_field = target_field[:, :min_points, :, :]
         
-        # 调试：输出5个query_point的梯度场大小（每2000个batch输出一次）
+        # Debug: print gradient field norms for 5 query_points (every 2000 batches)
         # if i % 2000 == 0 and fabric.global_rank == 0:
-        #     b_idx = 0  # 只看第一个样本
+        #     b_idx = 0  # First sample only
         #     n_points = pred_field.shape[1]
-        #     
+        #
         #     max_idx = min(n_points - 1, target_field.shape[1] - 1) if target_field.dim() >= 2 else 0
-        #     if max_idx < 4:  # 如果点数太少，跳过调试
+        #     if max_idx < 4:  # Skip debug if too few points
         #         fabric.print(f"[Debug] Not enough points for debugging (max_idx: {max_idx})")
         #         continue
         #         
         #     idxs = random.sample(range(max_idx + 1), min(5, max_idx + 1))
         #     norms = []
         #     for idx in idxs:
-        #         # 取该query_point所有原子类型的3D向量，计算范数
+        #         # For this query_point, take 3D vectors for all atom types and compute norm
         #         vec = pred_field[b_idx, idx]  # [n_atom_types, 3]
         #         norm = torch.norm(vec, dim=-1)  # [n_atom_types]
         #         norms.append(norm.detach().cpu().numpy())
-        #     fabric.print(f"[Debug] 5个query_point的vector field范数: {norms}")
+        #     fabric.print(f"[Debug] 5 query_point vector field norms: {norms}")
 
         #     target_norms = []
         #     rmsds = []
         #     for idx in idxs:
-        #         # 确保target_field有正确的维度
+        #         # Ensure target_field has correct dimensions
         #         if target_field.dim() == 4:
         #             target_vec = target_field[b_idx, idx]  # [n_atom_types, 3]
         #         elif target_field.dim() == 3:
@@ -193,31 +193,31 @@ def train_nf(
         #             
         #         target_norm = torch.norm(target_vec, dim=-1)  # [n_atom_types]
         #         target_norms.append(target_norm.detach().cpu().numpy())
-        #         # 计算RMSD
+        #         # Compute RMSD
         #         pred_vec = pred_field[b_idx, idx]  # [n_atom_types, 3]
         #         rmsd = compute_rmsd(pred_vec, target_vec)
         #         rmsds.append(rmsd.item() if hasattr(rmsd, 'item') else float(rmsd))
-        #     fabric.print(f"[Debug] 5个query_point的target field标准答案范数: {target_norms}")
-        #     fabric.print(f"[Debug] 5个query_point的vector field与target field RMSD: {rmsds}")
+        #     fabric.print(f"[Debug] 5 query_point target field norms: {target_norms}")
+        #     fabric.print(f"[Debug] 5 query_point vector field vs target field RMSD: {rmsds}")
 
-        # 计算损失
+        # Compute loss
         loss = criterion(pred_field, target_field)
         
-        # TensorBoard 日志记录
+        # TensorBoard logging
         if tensorboard_writer is not None and TENSORBOARD_AVAILABLE and fabric.global_rank == 0:
             current_step = global_step + i
             tensorboard_writer.add_scalar('Loss/Batch', loss.item(), current_step)
             tensorboard_writer.add_scalar('Loss/Running_Average', running_loss, current_step)
             
-            # 记录学习率
+            # Log learning rate
             if hasattr(optim_dec, 'param_groups') and len(optim_dec.param_groups) > 0:
                 tensorboard_writer.add_scalar('Learning_Rate/Decoder', optim_dec.param_groups[0]['lr'], current_step)
             if hasattr(optim_enc, 'param_groups') and len(optim_enc.param_groups) > 0:
                 tensorboard_writer.add_scalar('Learning_Rate/Encoder', optim_enc.param_groups[0]['lr'], current_step)
             
-            # 每10步记录一次训练速度指标
+            # Log training speed every 10 steps
             if current_step % 10 == 0:
-                # 记录训练速度（样本/秒）
+                # Log samples per second
                 time_diff = time.time() - last_time
                 step_diff = current_step - last_step
                 if step_diff > 0 and time_diff > 0:
@@ -227,22 +227,22 @@ def train_nf(
                 last_time = time.time()
                 last_step = current_step
                 
-                # 记录GPU内存使用（如果可用）
+                # Log GPU memory usage (if available)
                 if torch.cuda.is_available():
                     gpu_memory_allocated = torch.cuda.memory_allocated() / (1024**3)  # GB
                     gpu_memory_cached = torch.cuda.memory_reserved() / (1024**3)  # GB
                     tensorboard_writer.add_scalar('GPU/Memory_Allocated_GB', gpu_memory_allocated, current_step)
                     tensorboard_writer.add_scalar('GPU/Memory_Cached_GB', gpu_memory_cached, current_step)
             
-            # 每100步记录一次更详细的指标
+            # Log detailed metrics every 100 steps
             if current_step % 100 == 0:
-                # 记录预测场和目标场的统计信息
+                # Log pred/target field statistics
                 pred_field_norm = torch.norm(pred_field, dim=-1).mean().item()
                 target_field_norm = torch.norm(target_field, dim=-1).mean().item()
                 tensorboard_writer.add_scalar('Field_Stats/Pred_Field_Norm', pred_field_norm, current_step)
                 tensorboard_writer.add_scalar('Field_Stats/Target_Field_Norm', target_field_norm, current_step)
                 
-                # 记录模型参数统计信息
+                # Log model parameter statistics
                 for name, param in dec.named_parameters():
                     if param.grad is not None:
                         tensorboard_writer.add_histogram(f'Decoder_Params/{name}', param.data, current_step)
@@ -253,7 +253,7 @@ def train_nf(
                         tensorboard_writer.add_histogram(f'Encoder_Params/{name}', param.data, current_step)
                         tensorboard_writer.add_histogram(f'Encoder_Grads/{name}', param.grad.data, current_step)
                 
-                # 记录loss分布统计
+                # Log loss distribution statistics
                 if len(batch_train_losses) > 0:
                     recent_losses = [l["total_loss"] for l in batch_train_losses[-100:]]
                     if recent_losses:
@@ -261,12 +261,12 @@ def train_nf(
                         tensorboard_writer.add_scalar('Loss/Min', np.min(recent_losses), current_step)
                         tensorboard_writer.add_scalar('Loss/Max', np.max(recent_losses), current_step)
         
-        # 反向传播
+        # Backward pass
         optim_dec.zero_grad()
         optim_enc.zero_grad()
         fabric.backward(loss)
         
-        # TensorBoard 记录梯度范数（在梯度裁剪前）
+        # TensorBoard: log gradient norms (before clipping)
         if tensorboard_writer is not None and TENSORBOARD_AVAILABLE and fabric.global_rank == 0:
             current_step = global_step + i
             if current_step % 100 == 0:
@@ -275,23 +275,23 @@ def train_nf(
                 tensorboard_writer.add_scalar('Gradients/Decoder_Norm', dec_grad_norm, current_step)
                 tensorboard_writer.add_scalar('Gradients/Encoder_Norm', enc_grad_norm, current_step)
         
-        # 梯度裁剪
+        # Gradient clipping
         torch.nn.utils.clip_grad_norm_(dec.parameters(), max_grad_norm)
         torch.nn.utils.clip_grad_norm_(enc.parameters(), max_grad_norm)
         optim_dec.step()
         optim_enc.step()
-        total_loss += loss.item() #  total loss 是 MSE 损失（预测的向量场与目标向量场之间的均方误差）
-        
-        # 更新运行中的loss平均值
+        total_loss += loss.item()  # Total loss is MSE (predicted vs target vector field)
+
+        # Update running loss average
         running_loss = (running_loss * i + loss.item()) / (i + 1)
-        
-        # 更新进度条
+
+        # Update progress bar
         pbar.set_postfix({
             'loss': f'{running_loss:.4f}',
             'batch': f'{i}/{len(loader)}'
         })
-        
-        # 更新指标
+
+        # Update metrics
         if metrics is not None:
             metrics["loss"].update(loss)
         if batch_train_losses is not None:
@@ -299,7 +299,7 @@ def train_nf(
                 "total_loss": loss.item(),
             })
     
-    # 关闭进度条
+    # Close progress bar
     pbar.close()
     return metrics["loss"].compute().item() if metrics is not None else total_loss / len(loader)
 
@@ -343,7 +343,7 @@ def eval_nf(
     for i, data_batch in enumerate(loader):
         data_batch = data_batch.to(fabric.device)
 
-        # 使用 to_dense_batch 转换数据格式以兼容现有函数
+        # Use to_dense_batch to convert data format for compatibility
         coords, atom_mask = to_dense_batch(data_batch.pos, data_batch.batch, fill_value=0)
         atoms_channel, _ = to_dense_batch(data_batch.x, data_batch.batch, fill_value=PADDING_INDEX)
         B = coords.size(0)
@@ -354,60 +354,60 @@ def eval_nf(
             n_points = config["dset"]["n_points"]
             query_points = query_points.view(B, n_points, 3)
         
-        # 前向传播
+        # Forward pass
         codes = enc(data_batch)
         pred_field = dec(query_points, codes)
-        
-        # 使用预计算的目标梯度场（从数据集中获取）
+
+        # Use precomputed target gradient field (from dataset)
         target_field = data_batch.target_field.to(fabric.device)
         if target_field.dim() == 2:
             target_field = target_field.view(B, n_points, -1, 3)  # [B, n_points, n_atom_types, 3]
         elif target_field.dim() == 3:
-            # 如果target_field是[n_points, n_atom_types, 3]，需要添加batch维度
+            # If target_field is [n_points, n_atom_types, 3], add batch dimension
             if target_field.shape[0] == n_points:
                 target_field = target_field.unsqueeze(0).expand(B, -1, -1, -1)  # [B, n_points, n_atom_types, 3]
             elif target_field.shape[0] == B * n_points:
-                # 如果target_field是[B*n_points, n_atom_types, 3]，需要重新整形
+                # If target_field is [B*n_points, n_atom_types, 3], reshape
                 target_field = target_field.view(B, n_points, -1, 3)
             else:
-                # 如果已经是batch格式，确保维度正确
+                # If already in batch format, ensure dimensions are correct
                 target_field = target_field.view(B, n_points, -1, 3)
-        
-        # 确保pred_field和target_field的维度匹配
+
+        # Ensure pred_field and target_field dimensions match
         if pred_field.shape != target_field.shape:
             fabric.print(f"[Warning] Shape mismatch: pred_field {pred_field.shape} vs target_field {target_field.shape}")
-            # 尝试调整target_field的维度以匹配pred_field
+            # Try to adjust target_field dimensions to match pred_field
             if target_field.shape[1] != pred_field.shape[1]:
-                # 如果点数不匹配，取较小的那个
+                # If point counts differ, take the smaller one
                 min_points = min(pred_field.shape[1], target_field.shape[1])
                 pred_field = pred_field[:, :min_points, :, :]
                 target_field = target_field[:, :min_points, :, :]
         
-        # 计算损失
+        # Compute loss
         loss = criterion(pred_field, target_field)
-        
-        # 更新指标
+
+        # Update metrics
         if metrics is not None:
             metrics["loss"].update(loss)
-        
-        # 累积损失用于分布式平均
+
+        # Accumulate loss for distributed averaging
         total_loss += loss.item()
         num_batches += 1
-    
-    # 分布式平均损失
+
+    # Distributed average loss
     if fabric is not None:
-        # 收集所有GPU的损失和批次数量
+        # Gather loss and batch count from all GPUs
         loss_tensor = torch.tensor([total_loss, num_batches], device=fabric.device)
         gathered = fabric.all_gather(loss_tensor)
         
-        # 计算全局平均损失
+        # Compute global average loss
         total_loss_all = gathered[:, 0].sum().item()
         num_batches_all = gathered[:, 1].sum().item()
         avg_loss = total_loss_all / num_batches_all if num_batches_all > 0 else 0.0
-        
+
         return avg_loss
     else:
-        # 单GPU情况
+        # Single GPU case
         return total_loss / num_batches if num_batches > 0 else 0.0
 
 
@@ -423,8 +423,8 @@ def set_requires_grad(module: nn.Module, tf: bool = False) -> None:
     for param in module.parameters():
         param.requires_grad = tf
 
-# NOTE：这个函数要保留，load_nf和load_fm都调用到了这个函数，是load时的底层逻辑
-# 它不能和load_neural_field函数合并
+# NOTE: Keep this function; load_nf and load_fm both call it (core load logic).
+# Do not merge with load_neural_field.
 def load_network(
     checkpoint: dict,
     net: nn.Module,
@@ -450,38 +450,38 @@ def load_network(
     new_state_dict = OrderedDict()
     key = f"{net_name}_state_dict" if sd is None else sd
     
-    # 之前fm的模型权重没有成功加载，pretrained_dict是空的
+    # FM weights may not have loaded; pretrained_dict could be empty
     if key not in checkpoint:
         print(f"Warning: key '{key}' not found in checkpoint!")
         return net
     
     for k, v in checkpoint[key].items():
-        # 统一去掉 _orig_mod. 前缀
+        # Strip _orig_mod. prefix uniformly
         if k.startswith("_orig_mod."):
-            k = k[10:]  # 移除 "_orig_mod." 前缀
-        
-        # 处理其他前缀
+            k = k[10:]  # Remove "_orig_mod." prefix
+
+        # Handle other prefixes
         if sd is not None:
-            # 处理不同的前缀
+            # Handle different prefixes
             if k.startswith("_orig_mod.module."):
-                k = k[17:]  # 移除 "_orig_mod.module." 前缀
+                k = k[17:]  # Remove "_orig_mod.module." prefix
             elif k.startswith("module."):
-                k = k[7:]   # 移除 "module." 前缀
+                k = k[7:]   # Remove "module." prefix
         else:
             k = k[10:] if k.startswith("_orig_mod.") and not is_compile else k  # remove compile prefix.
-        
-        # 将enc.前缀转换为net.前缀（用于VecMol模型）
+
+        # Convert enc. prefix to net. prefix (for VecMol model)
         if k.startswith('enc.') and net_name == "denoiser":
             k = k.replace('enc.', 'net.', 1)
         
         new_state_dict[k] = v
 
-    # 过滤出匹配的参数，并检查形状是否一致
+    # Filter matching params and check shape consistency
     pretrained_dict = {}
     skipped_params = []
     for k, v in new_state_dict.items():
         if k in net_dict:
-            # 检查形状是否匹配
+            # Check shape match
             if net_dict[k].shape == v.shape:
                 pretrained_dict[k] = v
             else:
@@ -489,7 +489,7 @@ def load_network(
         else:
             skipped_params.append((k, None, v.shape))
     
-    # 打印跳过的参数信息
+    # Print skipped parameter info
     if skipped_params:
         print(f"Warning: Skipping {len(skipped_params)} mismatched parameters:")
         for k, model_shape, ckpt_shape in skipped_params:
@@ -498,14 +498,14 @@ def load_network(
             else:
                 print(f"  - {k}: model shape {model_shape} != checkpoint shape {ckpt_shape}")
     
-    # 更新匹配的参数
+    # Update matching parameters
     net_dict.update(pretrained_dict)
-    # 使用 strict=False 来允许部分参数不匹配（如 grid_points）
+    # Use strict=False to allow partial mismatch (e.g. grid_points)
     net.load_state_dict(net_dict, strict=False)
 
     # weight_first_layer_after = next(iter(net_dict.values())).sum()
     # assert (weight_first_layer_before != weight_first_layer_after).item(), "loading did not work"
-    # 现在的 net_dict 是一个dict，net_dict.keys()的第0个元素是"layers.0.weight"，对应的是grid_coords，它本来就不会更新，所以这里的assert一定会报错
+    # net_dict.keys()[0] is "layers.0.weight" (grid_coords), which is not updated; assert would always fail
     
     print(f">> loaded {net_name}")
 
@@ -571,7 +571,7 @@ def save_checkpoint(
         if loss_min_tot is not None:
             loss_min_tot = loss_tot
         try:
-            # 保存前去掉多余的封装
+            # Strip extra wrapper before saving
             dec_state_dict = dec.module.state_dict() if hasattr(dec, "module") else dec.state_dict()
             enc_state_dict = enc.module.state_dict() if hasattr(enc, "module") else enc.state_dict()
             
@@ -630,35 +630,35 @@ def load_neural_field(nf_checkpoint_or_path, config: dict = None) -> tuple:
     else:
         # Original nf_checkpoint dict input
         nf_checkpoint = nf_checkpoint_or_path
-    # 处理Lightning checkpoint格式
+    # Handle Lightning checkpoint format
     if 'state_dict' in nf_checkpoint:
-        # Lightning checkpoint格式
+        # Lightning checkpoint format
         state_dict = nf_checkpoint['state_dict']
         if config is None:
             config = nf_checkpoint.get('hyper_parameters', {})
-        
-        # 分离encoder和decoder的state dict
+
+        # Split encoder and decoder state dicts
         enc_state_dict = {}
         dec_state_dict = {}
-        
+
         for key, value in state_dict.items():
             if key.startswith('enc.'):
-                # 移除'enc.'前缀
-                new_key = key[4:]  # 去掉'enc.'
+                # Remove 'enc.' prefix
+                new_key = key[4:]  # Strip 'enc.'
                 enc_state_dict[new_key] = value
             elif key.startswith('dec.'):
-                # 移除'dec.'前缀
-                new_key = key[4:]  # 去掉'dec.'
+                # Remove 'dec.' prefix
+                new_key = key[4:]  # Strip 'dec.'
                 dec_state_dict[new_key] = value
         
-        # 构建兼容格式
+        # Build compatible format
         nf_checkpoint = {
             'enc_state_dict': enc_state_dict,
             'dec_state_dict': dec_state_dict,
             'config': config
         }
     else:
-        # 旧格式checkpoint（向后兼容）
+        # Legacy checkpoint format (backward compatible)
         if config is None:
             config = nf_checkpoint["config"]
     
@@ -738,19 +738,19 @@ def compute_rmsd(coords1, coords2):
     Returns:
         torch.Tensor: RMSD value
     """
-    # 确保输入张量保持梯度
+    # Ensure input tensors retain gradients
     coords1 = coords1.detach().requires_grad_(True)
     coords2 = coords2.detach().requires_grad_(True)
-    
-    # 计算距离（不是平方距离）
+
+    # Compute distance (not squared)
     dist1 = torch.sqrt(torch.sum((coords1.unsqueeze(1) - coords2.unsqueeze(0))**2, dim=2) + 1e-8)
     dist2 = torch.sqrt(torch.sum((coords2.unsqueeze(1) - coords1.unsqueeze(0))**2, dim=2) + 1e-8)
-    
-    # 对距离取min
-    min_dist1 = torch.min(dist1, dim=1)[0]  # 对于coords1中的每个点，找到最近的coords2中的点
-    min_dist2 = torch.min(dist2, dim=1)[0]  # 对于coords2中的每个点，找到最近的coords1中的点
-    
-    # 直接平均，不需要再开方
+
+    # Min over distances
+    min_dist1 = torch.min(dist1, dim=1)[0]  # For each point in coords1, nearest point in coords2
+    min_dist2 = torch.min(dist2, dim=1)[0]  # For each point in coords2, nearest point in coords1
+
+    # Average directly (no extra sqrt)
     rmsd = (torch.mean(min_dist1) + torch.mean(min_dist2)) / 2
     
     return rmsd
@@ -818,28 +818,28 @@ def infer_codes(
     
     total_samples = 0
     
-    # 计算总批次数用于进度条
+    # Total batch count for progress bar
     try:
         total_batches = len(loader)
     except (TypeError, AttributeError):
         total_batches = None
     
-    # 如果有 n_samples 限制，估算批次数
+    # If n_samples is set, estimate batch count
     if n_samples is not None and total_batches is None:
         batch_size = config.get('dset', {}).get('batch_size', 1)
         if batch_size > 0:
             total_batches = (n_samples + batch_size - 1) // batch_size
     
-    # 设置进度条描述
+    # Progress bar description
     desc = "Inferring codes"
     if n_samples is not None:
         desc += f" (target: {n_samples:,} samples)"
     
-    # 只在非分布式环境下显示进度条（计算 code_stats 时通常是这种情况）
+    # Show progress bar only in non-distributed setting (e.g. when computing code_stats)
     show_progress = (fabric is None)
-    
+
     with torch.no_grad():
-        # 使用 tqdm 显示进度
+        # Use tqdm for progress
         if show_progress:
             loader_iter = tqdm(loader, desc=desc, total=total_batches, unit="batch", 
                               bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
@@ -858,15 +858,15 @@ def infer_codes(
             if to_cpu:
                 codes = codes.cpu()
             
-            # Gather codes in distributed environment - 保持原始形状
+            # Gather codes in distributed environment - keep original shape
             if fabric is not None and hasattr(fabric, 'all_gather'):
                 codes = fabric.all_gather(codes)
-                # 不进行reshape，保持原始形状 [B, n_grid, code_dim]
+                # Do not reshape; keep [B, n_grid, code_dim]
             
             codes_all.append(codes)
             total_samples += codes.size(0)
             
-            # 更新进度条显示当前样本数
+            # Update progress bar with current sample count
             if show_progress and hasattr(loader_iter, 'set_postfix'):
                 loader_iter.set_postfix({"samples": f"{total_samples:,}"})
             
@@ -1001,7 +1001,7 @@ def load_checkpoint_state_nf(model, checkpoint_path):
 def reshape_target_field(target_field, B, n_points, n_atom_types):
     """
     Reshape target_field to [B, n_points, n_atom_types, 3].
-    Reused from train_nf_lt.py _process_batch logic.
+    Reused from train_nf.py _process_batch logic.
     
     Args:
         target_field: Target field tensor with various possible shapes

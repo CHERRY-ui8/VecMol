@@ -22,10 +22,26 @@ n_points: 500 # TODO：后面可以再调大一些，暂时先保留500
 subsampling_ratio: 2
 
 # Query points sampling configuration
-# targeted_sampling_ratio: grid点和邻近点的比例 (n_grid / n_neighbor)
-targeted_sampling_ratio: 0.5  # 默认值：grid点:邻近点 = 2:1
+# targeted_sampling_ratio: n_grid / n_neighbor
+targeted_sampling_ratio: 0.5  # default: n_grid / n_neighbor = 2:1
 
 num_workers: 8
 batch_size: 20
 lr_enc: 2e-5  # 2e-4
 lr_dec: 2e-5  # 1e-3
+
+# Code / LMDB 数据相关（train_fm 等使用）
+# num_augmentations: 选择 LMDB 的单一来源
+smooth_sigma: 0.5
+normalize_codes: 0  # 0=False: 不使用归一化
+on_the_fly: True  # use False if codes are computed offline
+use_augmented_codes: False
+num_augmentations: 1  # null 或具体数字
+
+position_weight:
+  enabled: False
+  radius: 3.0
+  alpha: 0.5
+use_sharded_lmdb: true  # 是否使用分片LMDB。null=自动检测，true=强制分片，false=强制完整LMDB
+codes_dir_no_aug: "exps/neural_field/nf_drugs/20260113/lightning_logs/version_1/checkpoints/code_no_aug/"
+# code_stats_path: exps/neural_field/nf_drugs/20260113/lightning_logs/version_1/checkpoints/code_stats_train_aug1_norm1.pt

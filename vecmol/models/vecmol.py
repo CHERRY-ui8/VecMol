@@ -40,13 +40,14 @@ class VecMol(nn.Module):
         super().__init__()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.smooth_sigma = config["smooth_sigma"]
-        self.grid_size = config["dset"]["grid_size"]  # 保存grid_size配置
+        dset_cfg = config.get("dset", {})
+        self.smooth_sigma = dset_cfg.get("smooth_sigma", 0.5) if hasattr(dset_cfg, "get") else getattr(dset_cfg, "smooth_sigma", 0.5)
+        self.grid_size = config["dset"]["grid_size"]  # Store grid_size config
 
-        # DDPM 预测目标：ddpm_epsilon（预测噪声）或 ddpm_x0（预测 x0）
+        # DDPM prediction target: ddpm_epsilon (predict noise) or ddpm_x0 (predict x0)
         self.diffusion_method = config.get("diffusion_method", "ddpm_x0")
 
-        # 统一从 denoiser 配置读取 GNN 模型参数
+        # Read GNN model params from denoiser config
         denoiser_config = config.get("denoiser", {})
         self.net = GNNDenoiser(
             code_dim=config["decoder"]["code_dim"],
@@ -91,13 +92,13 @@ class VecMol(nn.Module):
             print(f"[DENOISER DEBUG] Output xhat - min: {xhat.min().item():.6f}, max: {xhat.max().item():.6f}, mean: {xhat.mean().item():.6f}, std: {xhat.std().item():.6f}")
             print(f"[DENOISER DEBUG] Output xhat - shape: {xhat.shape}")
 
-            # 检查是否有异常值
+            # Check for outliers
             if torch.isnan(xhat).any():
                 print("[DENOISER DEBUG] WARNING: xhat contains NaN values!")
             if torch.isinf(xhat).any():
                 print("[DENOISER DEBUG] WARNING: xhat contains Inf values!")
 
-            # 检查输出范围是否合理
+            # Check output range is reasonable
             if xhat.abs().max().item() > 100.0:
                 print(f"[DENOISER DEBUG] WARNING: xhat has very large values (max abs: {xhat.abs().max().item():.2f})")
 
@@ -122,8 +123,8 @@ class VecMol(nn.Module):
         if debug:
             print(f"[SCORE DEBUG] Score - min: {score.min().item():.6f}, max: {score.max().item():.6f}, mean: {score.mean().item():.6f}, std: {score.std().item():.6f}")
 
-        # 添加数值稳定性：梯度裁剪
-        max_score_norm = 10.0  # 可调参数
+        # Numerical stability: gradient clipping
+        max_score_norm = 10.0  # Tunable
         score_norm = torch.norm(score, dim=-1, keepdim=True)
         max_norm = score_norm.max().item()
 
@@ -147,14 +148,14 @@ class VecMol(nn.Module):
 
     def train_ddpm_step(self, x_0: torch.Tensor, position_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        DDPM训练步骤
+        DDPM training step.
 
         Args:
-            x_0: 原始数据 [B, N*N*N, code_dim]
-            position_weights: 位置权重 [B, N*N*N]，可选
+            x_0: Raw data [B, N*N*N, code_dim]
+            position_weights: Position weights [B, N*N*N], optional
 
         Returns:
-            训练损失
+            Training loss.
         """
         if self.diffusion_method == "ddpm_epsilon":
             return compute_ddpm_loss(self.net, x_0, self.diffusion_consts, self.device, position_weights=position_weights)
@@ -166,15 +167,15 @@ class VecMol(nn.Module):
     @torch.no_grad()
     def sample_ddpm(self, shape: tuple, code_stats=None, progress: bool = True, clip_denoised: bool = False) -> torch.Tensor:
         """
-        DDPM采样
+        DDPM sampling.
 
         Args:
-            shape: 输出形状 (batch_size, N*N*N, code_dim)
-            progress: 是否显示进度条
-            clip_denoised: 是否将去噪后的结果裁剪到合理范围（用于数值稳定性，默认False）
+            shape: Output shape (batch_size, N*N*N, code_dim)
+            progress: Whether to show progress bar
+            clip_denoised: Whether to clip denoised output for numerical stability (default False)
 
         Returns:
-            生成的样本 [B, N*N*N, code_dim]
+            Generated samples [B, N*N*N, code_dim].
         """
         if self.diffusion_method == "ddpm_epsilon":
             self.net.eval()
@@ -212,7 +213,7 @@ class VecMol(nn.Module):
 
     def _sample_ddpm(self, config: dict, delete_net: bool, code_stats: dict, debug: bool = False):  # noqa: ARG002
         """
-        DDPM采样方法
+        DDPM sampling method.
         """
         codes_all = []
         n_samples = config.get("ddpm", {}).get("n_samples", 100)
@@ -224,14 +225,14 @@ class VecMol(nn.Module):
             for _ in tqdm(range(0, n_samples, batch_size)):
                 current_batch_size = min(batch_size, n_samples - len(codes_all))
 
-                # 定义DDPM采样形状 [batch_size, N*N*N, code_dim]
+                # Define DDPM sampling shape [batch_size, N*N*N, code_dim]
                 shape = (current_batch_size, self.grid_size**3, config["decoder"]["code_dim"])
 
-                # DDPM采样
+                # DDPM sampling
                 codes_batch = self.sample_ddpm(shape, progress=False)
                 codes_all.append(codes_batch.cpu())
 
-                # 清理GPU内存
+                # Clear GPU memory
                 del codes_batch
                 torch.cuda.empty_cache()
 
@@ -248,12 +249,12 @@ class VecMol(nn.Module):
         codes = torch.cat(codes_all, dim=0)
         print(f">> Generated {codes.size(0)} codes")
 
-        # 添加调试信息：检查codes的维度和内容
+        # Debug: check codes shape and content
         print(f">> Codes shape: {codes.shape}")
         print(f">> Codes dtype: {codes.dtype}")
         print(f">> Codes device: {codes.device}")
 
-        # 检查codes是否包含NaN/Inf
+        # Check codes for NaN/Inf
         if torch.isnan(codes).any():
             print(">> WARNING: codes contains NaN values!")
             nan_count = torch.isnan(codes).sum().item()
@@ -264,10 +265,10 @@ class VecMol(nn.Module):
             inf_count = torch.isinf(codes).sum().item()
             print(f">> Inf count: {inf_count}")
 
-        # 检查codes的数值范围（normalized）
+        # Check codes value range (normalized)
         print(f">> Codes min: {codes.min().item():.6f}, max: {codes.max().item():.6f}")
 
-        # 如果提供了code_stats，进行unnormalization
+        # If code_stats provided, unnormalize
         if code_stats is not None:
             print(">> Unnormalizing codes...")
             codes = unnormalize_code(codes, code_stats)
@@ -275,7 +276,7 @@ class VecMol(nn.Module):
         else:
             print(">> No code_stats provided, returning normalized codes")
 
-        # 清理内存
+        # Clear memory
         del codes_all
         torch.cuda.empty_cache()
 

@@ -30,8 +30,6 @@ This script can be used for both field type evaluation (stage1) and neural field
 """
 
 import os
-# 注意：在spawn模式下，子进程会重新执行这个脚本
-# 如果环境变量_WORKER_GPU_ID已设置，说明这是worker子进程，需要先设置CUDA_VISIBLE_DEVICES
 from vecmol.utils.misc import setup_worker_gpu_environment
 setup_worker_gpu_environment()
 
@@ -55,7 +53,6 @@ from vecmol.utils.misc import (
     create_worker_process_with_gpu,
     distribute_tasks_to_gpus
 )
-import multiprocessing
 import threading
 
 def compute_rmsd(coords1: torch.Tensor, coords2: torch.Tensor) -> float:
@@ -66,7 +63,6 @@ def compute_rmsd(coords1: torch.Tensor, coords2: torch.Tensor) -> float:
     if coords1.device != coords2.device:
         coords2 = coords2.to(coords1.device)
     
-    # 确保类型一致（Float32）
     if coords1.dtype != coords2.dtype:
         coords2 = coords2.to(coords1.dtype)
     
@@ -76,28 +72,28 @@ def compute_rmsd(coords1: torch.Tensor, coords2: torch.Tensor) -> float:
     return float(rmsd.item())
 
 
-# 全局锁，用于线程安全的CSV写入
+# Global lock for thread-safe CSV writing
 csv_write_lock = threading.Lock()
 
 
 def worker_process(gpu_id, physical_gpu_id, tasks, result_queue):
     """
-    Worker进程函数，处理分配给特定GPU的任务
-    必须在模块级别定义，以便在spawn模式下可以被pickle
+    Worker process function, handling tasks assigned to specific GPUs
+    Must be defined at module level, so it can be pickled in spawn mode
     
-    注意：在spawn模式下，子进程会重新执行整个脚本
-    我们通过环境变量_WORKER_GPU_ID在脚本执行前设置CUDA_VISIBLE_DEVICES
+    Note: In spawn mode, the subprocess will re-execute the entire script
+    We set CUDA_VISIBLE_DEVICES through the environment variable _WORKER_GPU_ID before script execution
     """
-    # 注意：CUDA_VISIBLE_DEVICES已经在脚本开头通过环境变量_WORKER_GPU_ID设置了
-    # 这里torch已经被导入并使用了正确的CUDA_VISIBLE_DEVICES设置
+    # Note: CUDA_VISIBLE_DEVICES has already been set through the environment variable _WORKER_GPU_ID in the script开头
+    # Here torch has already been imported and uses the correct CUDA_VISIBLE_DEVICES setting
     
-    # 验证GPU设置
+    # Verify GPU settings
     if torch.cuda.is_available():
         num_visible_gpus = torch.cuda.device_count()
         if num_visible_gpus != 1:
             print(f"Warning: Expected 1 GPU after setting CUDA_VISIBLE_DEVICES={physical_gpu_id}, but got {num_visible_gpus}")
     
-    # 处理所有分配给这个GPU的任务
+    # Process all tasks assigned to this GPU
     for task in tasks:
         try:
             result = process_single_molecule(task)
@@ -107,39 +103,39 @@ def worker_process(gpu_id, physical_gpu_id, tasks, result_queue):
 
 def process_single_molecule(args):
     """
-    处理单个分子的函数，用于多进程并行处理
+    Function for processing a single molecule, for multi-process parallel processing
     
     Args:
-        args: 包含所有必要参数的元组
+        args: Tuple containing all necessary parameters
             (sample_idx, gpu_id, method_config, field_mode, field_method, 
              output_dir, csv_path, mol_save_dir, data_dir, dset_name, elements,
              encoder_path, decoder_path, full_config_dict)
     
     Returns:
-        dict: 处理结果
+        dict: Processing results
     """
     (sample_idx, logical_gpu_id, physical_gpu_id, method_config, field_mode, field_method, 
      output_dir, csv_path, mol_save_dir, data_dir, dset_name, elements,
      encoder_path, decoder_path, full_config_dict) = args
     
-    # 将字符串路径转换为Path对象
+    # Convert string paths to Path objects
     output_dir = Path(output_dir)
     mol_save_dir = Path(mol_save_dir)
     csv_path = Path(csv_path)
     
     try:
-        # 注意：CUDA_VISIBLE_DEVICES已经在worker_process中设置
-        # 这里不需要再次设置，因为每个worker进程已经在启动时设置了
+        # Note: CUDA_VISIBLE_DEVICES has already been set in worker_process
+        # Here we do not need to set it again, because each worker process has already set it when it started
         import torch
         
-        # 加载配置
+        # Load configuration
         from omegaconf import DictConfig, OmegaConf
         config = OmegaConf.create(full_config_dict)
         method_config_obj = OmegaConf.create(method_config)
         
-        # 在子进程中重新创建数据集（因为dataset对象不能序列化）
+        # Re-create dataset in subprocess (because dataset object cannot be serialized)
         default_converter = create_gnf_converter(full_config_dict)
-        # 从dset配置中读取atom_distance_threshold，如果没有则使用默认值0.5
+        # Read atom_distance_threshold from dset configuration, if not set, use default value 0.5
         atom_distance_threshold = full_config_dict.get("dset", {}).get("atom_distance_threshold", 0.5)
         dataset = FieldDataset(
             gnf_converter=default_converter,
@@ -152,27 +148,25 @@ def process_single_molecule(args):
             resolution=config.dset.resolution,
             grid_dim=config.dset.grid_dim,
             sample_full_grid=config.dset.get('sample_full_grid', False),
-            debug_one_mol=config.get('debug_one_mol', False),
-            debug_subset=config.dset.get('debug_subset', False),
             atom_distance_threshold=atom_distance_threshold,
         )
         
-        # 确保LMDB连接在子进程中正确建立（spawn模式下需要）
-        # 在spawn模式下，每个子进程都需要重新建立LMDB连接
+        # Ensure LMDB connection is correctly established in subprocess (required in spawn mode)
+        # In spawn mode, each subprocess needs to re-establish LMDB connection
         if hasattr(dataset, 'use_lmdb') and dataset.use_lmdb:
-            # 强制重新连接，确保每个子进程都有独立的连接
+            # Force re-connection, ensure each subprocess has independent connection
             if dataset.db is not None:
                 try:
-                    # 检查连接是否有效
+                    # Check if connection is valid
                     with dataset.db.begin() as txn:
                         txn.stat()
                 except Exception:
-                    # 连接无效，关闭并重新连接
+                    # Connection is invalid, close and reconnect
                     dataset._close_db()
             if dataset.db is None:
                 dataset._connect_db()
         
-        # 加载数据集样本（带重试机制）
+        # Load dataset sample (with retry mechanism)
         max_retries = 3
         for retry in range(max_retries):
             try:
@@ -180,7 +174,7 @@ def process_single_molecule(args):
                 break
             except Exception as e:
                 if retry < max_retries - 1:
-                    # 如果是LMDB错误，尝试重新连接
+                    # If it is LMDB error, try to reconnect
                     if "lmdb" in str(e).lower() or "closed" in str(e).lower() or "deleted" in str(e).lower():
                         if hasattr(dataset, 'use_lmdb') and dataset.use_lmdb:
                             dataset._close_db()
@@ -191,10 +185,10 @@ def process_single_molecule(args):
         gt_coords = sample.pos
         gt_types = sample.x
         
-        # 创建converter
+        # Create converter
         converter = create_gnf_converter(method_config)
         
-        # 初始化decoder和codes
+        # Initialize decoder and codes
         codes = None
         decoder = None
         
@@ -222,14 +216,14 @@ def process_single_molecule(args):
             codes = dummy_codes
             
         elif field_mode == 'nf_field':
-            # 加载encoder和decoder（每个进程独立加载）
+            # Load encoder and decoder (each process loads independently)
             encoder, decoder = load_neural_field(encoder_path, config)
             encoder = encoder.cuda()
             decoder = decoder.cuda()
             encoder.eval()
             decoder.eval()
             
-            # 编码当前分子
+            # Encode current molecule
             from torch_geometric.data import Data, Batch
             data = Data(
                 pos=sample.pos,
@@ -243,13 +237,13 @@ def process_single_molecule(args):
                 batch_codes = encoder(batch_pyg)  # [1, grid_size**3, code_dim]
                 codes = batch_codes[0:1]
         
-        # 从配置中读取保存参数
+        # Read save parameters from configuration
         autoregressive_config = method_config.get("converter", {}).get("autoregressive_clustering", {})
         save_clustering_history = autoregressive_config.get("enable_clustering_history", False)
         save_gradient_ascent_sdf = autoregressive_config.get("save_gradient_ascent_sdf", False)
         enable_timing = autoregressive_config.get("enable_timing", False)
         
-        # 构建gnf2mol调用参数
+        # Build gnf2mol call parameters
         gnf2mol_kwargs = {
             "decoder": decoder,
             "codes": codes,
@@ -270,13 +264,13 @@ def process_single_molecule(args):
         
         recon_coords, recon_types = converter.gnf2mol(**gnf2mol_kwargs)
         
-        # 处理结果
+        # Process results
         recon_coords_device = recon_coords[0].to(gt_coords.device)
         rmsd = compute_rmsd(gt_coords, recon_coords_device)
         atom_count_mismatch = gt_coords.shape[0] != recon_coords[0].shape[0]
         original_size = gt_coords.shape[0]
         
-        # 构建结果行
+        # Build result row
         result_row = {
             'sample_idx': sample_idx,
             'field_mode': field_mode,
@@ -286,9 +280,9 @@ def process_single_molecule(args):
             'atom_count_mismatch': atom_count_mismatch
         }
         
-        # 为nf_field模式添加原子统计信息
+        # Add atomic statistics for nf_field mode
         if field_mode == 'nf_field':
-            elements = elements  # 使用传入的elements参数
+            elements = elements  # Use input elements parameter
             for j, element in enumerate(elements):
                 count = (gt_types == j).sum().item()
                 result_row[f'gt_{element}_count'] = count
@@ -299,7 +293,7 @@ def process_single_molecule(args):
                 count = (valid_recon_types == j).sum().item()
                 result_row[f'recon_{element}_count'] = count
         
-        # 先保存分子坐标和类型（如果失败，不写入CSV）
+        # Save molecule coordinates and types first (if failed, do not write to CSV)
         mol_file = mol_save_dir / f"sample_{sample_idx:04d}_{field_method}.npz"
         try:
             np.savez(mol_file, 
@@ -308,37 +302,36 @@ def process_single_molecule(args):
                     gt_coords=gt_coords.cpu().numpy(),
                     rmsd=rmsd)
         except Exception as save_error:
-            # 如果保存文件失败，抛出异常，让外层except处理
+            # If saving file fails, raise exception, let outer except handle it
             raise Exception(f"Failed to save molecule file: {save_error}") from save_error
         
-        # 保存重建的分子为 SDF 文件
+        # Save reconstructed molecule as SDF file
         try:
-            # 获取重建的坐标和类型
+            # Get reconstructed coordinates and types
             recon_coords_np = recon_coords_device.cpu().numpy()
             recon_types_np = recon_types[0].cpu().numpy()
             
-            # 生成 SDF 字符串
+            # Generate SDF string
             sdf_string = xyz_to_sdf(recon_coords_np, recon_types_np, elements)
             
             if sdf_string:
-                # 保存 SDF 文件
+                # Save SDF file
                 sdf_file = mol_save_dir / f"sample_{sample_idx:04d}_{field_method}.sdf"
                 with open(sdf_file, 'w', encoding='utf-8') as f:
                     f.write(sdf_string)
             else:
-                # 如果没有有效原子，记录警告但不中断处理
+                # If no valid atoms, record warning but do not interrupt processing
                 print(f"Warning: No valid atoms for SDF file generation (sample {sample_idx}, method {field_method})")
         except Exception as sdf_error:
-            # 如果 SDF 生成失败，记录错误但不中断处理流程
+            # If SDF generation fails, record error but do not interrupt processing
             print(f"Warning: Failed to save SDF file for sample {sample_idx} with {field_method}: {sdf_error}")
         
-        # 返回结果，不在子进程中写入CSV（避免多进程写入冲突）
-        # CSV写入将在主进程统一进行
+        # Return results, do not write to CSV in subprocess (to avoid multi-process write conflicts)
         return {
             'success': True, 
             'sample_idx': sample_idx, 
             'rmsd': rmsd,
-            'result_row': result_row  # 包含完整的结果行数据
+            'result_row': result_row
         }
         
     except Exception as e:
@@ -346,7 +339,7 @@ def process_single_molecule(args):
         import traceback
         traceback.print_exc()
         
-        # 线程安全地写入错误结果
+        # Thread-safe write error results
         error_row = {
             'sample_idx': sample_idx,
             'field_mode': field_mode,
@@ -365,39 +358,36 @@ def process_single_molecule(args):
             for element in elements:
                 error_row[f'recon_{element}_count'] = 0
         
-        # 返回错误结果，不在子进程中写入CSV（避免多进程写入冲突）
-        # CSV写入将在主进程统一进行
+        # Return error results, do not write to CSV in subprocess (to avoid multi-process write conflicts)
         return {
             'success': False, 
             'sample_idx': sample_idx, 
             'error': str(e),
-            'error_row': error_row  # 包含完整的错误行数据
+            'error_row': error_row
         }
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="field_recon_qm9")
 # @hydra.main(version_base=None, config_path="configs", config_name="field_recon_drugs")
 def main(config: DictConfig) -> None:
-    # 设置全局随机种子
     seed = config.get('seed', 1234)
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    # 确保CUDA操作的确定性
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-    # 设置PyTorch的确定性模式（PyTorch 1.7+）
+    # Set PyTorch deterministic mode (PyTorch 1.7+)
     try:
         torch.use_deterministic_algorithms(True, warn_only=True)
     except AttributeError:
-        # 旧版本PyTorch不支持此选项
+        # Old version PyTorch does not support this option
         pass
-    # 设置环境变量以确保完全确定性
+    # Set environment variables to ensure full determinism
     os.environ['PYTHONHASHSEED'] = str(seed)
-    os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'  # 确保CUDA操作的确定性
-    
-    # 设置PyTorch内存优化环境变量
+    os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+
+    # Set PyTorch memory optimization environment variables
     os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True,max_split_size_mb:128'
     
     # 0. Define field method (converter), save path (gt_field version, dataset name, )
@@ -407,7 +397,7 @@ def main(config: DictConfig) -> None:
     field_mode = config.get('field_mode', 'gt_field')
     
     # Set output directory based on field mode
-    # 使用与vecmol目录平级的exps目录
+    # Use exps directory at the same level as vecmol directory
     exps_root = Path(__file__).parent.parent / "exps"
     
     if field_mode == 'gt_field':
@@ -434,13 +424,12 @@ def main(config: DictConfig) -> None:
     default_converter = create_gnf_converter(config_dict)
     
     # Load dataset using OmegaConf - much more elegant!
-    # 从dset配置中读取atom_distance_threshold，如果没有则使用默认值0.5
     atom_distance_threshold = config_dict.get("dset", {}).get("atom_distance_threshold", 0.5)
     
-    # 将 data_dir 转换为绝对路径（因为 Hydra 会改变工作目录）
+    # Convert data_dir to absolute path (because Hydra changes working directory)
     data_dir = config.dset.data_dir
     if not os.path.isabs(data_dir):
-        # 如果是相对路径，基于项目根目录转换为绝对路径
+        # If it is relative path, convert to absolute path based on project root directory
         data_dir = str(PROJECT_ROOT / data_dir)
     
     dataset = FieldDataset(
@@ -454,35 +443,33 @@ def main(config: DictConfig) -> None:
         resolution=config.dset.resolution,
         grid_dim=config.dset.grid_dim,
         sample_full_grid=config.dset.get('sample_full_grid', False),
-        debug_one_mol=config.get('debug_one_mol', False),
-        debug_subset=config.get('debug_subset', False),
         atom_distance_threshold=atom_distance_threshold,
     )
-    # 处理 field_methods，支持 OmegaConf 的 ListConfig 类型
+    # Process field_methods, support OmegaConf ListConfig type
     field_methods_raw = config.get('field_methods', ['gaussian_mag', 'tanh'])
     if isinstance(field_methods_raw, (list, tuple, ListConfig)):
-        # 将 ListConfig 转换为普通 Python list
+        # Convert ListConfig to normal Python list
         if isinstance(field_methods_raw, ListConfig):
             field_methods = OmegaConf.to_container(field_methods_raw, resolve=True)
         else:
             field_methods = list(field_methods_raw)
     else:
-        # 如果不是列表类型，转换为列表
+        # If not list type, convert to list
         field_methods = [field_methods_raw] if field_methods_raw is not None else ['gaussian_mag', 'tanh']
     
     # For gt_field and nf_field modes, load dataset for reconstruction
-    # 优先检查是否手动指定了样本索引
+    # Check if manually specified sample indices first
     manual_sample_indices = config.get('sample_indices')
     
     if manual_sample_indices is not None:
-        # 如果手动指定了样本索引，使用指定的索引
-        # 处理 OmegaConf 的 ListConfig 类型，转换为 Python list
+        # If manually specified sample indices, use specified indices
+        # Process OmegaConf ListConfig type, convert to Python list
         if isinstance(manual_sample_indices, (list, tuple, ListConfig)):
-            # 将 ListConfig 转换为普通 Python list
+            # Convert ListConfig to normal Python list
             if isinstance(manual_sample_indices, ListConfig):
                 manual_sample_indices = OmegaConf.to_container(manual_sample_indices, resolve=True)
             sample_indices = [int(idx) for idx in manual_sample_indices]
-            # 验证索引是否在有效范围内
+            # Verify if indices are in valid range
             total_samples = len(dataset)
             valid_indices = [idx for idx in sample_indices if 0 <= idx < total_samples]
             if len(valid_indices) != len(sample_indices):
@@ -490,24 +477,24 @@ def main(config: DictConfig) -> None:
                 print(f"Warning: Some sample indices are out of range [0, {total_samples-1}]: {invalid_indices}")
                 print(f"Using {len(valid_indices)} valid indices out of {len(sample_indices)} specified")
             sample_indices = valid_indices
-            sample_indices.sort()  # 保持索引顺序，便于调试
+            sample_indices.sort()  # Keep index order, for debugging
             print(f"Using manually specified sample indices: {sample_indices}")
         else:
             raise ValueError(f"sample_indices must be a list, tuple, or ListConfig, got {type(manual_sample_indices)}")
     else:
-        # 如果没有手动指定，使用max_samples进行随机采样
+        # If not manually specified, use max_samples for random sampling
         max_samples = config.get('max_samples')
         if max_samples is None or max_samples <= 0:
             max_samples = len(dataset)
             sample_indices = list(range(len(dataset)))
         else:
-            # 从验证集中随机采样max_samples个分子，保留原始索引
+            # Randomly sample max_samples molecules from validation set, preserve original indices
             total_samples = len(dataset)
             if max_samples >= total_samples:
                 sample_indices = list(range(total_samples))
             else:
                 sample_indices = random.sample(range(total_samples), max_samples)
-                sample_indices.sort()  # 保持索引顺序，便于调试
+                sample_indices.sort()  # Keep index order, for debugging
     
     print(f"Evaluating {len(sample_indices)} molecules (sampled from {len(dataset)} total) with field_mode: {field_mode}, methods: {field_methods}")
     print(f"Sample indices: {sample_indices[:10]}{'...' if len(sample_indices) > 10 else ''}")
@@ -521,7 +508,7 @@ def main(config: DictConfig) -> None:
         encoder, decoder = load_neural_field(config["nf_pretrained_path"], config)
         print("Loaded neural field encoder/decoder")
         
-        # 移动模型到GPU并设置为评估模式
+        # Move model to GPU and set to evaluation mode
         encoder = encoder.cuda()
         decoder = decoder.cuda()
         encoder.eval()
@@ -536,20 +523,20 @@ def main(config: DictConfig) -> None:
     else:
         raise ValueError(f"Unsupported field_mode: {field_mode}. Only 'gt_field' and 'nf_field' are supported.")
     
-    # 根据field_mode决定CSV列
+    # Determine CSV columns based on field_mode
     if field_mode == 'gt_field':
-        # gt_field模式保持原有列
+        # gt_field mode keeps original columns
         csv_columns = ['sample_idx', 'field_mode', 'field_method', 'rmsd', 'size', 'atom_count_mismatch']
     elif field_mode == 'nf_field':
-        # nf_field模式添加原子统计信息
+        # nf_field mode adds atomic statistics
         elements = config.dset.elements  # ["C", "H", "O", "N", "F"]
         csv_columns = ['sample_idx', 'field_mode', 'field_method', 'rmsd', 'size', 'atom_count_mismatch']
         
-        # 添加原始分子每种元素的原子数量
+        # Add atomic count for each element in original molecule
         for element in elements:
             csv_columns.append(f'gt_{element}_count')
         
-        # 添加重建分子每种元素的原子数量
+        # Add atomic count for each element in reconstructed molecule
         for element in elements:
             csv_columns.append(f'recon_{element}_count')
     
@@ -562,28 +549,28 @@ def main(config: DictConfig) -> None:
     mol_save_dir = output_dir / "molecule"
     mol_save_dir.mkdir(parents=True, exist_ok=True)
     
-    # 解析GPU配置（使用共用函数）
+    # Parse GPU configuration (using shared function)
     main_gpu_list, main_cuda_visible = parse_gpu_list_from_config(config, default_use_all=True)
     num_gpus = len(main_gpu_list)
     use_multi_gpu = config.get('use_multi_gpu', True) and num_gpus > 1
     
     if use_multi_gpu:
         print(f"Detected {num_gpus} GPUs, using multi-GPU parallel processing")
-        # 将分子索引分配给不同的GPU（使用共用函数）
+        # Distribute molecule indices to different GPUs (using shared function)
         gpu_assignments = distribute_tasks_to_gpus(sample_indices, num_gpus)
         print(f"GPU assignments (logical GPU ID -> sample count): {[(gpu_id, len(indices)) for gpu_id, indices in gpu_assignments.items()]}")
         
-        # 准备多进程参数
+        # Prepare multi-process parameters
         nf_pretrained_path = config.get("nf_pretrained_path") if field_mode == 'nf_field' else None
         
-        # 为每个field_method和每个GPU创建任务
+        # Create tasks for each field_method and each GPU
         all_tasks = []
         for field_method in field_methods:
             method_config = config_dict.copy()
             method_config['converter']['gradient_field_method'] = field_method
             
             for logical_gpu_id, gpu_sample_indices in gpu_assignments.items():
-                # 获取对应的物理GPU ID
+                # Get corresponding physical GPU ID
                 if main_cuda_visible:
                     physical_gpu_id = main_gpu_list[logical_gpu_id]
                 else:
@@ -597,7 +584,6 @@ def main(config: DictConfig) -> None:
                         nf_pretrained_path, nf_pretrained_path, config_dict
                     ))
         
-        # 使用多进程并行处理（使用共用函数）
         setup_multiprocessing_spawn()
         
         num_workers_config = config.get('num_workers', num_gpus)
@@ -607,9 +593,9 @@ def main(config: DictConfig) -> None:
         print(f"Using {num_workers} worker processes for parallel processing")
         print(f"Total tasks: {len(all_tasks)}")
         
-        # 统计每个GPU的任务数量
+        # Count tasks for each GPU
         gpu_task_counts = {}
-        for task in all_tasks[:10]:  # 只检查前10个任务
+        for task in all_tasks[:10]:  # Only check first 10 tasks
             logical_gpu_id = task[1]
             physical_gpu_id = task[2]
             if logical_gpu_id not in gpu_task_counts:
@@ -617,15 +603,15 @@ def main(config: DictConfig) -> None:
             gpu_task_counts[logical_gpu_id]['count'] += 1
         print(f"Task distribution (first 10 tasks): {gpu_task_counts}")
         
-        # 统计所有任务的GPU分布
+        # Count GPU distribution for all tasks
         all_gpu_counts = {}
         for task in all_tasks:
             logical_gpu_id = task[1]
             all_gpu_counts[logical_gpu_id] = all_gpu_counts.get(logical_gpu_id, 0) + 1
         print(f"Task distribution (all tasks): {all_gpu_counts}")
         
-        # 为每个worker创建独立的进程组，每个组处理一个GPU的任务
-        # 我们需要按GPU分组任务，然后为每个GPU创建一个worker进程
+        # Create independent process groups for each worker, each group handles one GPU's tasks
+        # We need to group tasks by GPU, then create a worker process for each GPU
         from collections import defaultdict
         tasks_by_gpu = defaultdict(list)
         for task in all_tasks:
@@ -634,14 +620,14 @@ def main(config: DictConfig) -> None:
         
         print(f"Tasks grouped by GPU: {[(gpu_id, len(tasks)) for gpu_id, tasks in tasks_by_gpu.items()]}")
         
-        # 使用Process而不是Pool，这样可以在每个进程启动时设置CUDA_VISIBLE_DEVICES
+        # Use Process instead of Pool, so that CUDA_VISIBLE_DEVICES can be set when each process starts
         from multiprocessing import Process, Queue
         import queue as queue_module
         
         result_queue = Queue()
         processes = []
         
-        # 为每个GPU创建worker进程（使用共用函数）
+        # Create worker processes for each GPU (using shared function)
         for logical_gpu_id, tasks in tasks_by_gpu.items():
             physical_gpu_id = main_gpu_list[logical_gpu_id] if main_cuda_visible else logical_gpu_id
             p = create_worker_process_with_gpu(
@@ -652,7 +638,7 @@ def main(config: DictConfig) -> None:
             )
             processes.append(p)
         
-        # 收集结果并实时写入CSV（在主进程中，避免多进程写入冲突）
+        # Collect results and write to CSV in real-time (in main process, to avoid multi-process write conflicts)
         results = []
         completed = 0
         total_tasks = len(all_tasks)
@@ -663,7 +649,7 @@ def main(config: DictConfig) -> None:
                     results.append(result)
                     completed += 1
                     
-                    # 实时写入CSV（在主进程中，避免多进程写入冲突）
+                    # Write to CSV in real-time (in main process, to avoid multi-process write conflicts)
                     if result.get('success', False) and 'result_row' in result:
                         result_df = pd.DataFrame([result['result_row']])
                         result_df.to_csv(csv_path, mode='a', header=False, index=False)
@@ -673,34 +659,34 @@ def main(config: DictConfig) -> None:
                     
                     pbar.update(1)
                 except queue_module.Empty:
-                    # 检查进程是否还在运行
+                    # Check if processes are still running
                     if all(not p.is_alive() for p in processes):
                         break
         
-        # 等待所有进程完成
+        # Wait for all processes to complete
         for p in processes:
             p.join()
         
-        # 统计结果
+        # Count results
         success_count = sum(1 for r in results if r.get('success', False))
         print(f"Successfully processed {success_count}/{len(results)} molecules")
         
     else:
-        # 单GPU或单进程处理（保持原有逻辑）
+        # Single GPU or single process mode (keep original logic)
         print(f"Using single GPU/process mode")
         batch_size = config.get('batch_size', 1)
         print(f"Using batch_size={batch_size} for molecular-level parallelization")
         
-        # 批次处理分子
+        # Batch process molecules
         total_batches = (len(sample_indices) + batch_size - 1) // batch_size
         for batch_idx in tqdm(range(total_batches), desc="Processing batches"):
-            # 计算当前批次的实际大小和索引
+            # Calculate actual size and indices for current batch
             start_idx = batch_idx * batch_size
             end_idx = min(start_idx + batch_size, len(sample_indices))
             current_batch_indices = sample_indices[start_idx:end_idx]
             current_batch_size = len(current_batch_indices)
             
-            # 批次加载数据
+            # Batch load data
             batch_samples = []
             batch_gt_coords = []
             batch_gt_types = []
@@ -712,7 +698,7 @@ def main(config: DictConfig) -> None:
                 batch_gt_coords.append(sample.pos)
                 batch_gt_types.append(sample.x)
             
-            # 对于nf_field模式，批次编码
+            # For nf_field mode, batch encode
             if field_mode == 'nf_field':
                 from torch_geometric.data import Data, Batch
                 batch_data_list = []
@@ -731,21 +717,21 @@ def main(config: DictConfig) -> None:
                     batch_codes = encoder(batch_pyg)  # [batch_size, grid_size**3, code_dim]
                     batch_codes_list = [batch_codes[i:i+1] for i in range(current_batch_size)]
             
-            # 对每个field_method处理
+            # Process each field_method
             for field_method in field_methods:
                 try:
-                    # 创建converter with specific field method
+                    # Create converter with specific field method
                     method_config = config_dict.copy()
                     method_config['converter']['gradient_field_method'] = field_method
                     converter = create_gnf_converter(method_config)
                     
-                    # 批次处理当前batch的所有分子
+                    # Batch process all molecules in current batch
                     for i, sample_idx in enumerate(current_batch_indices):
                         try:
                             gt_coords = batch_gt_coords[i]
                             gt_types = batch_gt_types[i]
                             
-                            # 初始化decoder和codes变量
+                            # Initialize decoder and codes variables
                             codes = None
                         
                             if field_mode == 'gt_field':
@@ -772,16 +758,16 @@ def main(config: DictConfig) -> None:
                                 codes = dummy_codes
                                 
                             elif field_mode == 'nf_field':
-                                decoder = decoder  # 使用全局decoder
+                                decoder = decoder  # Use global decoder
                                 codes = batch_codes_list[i]  # 使用批次编码的对应分子
                             
-                            # 从配置中读取保存参数
+                            # Read saved parameters from configuration
                             autoregressive_config = config_dict.get("converter", {}).get("autoregressive_clustering", {})
                             save_clustering_history = autoregressive_config.get("enable_clustering_history", False)
                             save_gradient_ascent_sdf = autoregressive_config.get("save_gradient_ascent_sdf", False)
                             enable_timing = autoregressive_config.get("enable_timing", False)
                             
-                            # 构建gnf2mol调用参数
+                            # Build gnf2mol call parameters
                             gnf2mol_kwargs = {
                                 "decoder": decoder,
                                 "codes": codes,
@@ -802,7 +788,7 @@ def main(config: DictConfig) -> None:
                             
                             recon_coords, recon_types = converter.gnf2mol(**gnf2mol_kwargs)
                             
-                            # 处理结果
+                            # Process results
                             recon_coords_device = recon_coords[0].to(gt_coords.device)
                             rmsd = compute_rmsd(gt_coords, recon_coords_device)
                             atom_count_mismatch = gt_coords.shape[0] != recon_coords[0].shape[0]
@@ -818,7 +804,7 @@ def main(config: DictConfig) -> None:
                                 'atom_count_mismatch': atom_count_mismatch
                             }
                             
-                            # 为nf_field模式添加原子统计信息
+                            # Add atomic statistics for nf_field mode
                             if field_mode == 'nf_field':
                                 elements = config.dset.elements
                                 for j, element in enumerate(elements):
@@ -843,28 +829,28 @@ def main(config: DictConfig) -> None:
                                     gt_coords=gt_coords.cpu().numpy(),
                                     rmsd=rmsd)
                             
-                            # 保存重建的分子为 SDF 文件
+                            # Save reconstructed molecule as SDF file
                             try:
-                                # 获取重建的坐标和类型
+                                # Get reconstructed coordinates and types
                                 recon_coords_np = recon_coords_device.cpu().numpy()
                                 recon_types_np = recon_types[0].cpu().numpy()
                                 
-                                # 获取元素列表
+                                # Get element list
                                 elements_list = config.dset.elements
                                 
-                                # 生成 SDF 字符串
+                                # Generate SDF string
                                 sdf_string = xyz_to_sdf(recon_coords_np, recon_types_np, elements_list)
                                 
                                 if sdf_string:
-                                    # 保存 SDF 文件
+                                    # Save SDF file
                                     sdf_file = mol_save_dir / f"sample_{sample_idx:04d}_{field_method}.sdf"
                                     with open(sdf_file, 'w', encoding='utf-8') as f:
                                         f.write(sdf_string)
                                 else:
-                                    # 如果没有有效原子，记录警告但不中断处理
+                                    # If no valid atoms, record warning but do not interrupt processing
                                     print(f"Warning: No valid atoms for SDF file generation (sample {sample_idx}, method {field_method})")
                             except Exception as sdf_error:
-                                # 如果 SDF 生成失败，记录错误但不中断处理流程
+                                # If SDF generation fails, record error but do not interrupt processing flow
                                 print(f"Warning: Failed to save SDF file for sample {sample_idx} with {field_method}: {sdf_error}")
                         
                         except Exception as e:

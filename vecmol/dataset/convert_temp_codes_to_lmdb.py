@@ -5,15 +5,15 @@
 
 使用方法:
     python convert_temp_codes_to_lmdb.py \
-        --temp_dir /data/huayuchen/Neurl-voxel/exps/neural_field/nf_drugs/20260113/lightning_logs/version_0/checkpoints/code_no_aug/train \
-        --output_dir /data/huayuchen/Neurl-voxel/exps/neural_field/nf_drugs/20260113/lightning_logs/version_0/checkpoints/code_no_aug/train \
+        --temp_dir exps/neural_field/nf_drugs/20260113/lightning_logs/version_0/checkpoints/code_no_aug/train \
+        --output_dir exps/neural_field/nf_drugs/20260113/lightning_logs/version_0/checkpoints/code_no_aug/train \
         --num_augmentations 1 \
         --aug_idx 0 \
         --delete_batches  # 可选：转换后删除batch文件
     
     python convert_temp_codes_to_lmdb.py \
-    --temp_dir /data/huayuchen/Neurl-voxel/exps/neural_field/nf_drugs/20260113/lightning_logs/version_0/checkpoints/code_no_aug/train \
-    --output_dir /data/huayuchen/Neurl-voxel/exps/neural_field/nf_drugs/20260113/lightning_logs/version_0/checkpoints/code_no_aug/train \
+    --temp_dir exps/neural_field/nf_drugs/20260113/lightning_logs/version_0/checkpoints/code_no_aug/train \
+    --output_dir exps/neural_field/nf_drugs/20260113/lightning_logs/version_0/checkpoints/code_no_aug/train \
     --num_augmentations 1 \
     --aug_idx 0 \
     --only_weights \

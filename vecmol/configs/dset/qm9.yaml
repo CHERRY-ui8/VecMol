@@ -27,3 +27,21 @@ num_workers: 8
 batch_size: 16
 lr_enc: 2e-4
 lr_dec: 2e-4 # 非微调模式下是2e-4
+
+# Code / LMDB 数据相关（train_fm 等使用）
+# num_augmentations: 选择 LMDB 的单一来源，train_fm 从 dset 读取
+smooth_sigma: 0.5
+normalize_codes: 1
+on_the_fly: False  # use True to compute codes on the fly from neural field
+use_augmented_codes: False
+num_augmentations: 1  # null 或具体数字，用于 codes_aug{N}.lmdb
+
+# 位置权重（train_fm 等使用，可被顶层 config 覆盖）
+position_weight:
+  enabled: False
+  radius: 3.0
+  alpha: 0.5
+# use_sharded_lmdb 未设置则自动检测
+codes_dir_no_aug: "exps/neural_field/nf_qm9/20260124/lightning_logs/version_0/checkpoints/code_no_aug/"
+codes_dir_with_aug: "exps/neural_field/nf_qm9/20260124/lightning_logs/version_0/checkpoints/codes_no_shuffle/"
+# code_stats_path: (可选)

@@ -1,9 +1,7 @@
 import sys
-sys.path.append("..")  # 添加上级目录到sys.path以便导入模块
+sys.path.append("..")
 
 import os
-# 注意：在spawn模式下，子进程会重新执行这个脚本
-# 如果环境变量_WORKER_GPU_ID已设置，说明这是worker子进程，需要先设置CUDA_VISIBLE_DEVICES
 from vecmol.utils.misc import setup_worker_gpu_environment
 setup_worker_gpu_environment()
 
@@ -30,10 +28,6 @@ from multiprocessing import Queue
 import time
 import queue
 
-# ============================================================================
-# GPU Worker进程：长期运行，从Queue取任务批量处理
-# 模型加载在worker进程内部完成，不再需要全局变量
-# ============================================================================
 
 def gpu_worker_process(
     logical_gpu_id: int,
@@ -45,30 +39,30 @@ def gpu_worker_process(
     result_queue: Queue
 ):
     """
-    GPU Worker进程：长期运行，从Queue取任务批量处理
+    GPU Worker process: long-running, batch processing tasks from Queue
     
     Args:
-        logical_gpu_id: 逻辑GPU ID（在worker进程中的GPU ID，通常是0）
-        physical_gpu_id: 物理GPU ID（在主进程中的实际GPU ID，用于日志）
-        config_dict: 配置字典
-        fm_pretrained_path: VecMol checkpoint路径
-        nf_pretrained_path: Neural field checkpoint路径
-        task_queue: 任务队列（从主进程接收任务）
-        result_queue: 结果队列（向主进程发送结果）
+        logical_gpu_id: Logical GPU ID (GPU ID in worker process, usually 0)
+        physical_gpu_id: Physical GPU ID (actual GPU ID in main process, for logging)
+        config_dict: Configuration dictionary
+        fm_pretrained_path: VecMol checkpoint path
+        nf_pretrained_path: Neural field checkpoint path
+        task_queue: Task queue (from main process to receive tasks)
+        result_queue: Result queue (from worker process to send results to main process)
     
-    注意：CUDA_VISIBLE_DEVICES已经在脚本开头通过环境变量_WORKER_GPU_ID设置了
-    这里torch已经被导入并使用了正确的CUDA_VISIBLE_DEVICES设置
+    Note: CUDA_VISIBLE_DEVICES is set at the beginning of the script via the _WORKER_GPU_ID environment variable.
+    torch is already imported and uses the correct CUDA_VISIBLE_DEVICES setting here.
     """
-    # 验证GPU设置
+    # Verify GPU settings
     if torch.cuda.is_available():
         num_visible_gpus = torch.cuda.device_count()
         if num_visible_gpus != 1:
             print(f"Warning: Expected 1 GPU after setting CUDA_VISIBLE_DEVICES={physical_gpu_id}, but got {num_visible_gpus}")
     
-    # 设置PyTorch内存优化环境变量
+    # Set PyTorch memory optimization environment variable
     os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True,max_split_size_mb:128'
     
-    # 设置随机种子（每个worker独立）
+    # Set random seed (each worker independently)
     import random
     worker_id = multiprocessing.current_process().pid
     seed = int(time.time() * 1000) % 2**31 + worker_id
@@ -79,37 +73,37 @@ def gpu_worker_process(
     
     print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id} (PID {worker_id})] Initializing...")
     
-    # 加载模型（每个worker独立加载）
+    # Load models (each worker independently)
     with torch.no_grad():
         vecmol = create_vecmol(config_dict)
         vecmol, code_stats = load_checkpoint_fm(vecmol, fm_pretrained_path)
         vecmol = vecmol.cuda()
         vecmol.eval()
         
-        # 根据配置决定是否从 diffusion checkpoint 加载 decoder
+        # Decide whether to load decoder from diffusion checkpoint based on config
         load_decoder_from_diffusion = config_dict.get("load_decoder_from_diffusion_checkpoint", False)
         decoder = None
         
         if load_decoder_from_diffusion:
-            # 尝试从 fm_pretrained_path 的 checkpoint 中加载 decoder_state_dict
-            # 如果 joint_finetune 启用了，decoder 应该保存在 diffusion checkpoint 中
+            # Try to load decoder_state_dict from checkpoint in fm_pretrained_path
+            # If joint_finetune is enabled, decoder should be saved in diffusion checkpoint
             try:
                 checkpoint_path = find_checkpoint_path(fm_pretrained_path)
                 lightning_checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
                 
                 if "decoder_state_dict" in lightning_checkpoint:
                     print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id}] Found decoder_state_dict in diffusion checkpoint, loading from there...")
-                    # 从 checkpoint 中获取 config（优先使用 checkpoint 中的 config，如果没有则使用传入的 config）
+                    # Get config from checkpoint (use checkpoint config if available, otherwise use input config)
                     decoder_config = lightning_checkpoint.get("hyper_parameters", config_dict)
                     if decoder_config is None:
                         decoder_config = config_dict
                     
-                    # 创建 decoder 模型
+                    # Create decoder model
                     _, decoder = create_neural_field(decoder_config)
                     
-                    # 加载 decoder state dict
+                    # Load decoder state dict
                     decoder_state_dict = lightning_checkpoint["decoder_state_dict"]
-                    # 处理 _orig_mod. 前缀（如果存在）
+                    # Handle _orig_mod. prefix (if present)
                     new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in decoder_state_dict.items()}
                     decoder.load_state_dict(new_state_dict, strict=True)
                     print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id}] Successfully loaded decoder from diffusion checkpoint")
@@ -122,7 +116,7 @@ def gpu_worker_process(
         else:
             print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id}] load_decoder_from_diffusion_checkpoint=false, loading decoder from neural field checkpoint...")
         
-        # 如果从 diffusion checkpoint 加载失败或配置为不使用，从 neural field checkpoint 加载
+        # If loading from diffusion checkpoint fails or config is set to not use, load from neural field checkpoint
         if decoder is None:
             if nf_pretrained_path is None:
                 raise ValueError("nf_pretrained_path must be specified when not loading decoder from diffusion checkpoint")
@@ -134,24 +128,24 @@ def gpu_worker_process(
     
     print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id}] Models loaded successfully")
     
-    # Worker主循环：持续从Queue取任务并处理
+    # Worker main loop: continuously fetch tasks from Queue and process
     processed_count = 0
     try:
         while True:
             try:
-                # 从队列取任务（timeout避免无限阻塞）
+                # Fetch task from queue (timeout to avoid infinite blocking)
                 try:
                     task = task_queue.get(timeout=1.0)
                 except queue.Empty:
-                    # 检查是否还有任务（通过特殊标记）
+                    # Check if there are any tasks (via special marker)
                     continue
                 
-                # 检查终止信号
+                # Check termination signal
                 if task is None:
                     print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id}] Received termination signal, exiting...")
                     break
                 
-                # 处理任务（GPU计算部分）
+                # Process task (GPU computation part)
                 try:
                     result = process_gpu_batch(
                         task,
@@ -166,7 +160,7 @@ def gpu_worker_process(
                 except Exception as e:
                     print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id}] Error processing task {task.get('task_id', 'unknown')}: {e}")
                     traceback.print_exc()
-                    # 发送错误结果，确保每个任务都有结果返回
+                    # Send error result, ensure each task has a result returned
                     result_queue.put({
                         'success': False,
                         'task_id': task.get('task_id', -1),
@@ -183,7 +177,7 @@ def gpu_worker_process(
             except Exception as e:
                 print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id}] Unexpected error in worker loop: {e}")
                 traceback.print_exc()
-                # 继续运行，不退出worker进程
+                # Continue running, do not exit worker process
                 continue
     finally:
         print(f"[GPU Worker logical={logical_gpu_id}, physical={physical_gpu_id}] Processed {processed_count} tasks, shutting down...")
@@ -198,20 +192,20 @@ def process_gpu_batch(
     worker_id: int = None
 ) -> dict:
     """
-    GPU Worker内部：处理单个任务的GPU计算部分
+    GPU Worker internal: process GPU computation part of single task
     
-    只做GPU计算，不涉及IO操作
+    Only do GPU computation, no IO operations
     
     Args:
-        task: 任务字典
-        vecmol: VecMol模型
-        decoder: Decoder模型
-        code_stats: Code统计信息
-        config_dict: 配置字典
-        worker_id: Worker ID（用于调试）
+        task: Task dictionary
+        vecmol: VecMol model
+        decoder: Decoder model
+        code_stats: Code statistics
+        config_dict: Configuration dictionary
+        worker_id: Worker ID (for debugging)
     
     Returns:
-        dict: 包含GPU计算结果的字典（原始数据，未做IO处理）
+        dict: Dictionary containing GPU computation results (raw data, no IO processing)
         {
             'success': bool,
             'task_id': int,
@@ -220,7 +214,7 @@ def process_gpu_batch(
             'denoised_codes': torch.Tensor (CPU),
             'recon_coords': torch.Tensor (CPU),
             'recon_types': torch.Tensor (CPU),
-            'error': str (如果失败)
+            'error': str (if failed)
         }
     """
     try:
@@ -230,19 +224,19 @@ def process_gpu_batch(
         code_dim = task['code_dim']
         task_id = task['task_id']
         
-        # 1. 创建converter with specific field method
+        # 1. Create converter with specific field method
         method_config = config_dict.copy()
         method_config['converter']['gradient_field_method'] = field_method
         converter = create_gnf_converter(method_config)
         
-        # 2. 生成codes（单个分子，batch_size=1）
+        # 2. Generate codes (single molecule, batch_size=1)
         # DDPM 采样
         shape = (1, grid_size**3, code_dim)
         with torch.no_grad():
             denoised_codes_3d = vecmol.sample_ddpm(shape, code_stats=code_stats, progress=False)
         denoised_codes = denoised_codes_3d.view(1, grid_size**3, code_dim)
         
-        # 3. 重建分子（GPU计算）
+        # 3. Reconstruct molecule (GPU computation)
         recon_coords, recon_types = converter.gnf2mol(
             decoder,
             denoised_codes,
@@ -250,14 +244,14 @@ def process_gpu_batch(
             sample_id=task_id
         )
         
-        # 检查是否有有效原子（-1是填充值）
+        # Check if there are valid atoms (-1 is fill value)
         recon_types_device = recon_types[0]
         valid_mask = recon_types_device != -1
         if not valid_mask.any():
-            # 如果没有有效原子，这是一个失败的重建
+            # If no valid atoms, this is a failed reconstruction
             raise ValueError(f"Reconstruction failed: no valid atoms found for task {task_id} with method {field_method}")
         
-        # 4. 将结果移到CPU（准备传输到主进程）
+        # 4. Move results to CPU (prepare for transmission to main process)
         denoised_codes_cpu = denoised_codes[0].cpu()
         recon_coords_cpu = recon_coords[0].cpu()
         recon_types_cpu = recon_types[0].cpu()
@@ -289,15 +283,15 @@ def main_process_postprocess(
     elements: list
 ) -> dict:
     """
-    主进程：处理GPU Worker返回的原始结果，进行IO操作和后处理
+    Main process: process raw results from GPU Worker, perform IO operations and postprocessing
     
     Args:
-        gpu_result: GPU Worker返回的原始结果
-        mol_save_dir: 分子保存目录
-        elements: 元素列表
+        gpu_result: Raw results from GPU Worker
+        mol_save_dir: Molecule save directory
+        elements: Element list
     
     Returns:
-        dict: 包含完整处理结果的字典（用于CSV写入）
+        dict: Dictionary containing complete processing results (for CSV writing)
     """
     if not gpu_result['success']:
         return {
@@ -312,17 +306,17 @@ def main_process_postprocess(
         field_method = gpu_result['field_method']
         diffusion_method = gpu_result['diffusion_method']
         
-        # 从GPU结果中提取数据
+        # Extract data from GPU results
         denoised_codes = gpu_result['denoised_codes']
         recon_coords = gpu_result['recon_coords']
         recon_types = gpu_result['recon_types']
         gpu_id = gpu_result.get('gpu_id', -1)
         
-        # 转换为numpy
+        # Convert to numpy
         recon_coords_np = recon_coords.numpy()
         recon_types_np = recon_types.numpy()
         
-        # 过滤掉填充的原子（值为-1）
+        # Filter out fill atoms (value -1)
         valid_mask = recon_types_np != -1
         if valid_mask.any():
             recon_coords_np = recon_coords_np[valid_mask]
@@ -330,21 +324,21 @@ def main_process_postprocess(
         
         generated_size = len(recon_coords_np)
         
-        # 生成唯一ID
+        # Generate unique ID
         unique_id = f"{task_id:06d}_{gpu_id}_{int(time.time() * 1000000) % 1000000}"
         generated_idx = task_id
         
-        # 1. 保存codes
+        # 1. Save codes
         code_path = mol_save_dir / f"code_{unique_id}_{field_method}.pt"
         torch.save(denoised_codes, code_path)
         
-        # 2. 生成SDF
+        # 2. Generate SDF
         sdf_string = xyz_to_sdf(recon_coords_np, recon_types_np, elements)
         sdf_path = mol_save_dir / f"genmol_{unique_id}.sdf"
         with open(sdf_path, 'w', encoding='utf-8') as sdf_file:
             sdf_file.write(sdf_string)
         
-        # 3. 计算原子统计
+        # 3. Calculate atom statistics
         result_row = {
             'generated_idx': generated_idx,
             'field_method': field_method,
@@ -356,7 +350,7 @@ def main_process_postprocess(
             count = (recon_types_np == i).sum()
             result_row[f'{element}_count'] = count
         
-        # 4. 保存分子坐标和类型
+        # 4. Save molecule coordinates and types
         mol_file = mol_save_dir / f"generated_{unique_id}_{field_method}.npz"
         np.savez(mol_file, 
                 coords=recon_coords_np,
@@ -473,27 +467,27 @@ def extract_checkpoint_identifier(fm_path: str) -> str:
 
 @hydra.main(config_path="configs", config_name="sample_fm", version_base=None)
 def main(config: DictConfig) -> None:
-    # 设置multiprocessing启动方法（必须在主进程设置）
+    # Set multiprocessing startup method (must be set in main process)
     setup_multiprocessing_spawn()
     
-    # 设置PyTorch内存优化环境变量（主进程）
+    # Set PyTorch memory optimization environment variable (main process)
     os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True,max_split_size_mb:128'
     
-    # 转换配置为字典格式
+    # Convert config to dictionary format
     config_dict = OmegaConf.to_container(config, resolve=True)
     
-    # 解析GPU配置
+    # Parse GPU configuration
     main_gpu_list, _ = parse_gpu_list_from_config(config, default_use_all=True)
     num_gpus = len(main_gpu_list)
     use_multi_gpu = config.get('use_multi_gpu', True) and num_gpus > 1
     
-    # 设置输出目录
+    # Set output directory
     exps_root = Path(__file__).parent.parent / "exps"
     fm_path = config.get("fm_pretrained_path")
     
-    # 如果fm_pretrained_path指向.ckpt文件，需要找到对应的目录
+    # If fm_pretrained_path points to a .ckpt file, need to find the corresponding directory
     if fm_path.endswith('.ckpt'):
-        # 从.ckpt文件路径中提取目录结构
+        # Extract directory structure from .ckpt file path
         fm_path_parts = Path(fm_path).parts
         try:
             vecmol_idx = fm_path_parts.index('vecmol')
@@ -502,10 +496,10 @@ def main(config: DictConfig) -> None:
             else:
                 exp_name = fm_path_parts[vecmol_idx + 1]
         except ValueError:
-            # 如果找不到vecmol，使用父目录的名称
+            # If vecmol is not found, use the name of the parent directory
             exp_name = Path(fm_path).parent.parent.name
     else:
-        # 如果fm_pretrained_path指向目录，直接使用
+        # If fm_pretrained_path points to a directory, use it directly
         fm_path_parts = Path(fm_path).parts
         try:
             vecmol_idx = fm_path_parts.index('vecmol')
@@ -516,23 +510,23 @@ def main(config: DictConfig) -> None:
         except ValueError:
             exp_name = Path(fm_path).parent.parent.name
     
-    # 基础输出目录
+    # Base output directory
     base_output_dir = exps_root / "vecmol" / exp_name
     base_output_dir.mkdir(parents=True, exist_ok=True)
     
-    # 提取checkpoint标识并创建独立的子目录
+    # Extract checkpoint identifier and create independent subdirectories
     checkpoint_identifier = extract_checkpoint_identifier(fm_path)
-    # checkpoint_identifier = "20260120_version_2_last_decoder_finetuned_0(more epoch)"  # 临时硬编码
+    # checkpoint_identifier = "20260120_version_2_last_decoder_finetuned_0(more epoch)"  # Temporary hardcoding
     output_dir = base_output_dir / "samples" / checkpoint_identifier
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # 获取生成参数
-    max_samples = config.get('max_samples', 10)  # 默认生成10个分子
-    field_methods = config.get('field_methods', ['tanh'])  # 默认使用tanh方法
+    # Get generation parameters
+    max_samples = config.get('max_samples', 10)  # Default generate 10 molecules
+    field_methods = config.get('field_methods', ['tanh'])  # Default use tanh method
     
-    # 根据use_multi_gpu决定worker数量
+    # Determine worker number based on use_multi_gpu
     if use_multi_gpu:
-        num_workers = num_gpus  # 每个GPU一个worker
+        num_workers = num_gpus  # One worker per GPU
         print(f"Using multi-GPU mode: {num_gpus} GPUs, {num_workers} workers")
     else:
         num_workers = 1
@@ -546,40 +540,36 @@ def main(config: DictConfig) -> None:
     print("fm_pretrained_path: ", config["fm_pretrained_path"])
     print("nf_pretrained_path: ", config["nf_pretrained_path"])
     
-    # 注意：主进程不再加载模型！模型将在每个worker进程中加载
     
-    # 初始化CSV文件（使用新的独立输出目录）
+    # Initialize CSV file (using new independent output directory)
     csv_path = output_dir / "denoiser_evaluation_results.csv"
     elements = config.dset.elements  # ["C", "H", "O", "N", "F"]
     csv_columns = ['generated_idx', 'field_method', 'diffusion_method', 'size']
     
-    # 添加生成分子每种元素的原子数量
+    # Add atom count for each element in generated molecules
     for element in elements:
         csv_columns.append(f'{element}_count')
     
-    # 创建CSV文件（如果不存在）
-    # 注意：如果文件已存在，我们会在增量写入时追加，不会覆盖
+    # Create CSV file (if not exists)
+    # Note: If file exists, we will append during incremental writing, not overwrite
     csv_file_exists = csv_path.exists() and csv_path.stat().st_size > 0
     
-    # 创建分子数据保存目录（使用新的独立输出目录）
+    # Create molecule data save directory (using new independent output directory)
     mol_save_dir = output_dir / "molecule"
     mol_save_dir.mkdir(parents=True, exist_ok=True)
     
-    # 检查使用的扩散方法
+    # Check used diffusion method
     diffusion_method = config.get('diffusion_method', 'ddpm_x0')
     print(f"Using diffusion method: {diffusion_method}")
     
-    # 获取网格和编码维度
+    # Get grid and code dimension
     grid_size = config.get('dset', {}).get('grid_size', 9)
     code_dim = config.get('encoder', {}).get('code_dim', 128)
     
-    # ============================================================================
-    # 创建任务队列：每个任务 = 一个分子的GPU计算任务
-    # ============================================================================
     task_queue = Queue()
     result_queue = Queue()
     
-    # 生成所有任务并放入队列
+    # Generate all tasks and put them into queue
     task_id = 0
     total_tasks = 0
     for mol_idx in range(max_samples):
@@ -597,18 +587,14 @@ def main(config: DictConfig) -> None:
             total_tasks += 1
     
     print(f"Created {total_tasks} tasks for {max_samples} molecules × {len(field_methods)} field_methods")
-    
-    # ============================================================================
-    # 启动长期运行的GPU Worker进程
-    # ============================================================================
     print(f"\nStarting {num_workers} GPU workers...")
     print(f"Each worker will process molecules independently from the task queue")
     
-    # 启动GPU Worker进程
+    # Start GPU Worker processes
     worker_processes = []
     for i in range(num_workers):
-        logical_gpu_id = i  # 逻辑GPU ID（在worker进程中看到的GPU ID，通常是0）
-        physical_gpu_id = main_gpu_list[i]  # 物理GPU ID（在主进程中的实际GPU ID）
+        logical_gpu_id = i  # Logical GPU ID (GPU ID seen in worker process, usually 0)
+        physical_gpu_id = main_gpu_list[i]  # Physical GPU ID (actual GPU ID in main process)
         
         p = create_worker_process_with_gpu(
             worker_func=gpu_worker_process,
@@ -627,30 +613,26 @@ def main(config: DictConfig) -> None:
         worker_processes.append(p)
         print(f"Started GPU Worker {i} (logical={logical_gpu_id}, physical={physical_gpu_id}, PID={p.pid})")
     
-    # ============================================================================
-    # 主进程：收集结果并进行IO后处理
-    # ============================================================================
     results = []
     successful_tasks = 0
     failed_tasks = 0
     
     print(f"\nMain process: Collecting results and performing IO postprocessing...")
     
-    # 跟踪CSV文件是否已有header（用于增量写入）
-    # csv_file_exists 在之前已定义，如果文件已存在且有内容，说明已有header
+    # Track if CSV file has header (for incremental writing)
     csv_has_header = csv_file_exists
     
-    # 收集结果（使用tqdm显示进度）
+    # Collect results (using tqdm to show progress)
     consecutive_empty_count = 0
-    max_consecutive_empty = 10  # 允许连续10次空队列，然后检查进程状态
+    max_consecutive_empty = 10  # Allow 10 consecutive empty queues, then check process status
     
     with tqdm(total=total_tasks, desc="Generating molecules") as pbar:
         while len(results) < total_tasks:
             try:
-                # 从结果队列获取GPU计算结果
+                # Get GPU computation results from result queue
                 gpu_result = result_queue.get(timeout=5.0)
                 
-                # 在主进程进行IO后处理
+                # Perform IO postprocessing in main process
                 final_result = main_process_postprocess(
                     gpu_result,
                     mol_save_dir,
@@ -658,17 +640,17 @@ def main(config: DictConfig) -> None:
                 )
                 
                 results.append(final_result)
-                consecutive_empty_count = 0  # 重置空队列计数
+                consecutive_empty_count = 0  # Reset empty queue count
                 
                 if final_result['success']:
                     successful_tasks += 1
-                    # 立即追加到CSV文件（增量写入）
+                    # Immediately append to CSV file (incremental writing)
                     try:
                         result_row = final_result['result_row']
                         result_df = pd.DataFrame([result_row])
-                        # 第一次写入需要header，后续追加不需要
+                        # First write needs header, subsequent appends do not need header
                         result_df.to_csv(csv_path, mode='a', header=not csv_has_header, index=False)
-                        csv_has_header = True  # 第一次写入后，后续都不需要header
+                        csv_has_header = True  # After first write, subsequent writes do not need header
                     except Exception as e:
                         print(f"\nWarning: Failed to write result to CSV for task {final_result.get('task_id', 'unknown')}: {e}")
                 else:
@@ -678,21 +660,21 @@ def main(config: DictConfig) -> None:
             
             except queue.Empty:
                 consecutive_empty_count += 1
-                # 检查worker进程是否还在运行
+                # Check if worker processes are still running
                 alive_count = sum(1 for p in worker_processes if p.is_alive())
                 if alive_count == 0:
-                    # 所有worker都已退出，检查是否还有未完成的任务
+                    # All workers have exited, check if there are any incomplete tasks
                     if len(results) < total_tasks:
                         print(f"\nWarning: All workers have exited, but only {len(results)}/{total_tasks} results received")
                         print(f"Missing {total_tasks - len(results)} results. This may indicate worker crashes or incomplete processing.")
                     break
                 elif consecutive_empty_count >= max_consecutive_empty:
-                    # 连续多次空队列，检查进程状态
+                    # Check worker status after multiple consecutive empty queues
                     print(f"\nWarning: Queue empty for {consecutive_empty_count} consecutive checks. Checking worker status...")
                     for i, p in enumerate(worker_processes):
                         if not p.is_alive():
                             print(f"  Worker {i} (PID {p.pid}) is not alive (exitcode: {p.exitcode})")
-                    consecutive_empty_count = 0  # 重置计数，继续等待
+                    consecutive_empty_count = 0  # Reset count, continue waiting
                 continue
             except Exception as e:
                 print(f"\nError collecting result: {e}")
@@ -700,12 +682,12 @@ def main(config: DictConfig) -> None:
                 failed_tasks += 1
                 pbar.update(1)
     
-    # 发送终止信号给所有worker
+    # Send termination signals to all workers
     print("\nSending termination signals to workers...")
     for _ in range(num_workers):
         task_queue.put(None)
     
-    # 等待所有worker进程结束
+    # Wait for all worker processes to finish
     print("Waiting for workers to finish...")
     for p in worker_processes:
         p.join(timeout=10)
@@ -715,23 +697,19 @@ def main(config: DictConfig) -> None:
             p.join()
     
     print(f"All workers terminated")
-    
-    # ============================================================================
-    # 重新排序CSV文件（可选：使结果按generated_idx排序）
-    # ============================================================================
     print(f"\nMerging results: {successful_tasks} successful, {failed_tasks} failed")
     
-    # 收集所有成功的结果
+    # Collect all successful results
     successful_results = [r for r in results if r['success']]
     failed_results = [r for r in results if not r['success']]
     
-    # 重新读取并排序CSV文件（使结果按generated_idx排序，便于查看）
+    # Re-read and sort CSV file (sort results by generated_idx for easier viewing)
     if successful_results and csv_path.exists():
         try:
-            # 读取已写入的CSV
+            # Read existing CSV
             existing_df = pd.read_csv(csv_path)
             if len(existing_df) > 0:
-                # 按generated_idx排序并重新写入
+                # Sort by generated_idx and re-write
                 existing_df = existing_df.sort_values('generated_idx')
                 existing_df.to_csv(csv_path, mode='w', index=False, header=True)
                 print(f"Re-sorted {len(existing_df)} results in CSV by generated_idx")
@@ -739,15 +717,15 @@ def main(config: DictConfig) -> None:
             print(f"Warning: Failed to re-sort CSV file: {e}")
             print(f"Results were saved incrementally. CSV contains {successful_tasks} successful results.")
     
-    # 处理失败的任务（可选：保存错误信息）
+    # Process failed tasks (optional: save error information)
     if failed_results:
         print(f"\nFailed tasks ({len(failed_results)}):")
-        for r in failed_results[:10]:  # 只显示前10个错误
+        for r in failed_results[:10]:  # Only show first 10 errors
             print(f"  Task {r['task_id']} ({r.get('field_method', 'unknown')}): {r.get('error', 'Unknown error')}")
         if len(failed_results) > 10:
             print(f"  ... and {len(failed_results) - 10} more failures")
     
-    # 分析结果
+    # Analyze results
     print(f"Results saved to: {csv_path}")
     
     try:

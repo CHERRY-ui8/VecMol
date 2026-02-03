@@ -11,20 +11,20 @@ import torch
 import multiprocessing
 
 
-# 设置项目根目录
+# Project root
 PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in os.sys.path:
     os.sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def load_nf_config(config_name: str = "train_nf_qm9") -> OmegaConf:
-    """加载Neural Field配置文件。
+    """Load Neural Field config file.
 
     Args:
-        config_name: 配置文件名，默认为 "train_nf_qm9"
+        config_name: Config file name (default "train_nf_qm9")
 
     Returns:
-        OmegaConf 配置对象
+        OmegaConf config object
     """
     config_path = PROJECT_ROOT / "configs" / f"{config_name}.yaml"
     if not config_path.exists():
@@ -36,7 +36,6 @@ def load_nf_config(config_name: str = "train_nf_qm9") -> OmegaConf:
     config["dset"]["data_dir"] = str(PROJECT_ROOT / "dataset" / "data")
     print(f"Dataset directory: {config['dset']['data_dir']}")
     
-    # 验证配置加载
     if "converter" in config:
         print(f"Config loaded successfully: {config_name}")
         if "n_iter" in config["converter"]:
@@ -50,27 +49,21 @@ def load_nf_config(config_name: str = "train_nf_qm9") -> OmegaConf:
 
 
 def load_vecmol_config(config_name: str, nf_config: OmegaConf) -> Dict[str, Any]:
-    """
-    从YAML配置文件加载VecMol配置
+    """Load VecMol config from YAML.
     
     Args:
-        config_name: 配置文件名（如 "train_fm_qm9"）
-        nf_config: Neural Field配置
+        config_name: Config file name (e.g. "train_fm_qm9")
+        nf_config: Neural Field config
     
     Returns:
-        dict: VecMol配置字典
+        VecMol config dict
     """
     print(f"Loading configuration from YAML: {config_name}")
-    
-    # 使用Hydra加载配置
     with hydra.initialize_config_dir(config_dir=str(PROJECT_ROOT / "configs"), version_base=None):
         config = hydra.compose(config_name=config_name)
-    
-    # 转换为普通字典
     if not isinstance(config, dict):
         config = OmegaConf.to_container(config, resolve=True)
-    
-    # 确保encoder, decoder, dset配置正确
+    # encoder, decoder, dset from nf_config
     config["encoder"] = nf_config.encoder
     config["decoder"] = nf_config.decoder  
     config["dset"] = nf_config.dset
@@ -93,28 +86,22 @@ def compute_field_at_points(
     config: Optional[Any] = None,
 ) -> torch.Tensor:
     """
-    统一的场计算函数，根据模式计算特定点处的场大小。
+    Unified field computation at points by mode.
     
     Args:
-        points: 要计算场的点坐标 [n_points, 3] 或 [batch, n_points, 3]
-        mode: 计算模式，支持以下选项：
-            - 'denoiser': 使用去噪器生成随机噪声代码
-            - 'ddpm': 使用预采样的DDPM代码
-            - 'predicted': 使用预计算的预测代码
-            - 'gt': 使用真实分子坐标计算场
-        decoder: 解码器模型（denoiser, ddpm, predicted模式需要）
-        codes: 预计算的代码（ddpm, predicted模式需要）
-        vecmol: VecMol模型（denoiser模式需要）
-        converter: GNF转换器（gt模式需要）
-        gt_coords: 真实分子坐标（gt模式需要）
-        gt_types: 真实原子类型（gt模式需要）
-        config: 配置对象（denoiser模式需要）
-        device: 计算设备
+        points: Point coords [n_points, 3] or [batch, n_points, 3]
+        mode: 'denoiser' | 'ddpm' | 'predicted' | 'gt'
+        decoder: Decoder (denoiser, ddpm, predicted)
+        codes: Precomputed codes (ddpm, predicted)
+        vecmol: VecMol (denoiser)
+        converter: GNF converter (gt)
+        gt_coords, gt_types: Ground truth (gt)
+        config: Config (denoiser)
     
     Returns:
-        torch.Tensor: 场值 [n_points, n_atom_types, 3]
+        Field values [n_points, n_atom_types, 3]
     """
-    # 确保points是正确的形状
+    # Ensure points shape
     if points.dim() == 2:  # [n_points, 3]
         points = points.unsqueeze(0)  # [1, n_points, 3]
     elif points.dim() == 3:  # [batch, n_points, 3]
@@ -126,7 +113,7 @@ def compute_field_at_points(
         if vecmol is None or decoder is None or config is None:
             raise ValueError("denoiser mode requires vecmol, decoder, and config")
         
-        # 确保 points 在正确的设备上
+        # Ensure points on correct device
         target_device = next(decoder.parameters()).device
         if points.device != target_device:
             points = points.to(target_device)
@@ -136,17 +123,17 @@ def compute_field_at_points(
         code_dim = config.encoder.code_dim
         batch_size = 1
         
-        # 创建随机噪声代码
+        # Create random noise codes
         noise_codes = torch.randn(batch_size, grid_size**3, code_dim, device=target_device)
         
-        # 通过 denoiser 生成分子代码
+        # Generate codes via denoiser
         with torch.no_grad():
             denoised_codes = vecmol(noise_codes)
         
-        # 使用 decoder 生成场
+        # Use decoder to compute field
         result = decoder(points, denoised_codes[0:1])
         if result.dim() == 4:  # [batch, n_points, n_atom_types, 3]
-            return result[0]  # 取第一个batch
+            return result[0]  # First batch
         else:
             return result
     
@@ -154,7 +141,7 @@ def compute_field_at_points(
         if decoder is None or codes is None:
             raise ValueError("ddpm mode requires decoder and codes")
         
-        # 确保 points 和 codes 在同一个设备上
+        # Ensure points and codes on same device
         target_device = codes.device
         if points.device != target_device:
             points = points.to(target_device)
@@ -166,7 +153,7 @@ def compute_field_at_points(
         if decoder is None or codes is None:
             raise ValueError("predicted mode requires decoder and codes")
         
-        # 确保 points 和 codes 在同一个设备上
+        # Ensure points and codes on same device
         target_device = codes.device
         if points.device != target_device:
             points = points.to(target_device)
@@ -178,7 +165,7 @@ def compute_field_at_points(
         if converter is None or gt_coords is None or gt_types is None:
             raise ValueError("gt mode requires converter, gt_coords, and gt_types")
         
-        # 过滤掉padding原子
+        # Filter padding atoms
         from vecmol.utils.constants import PADDING_INDEX
         gt_mask = (gt_types[0] != PADDING_INDEX)
         gt_valid_coords = gt_coords[0][gt_mask]
@@ -206,17 +193,16 @@ def create_field_function(
     config: Optional[Any] = None
 ) -> Callable[[torch.Tensor], torch.Tensor]:
     """
-    创建场计算函数的工厂函数。
-    不得不创建这样一个函数，因为在做梯度上升的时候，需要实时传入更新后的points对应的field，不能只简单传入固定的field
-    
+    Factory for field computation function (needed for gradient ascent: field must be computed from updated points).
+
     Args:
-        mode: 计算模式
-        其他参数: 与compute_field_at_points相同的参数
-    
+        mode: Computation mode
+        Other args: Same as compute_field_at_points
+
     Returns:
-        Callable: 场计算函数，带有 device 属性
+        Callable with device attribute
     """
-    # 确定 device
+    # Determine device
     device = None
     if mode in ['ddpm', 'predicted']:
         if codes is not None:
@@ -248,26 +234,23 @@ def create_field_function(
             config=config
         )
     
-    # 将 device 附加到函数对象上
+    # Attach device to function
     field_func.device = device
     
     return field_func
 
 
 # ============================================================================
-# GPU管理和多进程工具函数
+# GPU and multiprocessing utilities
 # ============================================================================
 
 def setup_worker_gpu_environment():
     """
-    在worker子进程启动时设置GPU环境变量。
-    在spawn模式下，子进程会重新执行脚本，通过环境变量_WORKER_GPU_ID设置CUDA_VISIBLE_DEVICES。
-    
-    注意：这个函数应该在脚本的最开始（导入torch之前）调用。
+    Set GPU env vars when worker subprocess starts. In spawn mode, subprocess re-executes script; use _WORKER_GPU_ID for CUDA_VISIBLE_DEVICES. Call at script start (before importing torch).
     """
     if "_WORKER_GPU_ID" in os.environ:
         os.environ["CUDA_VISIBLE_DEVICES"] = os.environ["_WORKER_GPU_ID"]
-        del os.environ["_WORKER_GPU_ID"]  # 清理临时环境变量
+        del os.environ["_WORKER_GPU_ID"]  # Clear temp env var
 
 
 def parse_gpu_list_from_config(config, default_use_all: bool = True) -> Tuple[List[int], Optional[str]]:
@@ -279,19 +262,16 @@ def parse_gpu_list_from_config(config, default_use_all: bool = True) -> Tuple[Li
         default_use_all: 如果没有找到配置，是否使用所有GPU（默认True）
     
     Returns:
-        Tuple[List[int], Optional[str]]: (物理GPU ID列表, CUDA_VISIBLE_DEVICES字符串)
-            - 物理GPU ID列表：如 [0, 1, 2, 3]
-            - CUDA_VISIBLE_DEVICES字符串：如 "0,1,2,3"，如果为None则表示使用所有GPU
+        (physical GPU ID list, CUDA_VISIBLE_DEVICES string or None)
     """
     num_gpus = torch.cuda.device_count()
     
-    # 获取要使用的GPU列表（优先级：配置文件 > 环境变量 > 所有GPU）
+    # GPU list: config > env > all
     gpu_list_config = config.get('gpu_list', None)
     main_cuda_visible = None
     
     if gpu_list_config is not None:
-        # 从配置文件读取GPU列表
-        # 处理 Hydra 的 ListConfig 类型
+        # Read GPU list from config; handle Hydra ListConfig
         if isinstance(gpu_list_config, ListConfig):
             main_gpu_list = [int(gpu) for gpu in OmegaConf.to_container(gpu_list_config, resolve=True)]
         elif isinstance(gpu_list_config, (list, tuple)):
@@ -301,29 +281,29 @@ def parse_gpu_list_from_config(config, default_use_all: bool = True) -> Tuple[Li
         else:
             main_gpu_list = [int(gpu_list_config)]
         
-        # 验证GPU ID是否有效
+        # Validate GPU IDs
         for gpu_id in main_gpu_list:
             if gpu_id < 0 or gpu_id >= num_gpus:
                 raise ValueError(f"Invalid GPU ID {gpu_id}. Available GPUs: 0-{num_gpus-1}")
         
-        # 设置环境变量，确保子进程也使用这些GPU
+        # Set env so subprocesses use these GPUs
         main_cuda_visible = ",".join(str(gpu) for gpu in main_gpu_list)
         os.environ["CUDA_VISIBLE_DEVICES"] = main_cuda_visible
         print(f"Using GPUs from config: {main_gpu_list}")
     else:
-        # 获取主进程的CUDA_VISIBLE_DEVICES设置
+        # Get main process CUDA_VISIBLE_DEVICES
         main_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
         if main_cuda_visible:
-            # 解析主进程可见的GPU列表
+            # Parse main process visible GPU list
             main_gpu_list = [int(x.strip()) for x in main_cuda_visible.split(",")]
             print(f"Using GPUs from CUDA_VISIBLE_DEVICES: {main_cuda_visible}, physical GPUs: {main_gpu_list}")
         else:
-            # 如果没有设置，根据default_use_all决定
+            # If not set, use default_use_all
             if default_use_all:
                 main_gpu_list = list(range(num_gpus))
                 print(f"No GPU configuration found, using all {num_gpus} GPUs: {main_gpu_list}")
             else:
-                main_gpu_list = [0]  # 默认只使用第一个GPU
+                main_gpu_list = [0]  # Default: first GPU only
                 main_cuda_visible = "0"
                 os.environ["CUDA_VISIBLE_DEVICES"] = main_cuda_visible
                 print(f"No GPU configuration found, using default GPU 0")
@@ -333,7 +313,7 @@ def parse_gpu_list_from_config(config, default_use_all: bool = True) -> Tuple[Li
 
 def setup_multiprocessing_spawn():
     """
-    设置multiprocessing的start method为'spawn'（CUDA不支持fork模式）
+    Set multiprocessing start method to 'spawn' (CUDA does not support fork)
     """
     if multiprocessing.get_start_method(allow_none=True) != 'spawn':
         multiprocessing.set_start_method('spawn', force=True)
@@ -347,19 +327,19 @@ def create_worker_process_with_gpu(
     env_var_name: str = "_WORKER_GPU_ID"
 ) -> multiprocessing.Process:
     """
-    创建worker进程，并通过环境变量设置GPU。
-    
+    Create worker process and set GPU via env var.
+
     Args:
-        worker_func: Worker进程函数
-        logical_gpu_id: 逻辑GPU ID（在worker进程中的GPU ID，通常是0）
-        physical_gpu_id: 物理GPU ID（在主进程中的实际GPU ID）
-        args: 传递给worker_func的参数
-        env_var_name: 环境变量名称（默认"_WORKER_GPU_ID"）
-    
+        worker_func: Worker function
+        logical_gpu_id: Logical GPU ID in worker (usually 0)
+        physical_gpu_id: Physical GPU ID in main process
+        args: Args for worker_func
+        env_var_name: Env var name (default _WORKER_GPU_ID)
+
     Returns:
-        multiprocessing.Process: 已启动的进程对象
+        Started Process
     """
-    # 通过环境变量传递GPU ID，这样子进程在重新执行脚本时会先设置CUDA_VISIBLE_DEVICES
+    # Pass GPU ID via env so subprocess sets CUDA_VISIBLE_DEVICES first
     original_env = os.environ.get(env_var_name, None)
     os.environ[env_var_name] = str(physical_gpu_id)
     try:
@@ -367,7 +347,7 @@ def create_worker_process_with_gpu(
         p.start()
         return p
     finally:
-        # 恢复原始环境变量（如果存在）
+        # Restore original env var if present
         if original_env is not None:
             os.environ[env_var_name] = original_env
         elif env_var_name in os.environ:
@@ -390,7 +370,7 @@ def distribute_tasks_to_gpus(
     """
     gpu_assignments = {}
     for idx, task_idx in enumerate(task_indices):
-        logical_gpu_id = idx % num_gpus  # 逻辑GPU ID（0到num_gpus-1）
+        logical_gpu_id = idx % num_gpus  # Logical GPU ID (0 to num_gpus-1)
         if logical_gpu_id not in gpu_assignments:
             gpu_assignments[logical_gpu_id] = []
         gpu_assignments[logical_gpu_id].append(task_idx)

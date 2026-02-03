@@ -56,15 +56,15 @@ class CrossGraphEncoder(nn.Module):
         self.code_dim = code_dim
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
-        self.k_neighbors = k_neighbors  # 原子 atom 和网格 grid 之间的连接数
-        self.atom_k_neighbors = atom_k_neighbors  # 原子 atom 内部的连接数
+        self.k_neighbors = k_neighbors  # atom-grid connections
+        self.atom_k_neighbors = atom_k_neighbors  # atom-atom connections
         self.dist_version = dist_version
         self.cutoff = cutoff
         self.additional_edge_feat = additional_edge_feat
         self.edge_dim = edge_dim
-        self.anchor_spacing = anchor_spacing  # 锚点间距
+        self.anchor_spacing = anchor_spacing
 
-        # 注册grid坐标作为buffer（不需要训练）
+        # Register grid coords as buffer (not trained)
         grid_coords = create_grid_coords(1, self.grid_size,
                         device="cpu", anchor_spacing=self.anchor_spacing).squeeze(0)  # [n_grid, 3]
         self.register_buffer('grid_coords', grid_coords)
@@ -87,43 +87,34 @@ class CrossGraphEncoder(nn.Module):
         atom_batch_idx = data.batch
         
         device = atom_coords.device
-        B = data.num_graphs # 一个batch中包含的分子数量
+        B = data.num_graphs
         N_total_atoms = data.num_nodes
-        
         n_grid = self.grid_size ** 3
 
-        # 1. 原子类型 one-hot，并填充到code_dim维度
-        # 验证值范围
+        # 1. Atom type one-hot, pad to code_dim
         if atoms_channel.numel() > 0:
             assert atoms_channel.min() >= 0, f"Negative values in atoms_channel: {atoms_channel.min()}"
             assert atoms_channel.max() < self.n_atom_types, f"atoms_channel max {atoms_channel.max()} >= n_atom_types {self.n_atom_types}"
         
-        # 创建one-hot编码并填充到code_dim维度
-        atom_feat = F.one_hot(atoms_channel.long(), num_classes=self.n_atom_types).float()  # [N_total_atoms, n_atom_types]
+        atom_feat = F.one_hot(atoms_channel.long(), num_classes=self.n_atom_types).float()
         if self.n_atom_types < self.code_dim:
-            # 如果code_dim更大，用0填充剩余维度
             padding = torch.zeros(N_total_atoms, self.code_dim - self.n_atom_types, device=device)
-            atom_feat = torch.cat([atom_feat, padding], dim=1)  # [N_total_atoms, code_dim]
+            atom_feat = torch.cat([atom_feat, padding], dim=1)
         else:
-            # 如果code_dim更小，截断多余维度（不建议，最好保证code_dim >= n_atom_types）
             atom_feat = atom_feat[:, :self.code_dim]
 
-        # 2. 构造 grid 坐标
+        # 2. Grid coords
         grid_coords_flat = self.grid_coords.to(device).repeat(B, 1)  # [B*n_grid, 3]
+        # 3. Init grid codes to 0
+        grid_codes = torch.zeros(B * n_grid, self.code_dim, device=device)
+        # 4. Concatenate all nodes; grid batch index
+        grid_batch_idx = torch.arange(B, device=device).repeat_interleave(n_grid)
 
-        # 3. 初始化 grid codes 为0
-        grid_codes = torch.zeros(B * n_grid, self.code_dim, device=device)  # [B*n_grid, code_dim]
+        # Concatenate all nodes
+        node_feats = torch.cat([atom_feat, grid_codes], dim=0)
+        node_pos = torch.cat([atom_coords, grid_coords_flat], dim=0)
 
-        # 4. 拼接所有节点
-        # 创建 grid 的 batch 索引
-        grid_batch_idx = torch.arange(B, device=device).repeat_interleave(n_grid)  # [B*n_grid]
-
-        # 拼接所有节点
-        node_feats = torch.cat([atom_feat, grid_codes], dim=0)  # [(N_total_atoms + B*n_grid), code_dim]
-        node_pos = torch.cat([atom_coords, grid_coords_flat], dim=0)  # [(N_total_atoms + B*n_grid), 3]
-
-        # 5. 构建两个分离的图
-        # 5.1 原子内部连接图（只连接原子之间）
+        # 5. Build two graphs: 5.1 atom-atom only
         atom_edge_index = knn_graph(
             x=atom_coords,
             k=self.atom_k_neighbors,
@@ -131,48 +122,43 @@ class CrossGraphEncoder(nn.Module):
             loop=False
         )
         
-        # 5.2 原子-网格连接图
-        # 使用knn构建原子到网格的连接
-        # 在这里找的是 grid 的邻居，因为要更新的是 grid 的特征，而且这样每个 grid 都一定会有连边（不需要给所有grid加自环边了）
+        # 5.2 Atom-grid: knn from grid to atoms (grid as query so each grid has edges)
         grid_to_atom_edges = knn(
             x=atom_coords,            # source points  (atom)
             y=grid_coords_flat,       # target points (grid)
             k=self.k_neighbors,
             batch_x=atom_batch_idx,
             batch_y=grid_batch_idx
-        )  # [2, E] 其中 E = k_neighbors * N_total_atoms (22240 = 32 * 695)
-        
-        # 添加调试信息
+        )  # [2, E] E = k_neighbors * N_total_atoms
+
+        # Debug
         # print(f"DEBUG: grid_to_atom_edges.shape: {grid_to_atom_edges.shape}")
         # print(f"DEBUG: grid_to_atom_edges[0].max(): {grid_to_atom_edges[0].max()}, grid_to_atom_edges[1].max(): {grid_to_atom_edges[1].max()}")
         # print(f"DEBUG: N_total_atoms: {N_total_atoms}, B*n_grid: {B*n_grid}")
         # print(f"DEBUG: atom_coords.shape: {atom_coords.shape}, grid_coords_flat.shape: {grid_coords_flat.shape}")
         
-        # 修正边索引：网格节点索引需要加上N_total_atoms的偏移量
-        # grid_to_atom_edges[0] 是网格索引，需要加上偏移量
-        # grid_to_atom_edges[1] 是原子索引，保持不变
+        # Shift grid indices by N_total_atoms; [0]=grid, [1]=atom
         grid_to_atom_edges[0] += N_total_atoms
-        # 交换边的方向
-        grid_to_atom_edges = torch.stack([grid_to_atom_edges[1], grid_to_atom_edges[0]], dim=0)
+        grid_to_atom_edges = torch.stack([grid_to_atom_edges[1], grid_to_atom_edges[0]], dim=0)  # swap direction
         
         # print(f"DEBUG: After correction - grid_to_atom_edges[0].max(): {grid_to_atom_edges[0].max()}, grid_to_atom_edges[1].max(): {grid_to_atom_edges[1].max()}")
         # print(f"DEBUG: atom_edge_index.shape: {atom_edge_index.shape}")
         # print(f"DEBUG: atom_edge_index[0].max(): {atom_edge_index[0].max()}, atom_edge_index[1].max(): {atom_edge_index[1].max()}")
                 
-        # 合并所有边
+        # Merge all edges
         edge_index = torch.cat([atom_edge_index, grid_to_atom_edges], dim=1)
         
         # print(f"DEBUG: Final edge_index.shape: {edge_index.shape}")
         # print(f"DEBUG: Final edge_index[0].max(): {edge_index[0].max()}, edge_index[1].max(): {edge_index[1].max()}")
         # print(f"DEBUG: node_pos.shape: {node_pos.shape}")
 
-        # 6. GNN消息传递
+        # 6. GNN message passing
         h = node_feats
         
         for layer in self.layers:
             h = layer(h, node_pos, edge_index)
 
-        # 7. 只取 grid 部分并重塑为 [B, n_grid, code_dim]
+        # 7. Take grid part and reshape to [B, n_grid, code_dim]
         grid_h = h[N_total_atoms:].reshape(B, n_grid, self.code_dim)
         return grid_h  # [B, n_grid, code_dim]
     
@@ -186,7 +172,7 @@ class MessagePassingGNN(MessagePassing):
         self.dist_version = dist_version
         self.cutoff = cutoff
         
-        # 距离扩展
+        # Distance expansion
         if dist_version == 'new':
             self.distance_expansion = GaussianSmearing(start=0.0, stop=cutoff, num_gaussians=20, type_='exp')
             self.edge_emb = nn.Linear(20, edge_dim)
@@ -196,14 +182,14 @@ class MessagePassingGNN(MessagePassing):
             self.edge_emb = nn.Linear(edge_dim, edge_dim)
             self.use_gaussian_smearing = True
         elif dist_version is None:
-            # 向后兼容：不使用GaussianSmearing
+            # Backward compat: no GaussianSmearing
             self.distance_expansion = None
             self.edge_emb = None
             self.use_gaussian_smearing = False
         else:
             raise NotImplementedError('dist_version notimplemented')
         
-        # 修改MLP的输入维度，使其匹配实际输入
+        # Match MLP input dim to actual input
         if self.use_gaussian_smearing:
             self.mlp = nn.Sequential(
                 nn.Linear(2*code_dim + edge_dim, hidden_dim, bias=True),
@@ -211,7 +197,7 @@ class MessagePassingGNN(MessagePassing):
                 nn.Linear(hidden_dim, code_dim, bias=True)
             )
         else:
-            # 向后兼容：使用原始维度
+            # Backward compat: original dim
             self.mlp = nn.Sequential(
                 nn.Linear(2*code_dim + 1, hidden_dim, bias=True),
                 nn.ReLU(),
@@ -219,7 +205,7 @@ class MessagePassingGNN(MessagePassing):
             )
         self.layernorm = nn.LayerNorm(code_dim)
         
-        # 确保所有参数都设置了requires_grad=True
+        # Ensure requires_grad=True for all params
         for param in self.parameters():
             param.requires_grad = True
 
@@ -227,7 +213,7 @@ class MessagePassingGNN(MessagePassing):
         # x: [N, code_dim], pos: [N, 3]
         row, col = edge_index
         
-        # 添加调试信息
+        # Debug
         if torch.any(row >= pos.size(0)) or torch.any(col >= pos.size(0)):
             print(f"ERROR: Index out of bounds!")
             print(f"pos.size(0): {pos.size(0)}")
@@ -240,36 +226,31 @@ class MessagePassingGNN(MessagePassing):
         rel = pos[row] - pos[col]  # [E, 3]
         dist = torch.norm(rel, dim=-1, keepdim=True)  # [E, 1]
                 
-        # 确保数据类型正确
-        x = x.float()  # 确保x是float类型
-        rel = rel.float()  # 确保rel是float类型
-        dist = dist.float()  # 确保dist是float类型
-        
-        # 距离扩展和边嵌入
+        x = x.float()
+        rel = rel.float()
+        dist = dist.float()
+
+        # Distance expansion and edge embedding
         if self.use_gaussian_smearing:
             dist_expanded = self.distance_expansion(dist)  # [E, num_gaussians]
-            # 确保 edge_emb 在正确的设备上
+            # Ensure edge_emb on correct device
             if self.edge_emb.weight.device != dist_expanded.device:
                 self.edge_emb = self.edge_emb.to(dist_expanded.device)
             edge_features = self.edge_emb(dist_expanded)  # [E, edge_dim]
             msg_input = torch.cat([x[row], x[col], edge_features], dim=-1)  # [E, 2*code_dim+edge_dim]
         else:
-            # 向后兼容：直接使用距离
+            # Backward compat: use distance directly
             msg_input = torch.cat([x[row], x[col], dist], dim=-1)  # [E, 2*code_dim+1]
         
-        # 确保 mlp 在正确的设备上
+        # Ensure mlp on correct device
         if self.mlp[0].weight.device != msg_input.device:
             self.mlp = self.mlp.to(msg_input.device)
         msg = self.mlp(msg_input)  # [E, code_dim]
         
-        # 使用propagate方法进行消息传递
-        # 使用更精确的size参数：源节点和目标节点都是所有节点
-        # 这样可以确保所有节点都参与聚合，同时避免维度不匹配
+        # Message passing with size for aggregation
         aggr = self.propagate(edge_index, x=x, message=msg, size=(x.size(0), x.size(0)))  # [N, code_dim]
-        
-        # 残差连接
-        x = x + aggr  # 残差连接
-        # 确保 layernorm 在正确的设备上
+        x = x + aggr
+        # Ensure layernorm on correct device
         if self.layernorm.weight.device != x.device:
             self.layernorm = self.layernorm.to(x.device)
         x = self.layernorm(x)

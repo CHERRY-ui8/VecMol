@@ -14,7 +14,7 @@ ELEMENTS_HASH = {
     "B": 10,
 }
 
-# 索引到原子类型的反向映射
+# Index to atom type (inverse mapping)
 ELEMENTS_HASH_INV = {
     0: 'C',
     1: 'H',
@@ -47,8 +47,7 @@ radiusSingleAtom = {
     }
 }
 
-# 键长数据（单位：pm，转换为Å需要除以100）
-# 来源：baselines_evaluation.py
+# Bond lengths in pm (divide by 100 for Angstrom); from baselines_evaluation.py
 BOND_LENGTHS_PM = {
     'H': {'H': 74, 'C': 109, 'N': 101, 'O': 96, 'F': 92,
           'B': 119, 'Si': 148, 'P': 144, 'As': 152, 'S': 134,
@@ -82,5 +81,5 @@ BOND_LENGTHS_PM = {
     'As': {'H': 152}
 }
 
-# 默认键长阈值（单位：Å），用于未知原子对
-DEFAULT_BOND_LENGTH_THRESHOLD = 2.0  # Å
+# Default bond length threshold (Angstrom) for unknown atom pairs
+DEFAULT_BOND_LENGTH_THRESHOLD = 2.0  # Angstrom
