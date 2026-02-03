@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-直接将temp_batch文件转换为LMDB格式，跳过合并步骤
-避免OOM风险，更安全高效
+Convert temp_batch files to LMDB format, skip merging step
+Avoid OOM risk, more secure and efficient
 
-使用方法:
+Usage:
     python convert_temp_codes_to_lmdb.py \
         --temp_dir exps/neural_field/nf_drugs/20260113/lightning_logs/version_0/checkpoints/code_no_aug/train \
         --output_dir exps/neural_field/nf_drugs/20260113/lightning_logs/version_0/checkpoints/code_no_aug/train \
         --num_augmentations 1 \
         --aug_idx 0 \
-        --delete_batches  # 可选：转换后删除batch文件
+        --delete_batches  # Optional: delete batch files after conversion
     
     python convert_temp_codes_to_lmdb.py \
     --temp_dir exps/neural_field/nf_drugs/20260113/lightning_logs/version_0/checkpoints/code_no_aug/train \
@@ -40,15 +40,15 @@ def convert_temp_batches_to_lmdb(
     delete_batches=False
 ):
     """
-    直接将temp_batch文件转换为LMDB，跳过合并步骤
+    Convert temp_batch files to LMDB, skip merging step
     
     Args:
-        temp_dir: temp_batches目录路径
-        output_dir: 输出目录路径（LMDB文件保存位置）
-        num_augmentations: 数据增强数量
-        aug_idx: 增强索引（0, 1, 2等）
-        file_prefix: 文件前缀 ("codes" 或 "position_weights")
-        delete_batches: 是否在转换后删除batch文件
+        temp_dir: temp_batches directory path
+        output_dir: output directory path (LMDB file save location)
+        num_augmentations: data augmentation number
+        aug_idx: augmentation index (0, 1, 2, etc.)
+        file_prefix: file prefix ("codes" or "position_weights")
+        delete_batches: whether to delete batch files after conversion
     """
     temp_dir = Path(temp_dir)
     output_dir = Path(output_dir)
@@ -66,7 +66,7 @@ def convert_temp_batches_to_lmdb(
     if not temp_dir.exists():
         raise FileNotFoundError(f"Temp directory not found: {temp_dir}")
     
-    # 查找所有batch文件
+    # Find all batch files
     if file_prefix == "codes":
         pattern = f"codes_{aug_idx:03d}_batch_"
     else:
@@ -84,9 +84,9 @@ def convert_temp_batches_to_lmdb(
     print(f"  First file: {batch_files[0].name}")
     print(f"  Last file: {batch_files[-1].name}")
     
-    # 按batch索引排序（从文件名提取）
+    # Sort by batch index (extract from file name)
     def extract_batch_idx(filename):
-        """从文件名提取batch索引: codes_000_batch_000000.pt -> 0"""
+        """Extract batch index from file name: codes_000_batch_000000.pt -> 0"""
         parts = filename.stem.split("_")
         if len(parts) >= 4:
             try:
@@ -97,7 +97,7 @@ def convert_temp_batches_to_lmdb(
     
     batch_files.sort(key=lambda f: extract_batch_idx(f))
     
-    # 验证文件索引的连续性
+    # Verify continuity of file indices
     batch_indices = [extract_batch_idx(f) for f in batch_files]
     if -1 in batch_indices:
         print(f"⚠️  WARNING: Some files have invalid batch indices")
@@ -111,16 +111,16 @@ def convert_temp_batches_to_lmdb(
     else:
         print(f"✓ All batch indices are continuous")
     
-    # 加载第一个batch文件获取shape信息
+    # Load first batch file to get shape information
     print("\nLoading first batch file to get shape info...")
     first_batch = torch.load(batch_files[0], map_location='cpu', weights_only=False)
     samples_per_batch = first_batch.shape[0]
-    code_shape = first_batch.shape[1:]  # 每个样本的shape
+    code_shape = first_batch.shape[1:]  # Shape of each sample
     
     print(f"  Samples per batch: {samples_per_batch}")
     print(f"  Code shape per sample: {code_shape}")
     
-    # 计算每个样本的大小
+    # Calculate the size of each sample
     if len(first_batch.shape) == 3:
         actual_size_per_sample = code_shape[0] * code_shape[1] * 4  # float32 = 4 bytes
     elif len(first_batch.shape) == 2:
@@ -128,14 +128,14 @@ def convert_temp_batches_to_lmdb(
     else:
         actual_size_per_sample = first_batch.numel() // samples_per_batch * 4
     
-    # 估算总样本数
+    # Estimate total number of samples
     total_samples = samples_per_batch * len(batch_files)
     print(f"  Estimated total samples: {total_samples}")
     
     del first_batch
     gc.collect()
     
-    # 生成输出文件路径
+    # Generate output file path
     if file_prefix == "codes":
         lmdb_path = output_dir / f"codes_aug{num_augmentations}_{aug_idx:03d}.lmdb"
         keys_path = output_dir / f"codes_aug{num_augmentations}_{aug_idx:03d}_keys.pt"
@@ -143,7 +143,7 @@ def convert_temp_batches_to_lmdb(
         lmdb_path = output_dir / f"position_weights_aug{num_augmentations}_{aug_idx:03d}.lmdb"
         keys_path = output_dir / f"position_weights_aug{num_augmentations}_{aug_idx:03d}_keys.pt"
     
-    # 删除旧的LMDB文件（如果存在）
+    # Delete old LMDB file (if exists)
     if lmdb_path.exists():
         print(f"\nRemoving existing LMDB file: {lmdb_path}")
         if lmdb_path.is_dir():
@@ -156,16 +156,16 @@ def convert_temp_batches_to_lmdb(
         print(f"Removing existing lock file: {lock_file}")
         lock_file.unlink()
     
-    # 创建LMDB数据库
-    estimated_size_per_sample = actual_size_per_sample * 2.0 + 4096  # 2倍用于序列化和overhead
-    map_size = max(100 * (1024 * 1024 * 1024), total_samples * estimated_size_per_sample * 2)  # 至少100GB
+    # Create LMDB database
+    estimated_size_per_sample = actual_size_per_sample * 2.0 + 4096  # 2x for serialization and overhead
+    map_size = max(100 * (1024 * 1024 * 1024), total_samples * estimated_size_per_sample * 2)  # at least 100GB
     
     print(f"\nCreating LMDB database with map_size: {map_size / (1024**3):.2f} GB")
     print(f"  Actual size per sample: {actual_size_per_sample / (1024**2):.2f} MB")
     db = lmdb.open(str(lmdb_path), map_size=int(map_size))
     
-    # 分批处理，避免内存峰值
-    BATCH_SIZE = 500  # 每批写入500个sample后提交事务
+    # Batch processing, avoid memory peak
+    BATCH_SIZE = 500  # Write 500 samples per batch and commit transaction
     
     keys = []
     global_index = 0
@@ -173,39 +173,39 @@ def convert_temp_batches_to_lmdb(
     
     try:
         for batch_file in tqdm(batch_files, desc="Processing batch files"):
-            # 加载当前batch文件
+            # Load current batch file
             batch_data = torch.load(batch_file, map_location='cpu', weights_only=False)
             num_samples = batch_data.shape[0]
             
-            # 分批写入LMDB
+            # Batch write to LMDB
             num_batches = (num_samples + BATCH_SIZE - 1) // BATCH_SIZE
             
             for batch_start in range(0, num_samples, BATCH_SIZE):
                 batch_end = min(batch_start + BATCH_SIZE, num_samples)
                 
-                # 每个批次使用独立的事务
+                # Use independent transaction for each batch
                 with db.begin(write=True) as txn:
-                    # 逐样本处理，立即序列化和写入
+                    # Process each sample immediately, serialize and write
                     for i in range(batch_start, batch_end):
                         key = str(global_index).encode()
                         
-                        # 提取单个样本
+                        # Extract single sample
                         sample = batch_data[i].clone().detach()
                         
-                        # 立即序列化
+                        # Immediately serialize
                         try:
                             value = pickle.dumps(sample, protocol=pickle.HIGHEST_PROTOCOL)
                             
-                            # 检查序列化后的大小（LMDB单个值限制约511MB）
+                            # Check the size after serialization (LMDB single value limit is about 511MB)
                             value_size_mb = len(value) / (1024 * 1024)
                             if value_size_mb > 500:  # 500MB
                                 print(f"\n⚠️  Warning: code {global_index} is very large: {value_size_mb:.2f} MB")
                             
-                            # LMDB单个值大小限制检查
+                            # LMDB single value size limit check
                             if len(value) > 511 * 1024 * 1024:
                                 raise ValueError(f"Code {global_index} is too large for LMDB: {value_size_mb:.2f} MB (max 511MB)")
                             
-                            # 立即写入
+                            # Immediately write
                             txn.put(key, value)
                             keys.append(str(global_index))
                             
@@ -213,21 +213,21 @@ def convert_temp_batches_to_lmdb(
                             print(f"\n❌ Error serializing code {global_index}: {e}")
                             raise
                         
-                        # 立即释放sample和value的引用
+                        # Immediately release references to sample and value
                         del sample
                         if 'value' in locals():
                             del value
                         
                         global_index += 1
                 
-                # 每个批次后强制垃圾回收
+                # Force garbage collection after each batch
                 gc.collect()
             
-            # 立即释放整个batch文件的内存
+            # Immediately release memory of the entire batch file
             del batch_data
             gc.collect()
             
-            # 删除batch文件（如果启用）
+            # Delete batch file (if enabled)
             if delete_batches:
                 try:
                     batch_file.unlink()
@@ -236,7 +236,7 @@ def convert_temp_batches_to_lmdb(
             
             processed_batches += 1
             
-            # 每处理100个batch文件打印一次进度
+            # Print progress every 100 batch files
             if processed_batches % 100 == 0:
                 print(f"  Processed {processed_batches}/{len(batch_files)} batch files, total samples: {global_index}")
         
@@ -246,14 +246,14 @@ def convert_temp_batches_to_lmdb(
     finally:
         db.close()
     
-    # 保存keys列表
+    # Save keys list
     torch.save(keys, keys_path)
     
     print(f"\n✅ Successfully converted to LMDB: {lmdb_path}")
     print(f"✅ Saved keys list: {keys_path}")
     print(f"✅ Database contains {len(keys)} codes")
     
-    # 验证生成的LMDB文件
+    # Verify generated LMDB file
     print("\nVerifying generated LMDB file...")
     try:
         verify_db = lmdb.open(str(lmdb_path), readonly=True)
@@ -278,16 +278,16 @@ def convert_mixed_to_lmdb(
     delete_after_convert=False
 ):
     """
-    将intermediate文件和temp_batch文件合并转换为LMDB
+    Merge intermediate files and temp_batch files and convert to LMDB
     
     Args:
-        intermediate_dir: intermediate文件目录路径
-        temp_batches_dir: temp_batches目录路径
-        output_dir: 输出目录路径（LMDB文件保存位置）
-        num_augmentations: 数据增强数量
-        aug_idx: 增强索引（0, 1, 2等）
-        file_prefix: 文件前缀 ("codes" 或 "position_weights")
-        delete_after_convert: 是否在转换后删除源文件
+        intermediate_dir: intermediate file directory path
+        temp_batches_dir: temp_batches directory path
+        output_dir: output directory path (LMDB file save location)
+        num_augmentations: data augmentation number
+        aug_idx: augmentation index (0, 1, 2, etc.)
+        file_prefix: file prefix ("codes" or "position_weights")
+        delete_after_convert: whether to delete source files after conversion
     """
     intermediate_dir = Path(intermediate_dir) if intermediate_dir else None
     temp_batches_dir = Path(temp_batches_dir)
@@ -304,19 +304,19 @@ def convert_mixed_to_lmdb(
     print(f"File prefix: {file_prefix}")
     print("=" * 80)
     
-    # 收集所有要处理的文件
+    # Collect all files to process
     all_files = []  # [(file_path, file_type), ...] file_type: 'intermediate' or 'batch'
     
-    # 1. 收集intermediate文件（按索引排序）
+    # 1. Collect intermediate files (sorted by index)
     if intermediate_dir and intermediate_dir.exists():
         intermediate_files = [
             f for f in intermediate_dir.iterdir()
             if f.is_file() and f.name.startswith("intermediate_") and f.name.endswith(".pt")
         ]
         
-        # 按索引排序：intermediate_000000.pt -> 0
+        # Sort by index: intermediate_000000.pt -> 0
         def extract_intermediate_idx(filename):
-            """从文件名提取intermediate索引: intermediate_000000.pt -> 0"""
+            """Extract intermediate index from file name: intermediate_000000.pt -> 0"""
             try:
                 # intermediate_000000.pt -> 000000 -> 0
                 idx_str = filename.stem.replace("intermediate_", "")
@@ -335,7 +335,7 @@ def convert_mixed_to_lmdb(
         print(f"\nNo intermediate directory or directory not found, skipping...")
         intermediate_files = []
     
-    # 2. 收集batch文件（按数字索引排序）
+    # 2. Collect batch files (sorted by index)
     if file_prefix == "codes":
         pattern = f"codes_{aug_idx:03d}_batch_"
     else:
@@ -346,9 +346,9 @@ def convert_mixed_to_lmdb(
         if f.is_file() and f.name.startswith(pattern) and f.name.endswith(".pt")
     ]
     
-    # 按batch索引排序：codes_000_batch_003659.pt -> 3659
+    # Sort by batch index: codes_000_batch_003659.pt -> 3659
     def extract_batch_idx(filename):
-        """从文件名提取batch索引: codes_000_batch_003659.pt -> 3659"""
+        """Extract batch index from file name: codes_000_batch_003659.pt -> 3659"""
         try:
             # codes_000_batch_003659.pt -> 003659 -> 3659
             parts = filename.stem.split("_")
@@ -374,7 +374,7 @@ def convert_mixed_to_lmdb(
     
     print(f"\nTotal files to process: {len(all_files)} ({len(intermediate_files)} intermediate + {len(batch_files)} batch)")
     
-    # 加载第一个文件获取shape信息
+    # Load first file to get shape information
     print("\nLoading first file to get shape info...")
     first_file, first_type = all_files[0]
     first_data = torch.load(first_file, map_location='cpu', weights_only=False)
@@ -384,7 +384,7 @@ def convert_mixed_to_lmdb(
     print(f"  Samples per file: {samples_per_file}")
     print(f"  Code shape per sample: {code_shape}")
     
-    # 计算每个样本的大小
+    # Calculate the size of each sample
     if len(first_data.shape) == 3:
         actual_size_per_sample = code_shape[0] * code_shape[1] * 4
     elif len(first_data.shape) == 2:
@@ -392,14 +392,14 @@ def convert_mixed_to_lmdb(
     else:
         actual_size_per_sample = first_data.numel() // samples_per_file * 4
     
-    # 估算总样本数
+    # Estimate total number of samples
     total_samples = samples_per_file * len(all_files)
     print(f"  Estimated total samples: {total_samples}")
     
     del first_data
     gc.collect()
     
-    # 生成输出文件路径
+    # Generate output file path
     if file_prefix == "codes":
         lmdb_path = output_dir / f"codes_aug{num_augmentations}_{aug_idx:03d}.lmdb"
         keys_path = output_dir / f"codes_aug{num_augmentations}_{aug_idx:03d}_keys.pt"
@@ -407,7 +407,7 @@ def convert_mixed_to_lmdb(
         lmdb_path = output_dir / f"position_weights_aug{num_augmentations}_{aug_idx:03d}.lmdb"
         keys_path = output_dir / f"position_weights_aug{num_augmentations}_{aug_idx:03d}_keys.pt"
     
-    # 删除旧的LMDB文件（如果存在）
+    # Delete old LMDB file (if exists)
     if lmdb_path.exists():
         print(f"\nRemoving existing LMDB file: {lmdb_path}")
         if lmdb_path.is_dir():
@@ -420,7 +420,7 @@ def convert_mixed_to_lmdb(
         print(f"Removing existing lock file: {lock_file}")
         lock_file.unlink()
     
-    # 创建LMDB数据库
+    # Create LMDB database
     estimated_size_per_sample = actual_size_per_sample * 2.0 + 4096
     map_size = max(100 * (1024 * 1024 * 1024), total_samples * estimated_size_per_sample * 2)
     
@@ -428,7 +428,7 @@ def convert_mixed_to_lmdb(
     print(f"  Actual size per sample: {actual_size_per_sample / (1024**2):.2f} MB")
     db = lmdb.open(str(lmdb_path), map_size=int(map_size))
     
-    # 分批处理
+    # Batch processing
     BATCH_SIZE = 500
     keys = []
     global_index = 0
@@ -436,11 +436,11 @@ def convert_mixed_to_lmdb(
     
     try:
         for file_path, file_type in tqdm(all_files, desc="Processing files"):
-            # 加载文件
+            # Load file
             file_data = torch.load(file_path, map_location='cpu', weights_only=False)
             num_samples = file_data.shape[0]
             
-            # 分批写入LMDB
+            # Batch write to LMDB
             for batch_start in range(0, num_samples, BATCH_SIZE):
                 batch_end = min(batch_start + BATCH_SIZE, num_samples)
                 
@@ -474,11 +474,11 @@ def convert_mixed_to_lmdb(
                 
                 gc.collect()
             
-            # 释放内存
+            # Release memory
             del file_data
             gc.collect()
             
-            # 删除文件（如果启用）
+            # Delete file (if enabled)
             if delete_after_convert:
                 try:
                     file_path.unlink()
@@ -487,7 +487,7 @@ def convert_mixed_to_lmdb(
             
             processed_files += 1
             
-            # 每处理100个文件打印一次进度
+            # Print progress every 100 files
             if processed_files % 100 == 0:
                 print(f"  Processed {processed_files}/{len(all_files)} files, total samples: {global_index}")
         
@@ -497,14 +497,14 @@ def convert_mixed_to_lmdb(
     finally:
         db.close()
     
-    # 保存keys列表
+    # Save keys list
     torch.save(keys, keys_path)
     
     print(f"\n✅ Successfully converted to LMDB: {lmdb_path}")
     print(f"✅ Saved keys list: {keys_path}")
     print(f"✅ Database contains {len(keys)} codes")
     
-    # 验证
+    # Verify
     print("\nVerifying generated LMDB file...")
     try:
         verify_db = lmdb.open(str(lmdb_path), readonly=True)
@@ -528,15 +528,15 @@ def convert_temp_position_weights_to_lmdb(
     delete_batches=False
 ):
     """
-    直接将temp_batch position_weights文件转换为LMDB
+    Convert temp_batch position_weights files to LMDB
     
     Args:
-        temp_dir: temp_batches目录路径
-        output_dir: 输出目录路径
-        num_augmentations: 数据增强数量
-        aug_idx: 增强索引
-        codes_keys: codes的keys列表，用于验证数量匹配
-        delete_batches: 是否在转换后删除batch文件
+        temp_dir: temp_batches directory path
+        output_dir: output directory path
+        num_augmentations: data augmentation number
+        aug_idx: augmentation index
+        codes_keys: codes keys list, used to verify count matching
+        delete_batches: whether to delete batch files after conversion
     """
     return convert_temp_batches_to_lmdb(
         temp_dir=temp_dir,
@@ -549,31 +549,31 @@ def convert_temp_position_weights_to_lmdb(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="直接将temp_batch文件转换为LMDB格式")
+    parser = argparse.ArgumentParser(description="Convert temp_batch files to LMDB format")
     parser.add_argument("--temp_dir", type=str, default=None,
-                       help="temp_batches目录路径（如果使用--mixed_mode，此参数可选）")
+                       help="temp_batches directory path (optional if using --mixed_mode)")
     parser.add_argument("--output_dir", type=str, required=True,
-                       help="输出目录路径（LMDB文件保存位置）")
+                       help="output directory path (LMDB file save location)")
     parser.add_argument("--num_augmentations", type=int, required=True,
-                       help="数据增强数量")
+                       help="data augmentation number")
     parser.add_argument("--aug_idx", type=int, default=0,
-                       help="增强索引（默认0）")
+                       help="augmentation index (default 0)")
     parser.add_argument("--delete_batches", action="store_true",
-                       help="转换后删除batch文件（节省空间）")
+                       help="delete batch files after conversion (save space)")
     parser.add_argument("--convert_weights", action="store_true",
-                       help="同时转换position_weights文件")
+                       help="convert position_weights files")
     parser.add_argument("--only_weights", action="store_true",
-                       help="只转换position_weights文件，跳过codes转换")
+                       help="convert position_weights files, skip codes conversion")
     
-    # 新增：混合模式参数
+    # Mixed mode parameter
     parser.add_argument("--mixed_mode", action="store_true",
-                       help="混合模式：同时处理intermediate文件和batch文件")
+                       help="mixed mode: process intermediate and batch files")
     parser.add_argument("--intermediate_dir", type=str, default=None,
-                       help="intermediate文件目录路径（仅在--mixed_mode时使用）")
+                       help="intermediate file directory path (only used when using --mixed_mode)")
     
     args = parser.parse_args()
     
-    # 如果指定了--only_weights，直接转换weights并返回
+    # If --only_weights is specified, convert weights and return
     if args.only_weights:
         if not args.temp_dir:
             raise ValueError("--temp_dir is required when using --only_weights")
@@ -590,7 +590,7 @@ def main():
         
         print("\n>> Converting position_weights files...")
         try:
-            # 尝试加载codes keys用于验证（可选）
+            # Try to load codes keys for verification (optional)
             keys_path = Path(args.output_dir) / f"codes_aug{args.num_augmentations}_{args.aug_idx:03d}_keys.pt"
             codes_keys = None
             if keys_path.exists():
@@ -602,7 +602,7 @@ def main():
             if args.mixed_mode:
                 if not args.intermediate_dir:
                     raise ValueError("--intermediate_dir is required when using --mixed_mode with --only_weights")
-                # 混合模式：处理intermediate + batch position_weights
+                # Mixed mode: process intermediate + batch position_weights
                 num_weights = convert_mixed_to_lmdb(
                     intermediate_dir=args.intermediate_dir.replace("codes", "position_weights") if args.intermediate_dir else None,
                     temp_batches_dir=args.temp_dir,
@@ -613,7 +613,7 @@ def main():
                     delete_after_convert=args.delete_batches
                 )
             else:
-                # 普通模式：只处理batch position_weights
+                # Normal mode: only process batch position_weights
                 num_weights = convert_temp_position_weights_to_lmdb(
                     temp_dir=args.temp_dir,
                     output_dir=args.output_dir,
@@ -642,9 +642,9 @@ def main():
         print("=" * 80)
         return
     
-    # 检查模式
+    # Check mode
     if args.mixed_mode:
-        # 混合模式：处理intermediate + batch文件
+        # Mixed mode: process intermediate + batch files
         if not args.intermediate_dir:
             raise ValueError("--intermediate_dir is required when using --mixed_mode")
         if not args.temp_dir:
@@ -661,7 +661,7 @@ def main():
         print(f"Delete files after conversion: {args.delete_batches}")
         print("=" * 80)
         
-        # 转换codes文件
+        # Convert codes files
         print("\n>> Converting codes files (mixed mode)...")
         try:
             num_samples = convert_mixed_to_lmdb(
@@ -680,7 +680,7 @@ def main():
             traceback.print_exc()
             return
     else:
-        # 普通模式：只处理batch文件
+        # Normal mode: only process batch files
         if not args.temp_dir:
             raise ValueError("--temp_dir is required when not using --mixed_mode")
         
@@ -694,7 +694,7 @@ def main():
         print(f"Delete batches after conversion: {args.delete_batches}")
         print("=" * 80)
         
-        # 转换codes文件
+        # Convert codes files
         print("\n>> Converting codes files...")
         try:
             num_samples = convert_temp_batches_to_lmdb(
@@ -712,11 +712,11 @@ def main():
             traceback.print_exc()
             return
     
-    # 转换position_weights文件（如果启用）
+    # Convert position_weights files (if enabled)
     if args.convert_weights:
         print("\n>> Converting position_weights files...")
         try:
-            # 加载codes keys用于验证
+            # Load codes keys for verification
             keys_path = Path(args.output_dir) / f"codes_aug{args.num_augmentations}_{args.aug_idx:03d}_keys.pt"
             if keys_path.exists():
                 codes_keys = torch.load(keys_path, weights_only=False)
@@ -726,7 +726,7 @@ def main():
                 print(f"  ⚠️  Warning: Codes keys file not found, cannot verify position_weights count")
             
             if args.mixed_mode:
-                # 混合模式：处理intermediate + batch position_weights
+                # Mixed mode: process intermediate + batch position_weights
                 num_weights = convert_mixed_to_lmdb(
                     intermediate_dir=args.intermediate_dir.replace("codes", "position_weights") if args.intermediate_dir else None,
                     temp_batches_dir=args.temp_dir,
@@ -737,7 +737,7 @@ def main():
                     delete_after_convert=args.delete_batches
                 )
             else:
-                # 普通模式：只处理batch position_weights
+                # Normal mode: only process batch position_weights
                 num_weights = convert_temp_position_weights_to_lmdb(
                     temp_dir=args.temp_dir,
                     output_dir=args.output_dir,

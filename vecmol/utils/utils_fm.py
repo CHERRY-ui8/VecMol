@@ -267,31 +267,31 @@ def compute_code_stats_offline(
     """
     dataset = loader.dataset
     
-    # 如果未提供num_augmentations，尝试从dataset中获取
+    # If num_augmentations is not provided, try to get it from dataset
     if num_augmentations is None and hasattr(dataset, 'num_augmentations'):
         num_augmentations = dataset.num_augmentations
     
-    # 确定缓存文件路径
+    # Determine cache file path
     cache_path = None
     if hasattr(dataset, 'use_lmdb') and dataset.use_lmdb:
-        # LMDB模式：使用LMDB路径作为缓存目录
-        # 对于分片LMDB，lmdb_path指向第一个分片，但缓存应该放在分片目录的父目录
+        # LMDB mode: use LMDB path as cache directory
+        # For sharded LMDB, lmdb_path points to the first shard, but the cache should be in the parent directory of the shard directory
         if hasattr(dataset, 'use_sharded') and dataset.use_sharded:
-            # 分片模式：使用codes_dir作为缓存目录（分片文件的父目录）
+            # Sharded mode: use codes_dir as cache directory (parent directory of shard files)
             cache_dir = dataset.codes_dir
         else:
-            # 单个LMDB模式：使用LMDB路径的目录
+            # Single LMDB mode: use directory of LMDB path
             lmdb_path = dataset.lmdb_path
             cache_dir = os.path.dirname(lmdb_path)
         
-        # 生成缓存文件名：基于split、normalize_codes和num_augmentations参数
+        # Generate cache file name: based on split, normalize_codes and num_augmentations parameters
         if num_augmentations is not None:
             cache_filename = f"code_stats_{split}_aug{num_augmentations}_norm{normalize_codes}.pt"
         else:
             cache_filename = f"code_stats_{split}_norm{normalize_codes}.pt"  # 向后兼容
         cache_path = os.path.join(cache_dir, cache_filename)
     elif hasattr(dataset, 'codes_dir'):
-        # 传统模式：使用codes_dir作为缓存目录
+        # Traditional mode: use codes_dir as cache directory
         cache_dir = dataset.codes_dir
         if num_augmentations is not None:
             cache_filename = f"code_stats_{split}_aug{num_augmentations}_norm{normalize_codes}.pt"
@@ -299,7 +299,7 @@ def compute_code_stats_offline(
             cache_filename = f"code_stats_{split}_norm{normalize_codes}.pt"  # 向后兼容
         cache_path = os.path.join(cache_dir, cache_filename)
     
-    # 尝试加载缓存
+    # Try to load cache
     if cache_path and os.path.exists(cache_path):
         try:
             print(f"Loading cached code statistics from: {cache_path}")
@@ -315,34 +315,34 @@ def compute_code_stats_offline(
             print(f"Warning: Failed to load cached code statistics: {e}")
             print("Will recompute statistics...")
     
-    # 如果缓存不存在，使用文件锁确保只有一个进程计算统计信息
+    # If cache does not exist, use file lock to ensure only one process computes statistics
     lock_path = None
     lock_file = None
     should_compute = False
     
     if cache_path:
-        # 创建锁文件路径
+        # Create lock file path
         lock_path = cache_path + ".lock"
         lock_dir = os.path.dirname(lock_path)
         os.makedirs(lock_dir, exist_ok=True)
         
         try:
-            # 尝试获取文件锁（非阻塞）
+            # Try to acquire file lock (non-blocking)
             lock_file = open(lock_path, 'w')
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             should_compute = True
             print(f"Acquired lock for computing code statistics (process will compute stats)")
         except (IOError, OSError):
-            # 无法获取锁，说明其他进程正在计算
+            # Cannot acquire lock, other processes are computing
             if lock_file:
                 lock_file.close()
             lock_file = None
             should_compute = False
             print(f"Another process is computing code statistics, waiting for cache file...")
             
-            # 等待其他进程完成计算（最多等待2小时）
+            # Wait for other processes to complete computation (maximum wait time is 2 hours)
             max_wait_time = 7200  # 2小时
-            wait_interval = 2  # 每2秒检查一次
+            wait_interval = 2  # Check every 2 seconds
             elapsed_time = 0
             
             while elapsed_time < max_wait_time:
@@ -362,20 +362,20 @@ def compute_code_stats_offline(
                 
                 time.sleep(wait_interval)
                 elapsed_time += wait_interval
-                if elapsed_time % 30 == 0:  # 每30秒打印一次
+                if elapsed_time % 30 == 0:  # Print every 30 seconds
                     print(f"Still waiting for cache file... ({elapsed_time}s elapsed)")
             
-            # 如果超时，抛出错误
+            # If timeout, raise error
             raise RuntimeError(
                 f"Timeout waiting for code statistics cache file. "
                 f"Expected cache file: {cache_path}. "
                 f"Please check if another process is still computing statistics."
             )
     
-    # 只有在获取到锁或没有缓存路径时才进行计算
+    # Only compute if lock is acquired or no cache path exists
     if not should_compute and cache_path:
-        # 如果没有获取到锁，说明其他进程正在计算，我们已经在上面的等待循环中返回了
-        # 这里不应该到达，但为了安全起见，再次检查缓存
+        # If lock is not acquired, other processes are computing, we have returned in the waiting loop above
+        # Here should not be reached, but for safety, check cache again
         if os.path.exists(cache_path):
             try:
                 cached_stats = torch.load(cache_path, weights_only=False)
@@ -384,34 +384,34 @@ def compute_code_stats_offline(
                 pass
         raise RuntimeError("Unexpected state: should not compute but no cache available")
     
-    # 检查是否使用LMDB模式
+    # Check if using LMDB mode
     if hasattr(dataset, 'use_lmdb') and dataset.use_lmdb:
-        # LMDB模式：使用流式处理计算统计信息，避免内存溢出
+        # LMDB mode: use streaming mode to compute statistics, avoid memory overflow
         print(f"Computing code statistics from LMDB database for {split} split (streaming mode)...")
         print(f"Total samples: {len(dataset)}")
         if max_samples is not None:
             print(f"[Approximate stats] Will stop after roughly {max_samples} scalar samples.")
         
-        # 使用在线统计算法（Welford's algorithm）来计算均值和标准差
-        # 同时跟踪最大值和最小值
+        # Use online statistics algorithm (Welford's algorithm) to compute mean and standard deviation
+        # Track max and min values simultaneously
         n_samples = 0
         mean = None
-        M2 = None  # 用于计算方差的中间变量
+        M2 = None  # Intermediate variable for calculating variance
         max_val = None
         min_val = None
         
-        # 创建一个临时DataLoader用于分批处理
-        # 使用较小的batch_size和单线程以避免内存问题
+        # Create a temporary DataLoader for batch processing
+        # Use smaller batch_size and single thread to avoid memory issues
         temp_loader = torch.utils.data.DataLoader(
             dataset,
-            batch_size=min(loader.batch_size, 32),  # 限制batch size
+            batch_size=min(loader.batch_size, 32),  # Limit batch size
             shuffle=False,
-            num_workers=0,  # 单线程避免多进程问题
+            num_workers=0,  # Single thread to avoid multi-process issues
             pin_memory=False
         )
         
         for batch in tqdm(temp_loader, desc=f"Computing stats for {split}"):
-            # batch可能是单个tensor或tensor列表
+            # batch may be a single tensor or a list of tensors
             if isinstance(batch, (list, tuple)):
                 batch_codes = torch.stack(batch) if len(batch) > 0 else None
             else:
@@ -420,10 +420,10 @@ def compute_code_stats_offline(
             if batch_codes is None or batch_codes.numel() == 0:
                 continue
             
-            # 展平batch以便计算统计信息
+            # Flatten batch for calculating statistics
             batch_flat = batch_codes.flatten()
             
-            # 更新最大值和最小值
+            # Update max and min values
             batch_max = batch_flat.max()
             batch_min = batch_flat.min()
             
@@ -434,29 +434,29 @@ def compute_code_stats_offline(
                 max_val = torch.max(max_val, batch_max)
                 min_val = torch.min(min_val, batch_min)
             
-            # 使用Welford's online algorithm更新均值和方差
+            # Use Welford's online algorithm to update mean and variance
             batch_n = batch_flat.numel()
             
-            # 如果设置了 max_samples，并且这一批已经会让总样本数大幅超过上限，
-            # 我们仍然完整使用这一批的数据，但在达到 / 超过上限后提前结束循环。
+            # If max_samples is set, and this batch would significantly exceed the limit,
+            # we still use this batch completely, but end the loop early after exceeding the limit.
             batch_mean = batch_flat.mean()
             
             if mean is None:
-                # 初始化
+                # Initialize
                 mean = batch_mean
                 M2 = ((batch_flat - mean) ** 2).sum()
                 n_samples = batch_n
             else:
-                # 更新统计量
+                # Update statistics
                 delta = batch_mean - mean
                 n_samples_new = n_samples + batch_n
                 mean = mean + delta * batch_n / n_samples_new
                 
-                # 更新M2（用于计算方差）
+                # Update M2 (for calculating variance)
                 M2 = M2 + ((batch_flat - batch_mean) ** 2).sum() + delta ** 2 * n_samples * batch_n / n_samples_new
                 n_samples = n_samples_new
             
-            # 释放内存
+            # Free memory
             del batch_codes, batch_flat, batch_mean
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -465,11 +465,11 @@ def compute_code_stats_offline(
                 print(f"[Approximate stats] Reached max_samples≈{max_samples} (actual scalar samples: {n_samples}), stopping early.")
                 break
         
-        # 计算最终统计量
+        # Calculate final statistics
         if n_samples == 0:
             raise ValueError(f"No samples found in dataset for {split} split")
         
-        # 确保所有tensor在同一设备上
+        # Ensure all tensors are on the same device
         device = mean.device if isinstance(mean, torch.Tensor) else torch.device('cpu')
         if isinstance(max_val, torch.Tensor):
             max_val = max_val.to(device)
@@ -478,15 +478,15 @@ def compute_code_stats_offline(
         if isinstance(M2, torch.Tensor):
             M2 = M2.to(device)
         
-        # 计算标准差，避免除零错误
+        # Calculate standard deviation, avoid division by zero error
         if n_samples > 1:
             std = torch.sqrt(M2 / n_samples)
-            # 如果std太小，设置为一个小的正值以避免除零
+            # If std is too small, set to a small positive value to avoid division by zero
             std = torch.clamp(std, min=1e-8)
         else:
             std = torch.tensor(1.0, device=device)
         
-        # 打印统计信息
+        # Print statistics
         print(f"====codes {split}====")
         print(f"min: {min_val.item()}")
         print(f"max: {max_val.item()}")
@@ -494,19 +494,19 @@ def compute_code_stats_offline(
         print(f"std: {std.item()}")
         print(f"Total samples processed: {n_samples}")
         
-        # 构建code_stats字典
+        # Build code_stats dictionary
         code_stats = {
             "mean": mean.item() if isinstance(mean, torch.Tensor) else mean,
             "std": std.item() if isinstance(std, torch.Tensor) else std,
         }
         
         if normalize_codes:
-            # 对于归一化后的代码，我们需要重新计算统计信息
-            # 但由于我们已经有了mean和std，归一化后的代码应该接近N(0,1)
-            # 我们可以估算归一化后的范围
-            # 归一化公式: (x - mean) / std
-            # 归一化后的min: (min_val - mean) / std
-            # 归一化后的max: (max_val - mean) / std
+            # For normalized codes, we need to recompute statistics
+            # But since we already have mean and std, normalized codes should be close to N(0,1)
+            # We can estimate the range of normalized codes
+            # Normalization formula: (x - mean) / std
+            # Normalized min: (min_val - mean) / std
+            # Normalized max: (max_val - mean) / std
             normalized_min = (min_val - mean) / std
             normalized_max = (max_val - mean) / std
             max_normalized = normalized_max.item() if isinstance(normalized_max, torch.Tensor) else normalized_max
@@ -524,11 +524,11 @@ def compute_code_stats_offline(
         print(f"min_normalized: {min_normalized}")
         print(f"max_normalized: {max_normalized}")
         
-        # 保存缓存
+        # Save cache
         if cache_path:
             try:
                 os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                # 先保存到临时文件，然后原子性地重命名
+                # Save to temporary file, then atomically rename
                 temp_cache_path = cache_path + ".tmp"
                 torch.save(code_stats, temp_cache_path)
                 os.rename(temp_cache_path, cache_path)
@@ -536,12 +536,12 @@ def compute_code_stats_offline(
             except Exception as e:
                 print(f"Warning: Failed to save code statistics cache: {e}")
         
-        # 释放文件锁
+        # Release file lock
         if lock_file:
             try:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
                 lock_file.close()
-                # 删除锁文件
+                # Delete lock file
                 if os.path.exists(lock_path):
                     os.remove(lock_path)
             except Exception as e:
@@ -549,7 +549,7 @@ def compute_code_stats_offline(
         
         return code_stats
     else:
-        # 传统模式：直接使用curr_codes属性
+        # Traditional mode: directly use curr_codes attribute
         if hasattr(dataset, 'curr_codes'):
             codes = dataset.curr_codes[:]
         else:
@@ -560,11 +560,11 @@ def compute_code_stats_offline(
         
         code_stats = process_codes(codes, split, normalize_codes)
         
-        # 保存缓存（传统模式）
+        # Save cache (traditional mode)
         if cache_path:
             try:
                 os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                # 先保存到临时文件，然后原子性地重命名
+                # Save to temporary file, then atomically rename
                 temp_cache_path = cache_path + ".tmp"
                 torch.save(code_stats, temp_cache_path)
                 os.rename(temp_cache_path, cache_path)
@@ -572,12 +572,12 @@ def compute_code_stats_offline(
             except Exception as e:
                 print(f"Warning: Failed to save code statistics cache: {e}")
         
-        # 释放文件锁
+        # Release file lock
         if lock_file:
             try:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
                 lock_file.close()
-                # 删除锁文件
+                # Delete lock file
                 if os.path.exists(lock_path):
                     os.remove(lock_path)
             except Exception as e:
@@ -680,7 +680,7 @@ def load_checkpoint_state_fm(model, checkpoint_path_or_dir):
     # Load Vecmol state
     # Use strict=True to ensure all keys match exactly
     if "vecmol" in state_dict:
-        # 统一去掉 _orig_mod. 前缀
+        # Remove _orig_mod. prefix
         new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict["vecmol"].items()}
         try:
             model.vecmol.load_state_dict(new_state_dict, strict=True)
@@ -691,7 +691,7 @@ def load_checkpoint_state_fm(model, checkpoint_path_or_dir):
                 f"Original error: {str(e)}"
             ) from e
     elif "vecmol_state_dict" in state_dict:
-        # 统一去掉 _orig_mod. 前缀
+        # Remove _orig_mod. prefix
         new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict["vecmol_state_dict"].items()}
         try:
             model.vecmol.load_state_dict(new_state_dict, strict=True)
@@ -708,38 +708,38 @@ def load_checkpoint_state_fm(model, checkpoint_path_or_dir):
         )
     
     # Load EMA state
-    # ModelEma的结构：model.vecmol_ema.module 是实际的模型
-    # 如果ModelEma的module被DDP包装，则：model.vecmol_ema.module.module 是实际模型
-    # Checkpoint中保存的是 model.vecmol_ema.module.state_dict()，键名是 net.xxx
-    # 需要根据目标模型的键名格式，正确地映射checkpoint中的键名
+    # ModelEma structure: model.vecmol_ema.module is the actual model
+    # If ModelEma's module is wrapped by DDP, then model.vecmol_ema.module.module is the actual model
+    # Checkpoint saves model.vecmol_ema.module.state_dict(), keys are net.xxx
+    # Need to correctly map checkpoint keys to target model keys
     
     if "vecmol_ema" in state_dict or "vecmol_ema_state_dict" in state_dict:
-        # 获取checkpoint中的EMA state_dict
+        # Get EMA state_dict from checkpoint
         ema_state_dict = state_dict.get("vecmol_ema") or state_dict.get("vecmol_ema_state_dict")
-        # 统一去掉 _orig_mod. 前缀
+        # Remove _orig_mod. prefix
         checkpoint_state_dict = {k.replace("_orig_mod.", ""): v for k, v in ema_state_dict.items()}
         
-        # 获取目标模型的state_dict，查看实际的键名格式
+        # Get target model state_dict, check actual key format
         target_model = model.vecmol_ema.module
         target_state_dict = target_model.state_dict()
         
-        # 根据目标模型的键名格式，映射checkpoint中的键名
+        # Map checkpoint keys to target model keys based on target model key format
         mapped_state_dict = {}
         for ckpt_key, ckpt_value in checkpoint_state_dict.items():
-            # 尝试直接匹配
+            # Try direct match
             if ckpt_key in target_state_dict:
                 mapped_state_dict[ckpt_key] = ckpt_value
-            # 尝试添加module.前缀（DDP包装的情况）
+            # Try adding module. prefix (for DDP wrapped case)
             elif f"module.{ckpt_key}" in target_state_dict:
                 mapped_state_dict[f"module.{ckpt_key}"] = ckpt_value
-            # 尝试去掉module.前缀（如果checkpoint有但目标没有）
+            # Try removing module. prefix (if checkpoint has but target doesn't)
             elif ckpt_key.startswith("module.") and ckpt_key[7:] in target_state_dict:
                 mapped_state_dict[ckpt_key[7:]] = ckpt_value
             else:
-                # 如果无法匹配，记录警告但继续（会在strict=True时抛出错误）
+                # If cannot match, record warning but continue (will raise error with strict=True)
                 print(f"Warning: Cannot map checkpoint key '{ckpt_key}' to target model")
         
-        # 验证所有目标模型的键都有对应的checkpoint值
+        # Verify all target model keys have corresponding checkpoint values
         missing_keys = set(target_state_dict.keys()) - set(mapped_state_dict.keys())
         if missing_keys:
             raise RuntimeError(
@@ -747,7 +747,7 @@ def load_checkpoint_state_fm(model, checkpoint_path_or_dir):
                 f"(total {len(missing_keys)} missing keys)"
             )
         
-        # 验证checkpoint中没有多余的键
+        # Verify checkpoint has no extra keys
         unexpected_keys = set(mapped_state_dict.keys()) - set(target_state_dict.keys())
         if unexpected_keys:
             raise RuntimeError(
@@ -755,7 +755,7 @@ def load_checkpoint_state_fm(model, checkpoint_path_or_dir):
                 f"(total {len(unexpected_keys)} unexpected keys)"
             )
         
-        # 使用strict=True进行严格检查
+        # Use strict=True for strict check
         try:
             target_model.load_state_dict(mapped_state_dict, strict=True)
             print("Loaded Vecmol EMA state with strict=True (all keys matched)")

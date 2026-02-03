@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-将现有的codes.pt或codes_XXX.pt文件转换为LMDB格式以提高数据加载效率
-支持多个codes文件合并转换为单个LMDB数据库
+convert existing codes.pt or codes_XXX.pt files to LMDB format to improve data loading efficiency
+support merging multiple codes files into a single LMDB database
 """
 
 import os
@@ -16,24 +16,24 @@ import shutil
 
 def convert_codes_to_lmdb(codes_dir, split, lmdb_path, keys_path, num_augmentations):
     """
-    将codes文件转换为LMDB数据库
+    Convert codes files to LMDB database
     
     Args:
-        codes_dir (str): codes文件所在目录
-        split (str): 数据分割名称 (train/val/test)
-        lmdb_path (str): 输出LMDB数据库路径
-        keys_path (str): 输出keys文件路径
-        num_augmentations (int): 数据增强数量，用于查找对应格式的文件
+        codes_dir (str): codes file directory
+        split (str): dataset split name (train/val/test)
+        lmdb_path (str): output LMDB database path
+        keys_path (str): output keys file path
+        num_augmentations (int): num_augmentations, used to find corresponding format files
     
     Returns:
-        num_augmentations (int): 数据增强数量（codes文件的数量）
+        num_augmentations (int): num_augmentations (number of codes files)
     """
     split_dir = os.path.join(codes_dir, split)
     
     if not os.path.exists(split_dir):
         raise FileNotFoundError(f"Codes directory not found: {split_dir}")
     
-    # 根据数据增强数量查找对应格式的文件：codes_aug{num}_XXX.pt
+    # Find corresponding format files based on num_augmentations: codes_aug{num}_XXX.pt
     list_codes = [
         f for f in os.listdir(split_dir)
         if os.path.isfile(os.path.join(split_dir, f)) and \
@@ -46,7 +46,7 @@ def convert_codes_to_lmdb(codes_dir, split, lmdb_path, keys_path, num_augmentati
             f"Please ensure codes files are generated with num_augmentations={num_augmentations}"
         )
     
-    # 排序确保顺序正确
+    # Sort to ensure correct order
     list_codes.sort()
     print(f"Found {len(list_codes)} codes files matching pattern 'codes_aug{num_augmentations}_*.pt'")
     
@@ -54,16 +54,16 @@ def convert_codes_to_lmdb(codes_dir, split, lmdb_path, keys_path, num_augmentati
     for code_file in list_codes:
         print(f"  - {code_file}")
     
-    # 只加载第一个文件来获取shape信息，假设所有文件shape相同
+    # Load only the first file to get shape information, assuming all files have the same shape
     print("Loading first file to get shape info...")
     first_code_path = os.path.join(split_dir, list_codes[0])
     first_codes = torch.load(first_code_path, weights_only=False)
     print(f"  Shape: {first_codes.shape}")
     
     samples_per_file = first_codes.shape[0]
-    code_shape = first_codes.shape[1:]  # 保存每个样本的shape（去掉batch维度）
+    code_shape = first_codes.shape[1:]  # Save the shape of each sample (remove batch dimension)
     
-    # 计算每个样本的实际大小
+    # Calculate the actual size of each sample
     if len(first_codes.shape) == 3:
         # 3D tensor: [batch, dim1, dim2]
         actual_size_per_sample = code_shape[0] * code_shape[1] * 4  # float32 = 4 bytes
@@ -79,16 +79,16 @@ def convert_codes_to_lmdb(codes_dir, split, lmdb_path, keys_path, num_augmentati
     else:
         code_dim = first_codes.shape[0]
     
-    # 估算总样本数（假设所有文件shape相同）
+    # Estimate total number of samples (assuming all files have the same shape)
     total_samples = samples_per_file * len(list_codes)
-    del first_codes  # 立即释放内存
+    del first_codes  # Immediately release memory
     gc.collect()
     
     print(f"Estimated total samples: {total_samples} (assuming {samples_per_file} samples per file)")
     print(f"Code shape per sample: {code_shape}")
     print(f"Code dimension: {code_dim}")
     
-    # 删除旧的LMDB文件（如果存在）
+    # Delete old LMDB file (if exists)
     if os.path.exists(lmdb_path):
         print(f"Removing existing LMDB file: {lmdb_path}")
         if os.path.isdir(lmdb_path):
@@ -96,15 +96,15 @@ def convert_codes_to_lmdb(codes_dir, split, lmdb_path, keys_path, num_augmentati
         else:
             os.remove(lmdb_path)
     
-    # 删除旧的锁文件（如果存在）
+    # Delete old lock file (if exists)
     lock_file = lmdb_path + "-lock"
     if os.path.exists(lock_file):
         print(f"Removing existing lock file: {lock_file}")
         os.remove(lock_file)
     
-    # 创建LMDB数据库
-    # 加上序列化开销（pickle overhead）和 LMDB overhead
-    # pickle序列化会增加约50-100%的开销，LMDB也有少量overhead
+    # Create LMDB database
+    # Add serialization overhead (pickle overhead) and LMDB overhead
+    # pickle serialization increases about 50-100% overhead, LMDB also has少量overhead
     estimated_size_per_sample = actual_size_per_sample * 2.0 + 4096  # 2倍用于序列化和overhead，4096 bytes额外overhead
     map_size = max(100 * (1024 * 1024 * 1024), total_samples * estimated_size_per_sample * 2)  # 至少100GB，或2倍估算大小
     
@@ -113,10 +113,8 @@ def convert_codes_to_lmdb(codes_dir, split, lmdb_path, keys_path, num_augmentati
     print(f"  Estimated size per sample (with overhead): {estimated_size_per_sample / (1024**2):.2f} MB")
     db = lmdb.open(lmdb_path, map_size=int(map_size))
     
-    # 逐个文件处理，边读边写，避免内存爆炸
-    # 使用小批次处理，保守地使用内存，避免服务器崩溃
-    # 每个样本约0.36MB，500个样本约180MB，加上序列化开销约360MB，在内存可接受范围内
-    BATCH_SIZE = 500  # 每批写入500个sample后提交事务，保守设置避免内存峰值
+    # deal with each file one by one, read and write, avoid memory explosion
+    BATCH_SIZE = 500
     
     keys = []
     global_index = 0
@@ -125,62 +123,60 @@ def convert_codes_to_lmdb(codes_dir, split, lmdb_path, keys_path, num_augmentati
             code_path = os.path.join(split_dir, code_file)
             print(f"Processing {code_file}...")
             
-            # 加载当前文件（但我们会尽快处理并释放）
+            # Load current file (but we will process and release it as soon as possible)
             codes = torch.load(code_path, weights_only=False)
             num_samples = codes.shape[0]
             print(f"  Loaded {num_samples} samples, shape: {codes.shape}")
             
-            # 分批写入LMDB
+            # Write to LMDB in batches
             num_batches = (num_samples + BATCH_SIZE - 1) // BATCH_SIZE
             pbar = tqdm(range(0, num_samples, BATCH_SIZE), desc=f"  Writing {code_file}", total=num_batches)
             
             for batch_start in pbar:
                 batch_end = min(batch_start + BATCH_SIZE, num_samples)
                 
-                # 每个批次使用独立的事务
+                # Use independent transactions for each batch
                 with db.begin(write=True) as txn:
-                    # 逐样本处理，立即序列化和写入，避免在内存中累积
+                    # Process each sample immediately, serialize and write, avoid accumulation in memory
                     for i in range(batch_start, batch_end):
                         key = str(global_index).encode()
                         
-                        # 提取单个样本（这会创建一个view，不复制数据）
-                        # 但我们需要clone()来确保序列化时不会序列化整个tensor
+                        # Extract single sample (this will create a view, not copy data)
+                        # But we need clone() to ensure that the entire tensor is not serialized when serializing
                         code_sample = codes[i].clone().detach()
                         
-                        # 立即序列化
+                        # Immediately serialize
                         try:
                             value = pickle.dumps(code_sample, protocol=pickle.HIGHEST_PROTOCOL)
                             
-                            # 检查序列化后的大小（LMDB单个值限制约511MB）
                             value_size_mb = len(value) / (1024 * 1024)
                             if value_size_mb > 500:  # 500MB
                                 print(f"\nWarning: code {global_index} is very large: {value_size_mb:.2f} MB")
                             
-                            # LMDB单个值大小限制检查（约511MB）
                             if len(value) > 511 * 1024 * 1024:
                                 raise ValueError(f"Code {global_index} is too large for LMDB: {value_size_mb:.2f} MB (max 511MB)")
                             
-                            # 立即写入，不累积在内存中
+                            # Immediately write, avoid accumulation in memory
                             txn.put(key, value)
                             keys.append(str(global_index))
                             
                         except Exception as e:
                             print(f"\nError serializing code {global_index}: {e}")
                         
-                        # 立即释放code_sample和value的引用
+                        # Immediately release references to code_sample and value
                         del code_sample
                         if 'value' in locals():
                             del value
                         
                         global_index += 1
                 
-                # 每个批次后强制垃圾回收，释放内存
+                # Force garbage collection after each batch, release memory
                 gc.collect()
                 
-                # 更新进度条
+                # Update progress bar
                 pbar.set_postfix({'samples': global_index, 'mem': f'{global_index * 0.36 / 1024:.1f}GB'})
             
-            # 立即释放整个文件的内存
+            # Immediately release memory of the entire file
             del codes
             gc.collect()
             print(f"  Completed {code_file}, total samples so far: {global_index}")
@@ -191,14 +187,14 @@ def convert_codes_to_lmdb(codes_dir, split, lmdb_path, keys_path, num_augmentati
     finally:
         db.close()
     
-    # 保存keys列表
+    # Save keys list
     torch.save(keys, keys_path)
     
     print(f"Successfully converted to LMDB: {lmdb_path}")
     print(f"Saved keys list: {keys_path}")
     print(f"Database contains {len(keys)} codes")
     
-    # 验证生成的LMDB文件
+    # Verify generated LMDB file
     print("Verifying generated LMDB file...")
     try:
         verify_db = lmdb.open(lmdb_path, readonly=True)
@@ -210,24 +206,24 @@ def convert_codes_to_lmdb(codes_dir, split, lmdb_path, keys_path, num_augmentati
     except Exception as e:
         print(f"❌ LMDB file verification failed: {e}")
     
-    # 返回数据增强数量
+    # Return data augmentation number
     num_augmentations = len(list_codes)
     return num_augmentations
 
 
 def convert_position_weights_to_lmdb(codes_dir, split, codes_keys, num_augmentations=None):
     """
-    将position_weights文件转换为LMDB数据库
+    Convert position_weights files to LMDB database
     
     Args:
-        codes_dir (str): codes文件所在目录
-        split (str): 数据分割名称 (train/val/test)
-        codes_keys (list): codes的keys列表，用于确保position_weights和codes的索引一致
-        num_augmentations (int): 数据增强数量，用于查找对应格式的文件
+        codes_dir (str): codes file directory
+        split (str): dataset split name (train/val/test)
+        codes_keys (list): codes keys list, used to ensure that position_weights and codes have the same indices
+        num_augmentations (int): data augmentation number, used to find corresponding format files
     """
     split_dir = os.path.join(codes_dir, split)
     
-    # 根据数据增强数量查找对应格式的文件：position_weights_aug{num}_XXX.pt
+    # Find corresponding format files based on num_augmentations: position_weights_aug{num}_XXX.pt
     list_weights = [
         f for f in os.listdir(split_dir)
         if os.path.isfile(os.path.join(split_dir, f)) and \
@@ -238,13 +234,13 @@ def convert_position_weights_to_lmdb(codes_dir, split, codes_keys, num_augmentat
         print(f"No position_weights files found in {split_dir} matching pattern 'position_weights_aug{num_augmentations}_*.pt', skipping...")
         return
     
-    # 排序确保顺序正确
+    # Sort to ensure correct order
     list_weights.sort()
     print(f"\nFound {len(list_weights)} position_weights files matching pattern 'position_weights_aug{num_augmentations}_*.pt'")
     for weight_file in list_weights:
         print(f"  - {weight_file}")
     
-    # 加载第一个文件获取shape信息
+    # Load first file to get shape information
     first_weight_path = os.path.join(split_dir, list_weights[0])
     first_weights = torch.load(first_weight_path, weights_only=False)
     print(f"  Position weights shape: {first_weights.shape}")
@@ -256,17 +252,17 @@ def convert_position_weights_to_lmdb(codes_dir, split, codes_keys, num_augmentat
     
     print(f"Estimated total position_weights samples: {total_samples}")
     
-    # 验证与codes的数量是否匹配
+    # Verify that the number of position_weights matches the number of codes
     if len(codes_keys) != total_samples:
         print(f"Warning: Position weights count ({total_samples}) != codes count ({len(codes_keys)})")
         print("  Will still convert, but indices may not match correctly")
     
-    # 创建position_weights LMDB数据库
-    # 根据数据增强数量生成文件名，避免覆盖不同版本的文件
+    # Create position_weights LMDB database
+    # Generate file name based on num_augmentations, avoid overwriting different versions of files
     weights_lmdb_path = os.path.join(split_dir, f"position_weights_aug{num_augmentations}.lmdb")
     weights_keys_path = os.path.join(split_dir, f"position_weights_aug{num_augmentations}_keys.pt")
     
-    # 删除旧的LMDB文件（如果存在）
+    # Delete old LMDB file (if exists)
     if os.path.exists(weights_lmdb_path):
         print(f"Removing existing position_weights LMDB file: {weights_lmdb_path}")
         if os.path.isdir(weights_lmdb_path):
@@ -274,7 +270,7 @@ def convert_position_weights_to_lmdb(codes_dir, split, codes_keys, num_augmentat
         else:
             os.remove(weights_lmdb_path)
     
-    # 估算大小（position_weights通常比codes小很多）
+    # Estimate size (position_weights is usually much smaller than codes)
     estimated_size_per_sample = samples_per_file * 4 * 2.0 + 4096  # float32, 2倍开销
     map_size = max(10 * (1024 * 1024 * 1024), total_samples * estimated_size_per_sample * 2)  # 至少10GB
     
@@ -332,14 +328,14 @@ def convert_position_weights_to_lmdb(codes_dir, split, codes_keys, num_augmentat
     finally:
         db.close()
     
-    # 保存keys列表
+    # Save keys list
     torch.save(keys, weights_keys_path)
     
     print(f"Successfully converted position_weights to LMDB: {weights_lmdb_path}")
     print(f"Saved keys list: {weights_keys_path}")
     print(f"Database contains {len(keys)} position_weights")
     
-    # 验证
+    # Verify
     print("Verifying position_weights LMDB file...")
     try:
         verify_db = lmdb.open(weights_lmdb_path, readonly=True)
@@ -355,14 +351,14 @@ def convert_position_weights_to_lmdb(codes_dir, split, codes_keys, num_augmentat
 def main():
     parser = argparse.ArgumentParser(description="Convert codes files to LMDB format")
     parser.add_argument("--codes_dir", type=str, required=True, 
-                       help="Codes文件所在目录")
+                       help="Codes file directory")
     parser.add_argument("--num_augmentations", type=int, required=True,
-                       help="数据增强数量（必须与infer_codes时使用的num_augmentations一致）")
+                       help="Data augmentation number (must be consistent with num_augmentations used in infer_codes)")
     parser.add_argument("--splits", type=str, nargs="+", 
                        default=["train", "val", "test"],
-                       help="要转换的数据分割")
+                        help="Dataset splits to convert")
     parser.add_argument("--skip_position_weights", action="store_true",
-                       help="跳过position_weights文件的转换")
+                       help="Skip conversion of position_weights files")
     
     args = parser.parse_args()
     num_augmentations = args.num_augmentations
@@ -378,21 +374,21 @@ def main():
         print(f"{'='*60}")
         
         try:
-            # 根据数据增强数量生成文件名
+            # Generate file name based on num_augmentations
             lmdb_path = os.path.join(split_dir, f"codes_aug{num_augmentations}.lmdb")
             keys_path = os.path.join(split_dir, f"codes_aug{num_augmentations}_keys.pt")
             
             print(f"Looking for codes files matching pattern 'codes_aug{num_augmentations}_*.pt'")
             print(f"Will generate: {os.path.basename(lmdb_path)}")
             
-            # 转换codes
+            # Convert codes
             returned_num_aug = convert_codes_to_lmdb(args.codes_dir, split, lmdb_path, keys_path, num_augmentations)
             
-            # 确保返回的数量与预期一致
+            # Ensure that the returned number matches the expected number
             if returned_num_aug != num_augmentations:
                 print(f"Warning: Expected {num_augmentations} augmentations, but got {returned_num_aug}")
             
-            # 如果需要转换position_weights，加载keys并转换
+            # If position_weights conversion is needed, load keys and convert
             if not args.skip_position_weights:
                 if os.path.exists(keys_path):
                     codes_keys = torch.load(keys_path, weights_only=False)

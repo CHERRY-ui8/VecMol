@@ -170,7 +170,7 @@ def convert_xyzs_to_sdf(path_xyzs: str, fname: str = None, delete: bool = True, 
     """
     fname = "molecules_obabel.sdf" if fname is None else fname
     fabric.print(f">> process .xyz files and save in .sdf in {path_xyzs}")
-    # -h: add hydrogens (补齐缺少的H原子)
+    # -h: add hydrogens (fill in missing H atoms)
     cmd = f"obabel {path_xyzs}/*xyz -osdf -O {path_xyzs}/{fname} --title  end -h"
     os.system(cmd)
     if delete:
@@ -362,7 +362,7 @@ MAX_VALENCY = {
 }
 
 def get_bond_order_value(bond_type):
-    """将 RDKit 键类型转换为数值"""
+    """Convert RDKit bond type to numerical value"""
     from rdkit import Chem
     if bond_type == Chem.BondType.SINGLE:
         return 1
@@ -371,25 +371,25 @@ def get_bond_order_value(bond_type):
     elif bond_type == Chem.BondType.TRIPLE:
         return 3
     elif bond_type == Chem.BondType.AROMATIC:
-        return 1.5  # 芳香键通常视为 1.5
+        return 1.5  # Aromatic bonds are usually considered as 1.5
     else:
         return 1
 
 def calculate_atom_valency(mol, atom_idx):
-    """计算原子的当前价态（优先使用 RDKit 的总价，失败时按键级之和）"""
+    """Calculate the current valency of an atom (use RDKit's total valency first, fallback to sum of bond orders if fails)"""
     atom = mol.GetAtomWithIdx(atom_idx)
     
-    # 优先使用 RDKit 内部计算的价态
+    # Use RDKit's internal calculated valency first
     try:
         valency = float(atom.GetTotalValence())
-        # 对于某些未sanitize或信息不完整的分子，RDKit 可能返回 0 或负值，
+        # For some molecules that are not sanitized or have incomplete information, RDKit may return 0 or negative values,
         # 这种情况下回退到根据键级求和的旧实现。
         if valency > 0:
             return valency
     except Exception:
         pass
     
-    # 回退：根据当前键级求和（与旧逻辑保持兼容）
+    # Fallback: sum of bond orders (compatible with old logic)
     valency = 0.0
     for bond in atom.GetBonds():
         bond_order = get_bond_order_value(bond.GetBondType())
@@ -397,30 +397,30 @@ def calculate_atom_valency(mol, atom_idx):
     return valency
 
 def get_atom_max_valency(atomic_num):
-    """获取原子的最大价态"""
+    """Get the maximum valency of an atom"""
     return MAX_VALENCY.get(atomic_num, 4)  # 默认 4
 
 def _calculate_hydrogen_positions_3d(atom_pos, existing_bond_vectors, num_h, atom_symbol='C', bond_length=None):
     """
-    计算H原子在3D空间中的位置，考虑已有键的方向和合理的键角
+    Calculate the position of H atoms in 3D space, considering the direction of existing bonds and reasonable bond angles
     
     Args:
-        atom_pos: 重原子的位置 (Point3D)
-        existing_bond_vectors: 已有键的方向向量列表（归一化的3D向量）
-        num_h: 需要添加的H数量
-        atom_symbol: 重原子的元素符号（用于获取标准键长）
-        bond_length: H原子到重原子的距离（单位：Å）。如果为None，则根据原子类型从BOND_LENGTHS_PM获取标准键长
+        atom_pos: position of the heavy atom (Point3D)
+        existing_bond_vectors: list of direction vectors of existing bonds (normalized 3D vectors)
+        num_h: number of H atoms to add
+        atom_symbol: symbol of the heavy atom (for getting standard bond length)
+        bond_length: distance from H atom to heavy atom (in Å). If None, use standard bond length from BOND_LENGTHS_PM based on atom type
         
     Returns:
-        H原子位置的列表，每个元素是 [x, y, z] 数组。如果计算失败，返回空列表（调用者需要处理）
+        List of H atom positions, each element is a [x, y, z] array. If calculation fails, return empty list (caller needs to handle)
     """
-    # 根据原子类型获取标准键长
+    # Get standard bond length based on atom type
     if bond_length is None:
-        # 从BOND_LENGTHS_PM获取标准键长（单位：pm，需要转换为Å）
+        # Get standard bond length from BOND_LENGTHS_PM (in pm, need to convert to Å)
         if atom_symbol in BOND_LENGTHS_PM and 'H' in BOND_LENGTHS_PM[atom_symbol]:
-            bond_length = BOND_LENGTHS_PM[atom_symbol]['H'] / 100.0  # pm转Å
+            bond_length = BOND_LENGTHS_PM[atom_symbol]['H'] / 100.0  # pm to Å
         else:
-            # 如果没有找到标准键长，使用默认值（根据原子类型）
+            # If standard bond length is not found, use default value (based on atom type)
             default_bond_lengths = {
                 'C': 1.09,  # C-H
                 'N': 1.01,  # N-H
@@ -432,31 +432,31 @@ def _calculate_hydrogen_positions_3d(atom_pos, existing_bond_vectors, num_h, ato
                 'Br': 1.41, # Br-H
             }
             bond_length = default_bond_lengths.get(atom_symbol, 1.0)  # 默认1.0 Å
-    # 使用文件顶部已导入的numpy
+    # Use numpy imported at the top of the file
     atom_center = np.array([atom_pos.x, atom_pos.y, atom_pos.z])
     h_positions = []
     
     if num_h == 0:
         return h_positions
     
-    # 计算已有键的总方向（用于确定主要方向）
+    # Calculate total direction of existing bonds (for determining main direction)
     if existing_bond_vectors:
-        # 计算已有键的平均方向（加权平均，考虑键的重要性）
+        # Calculate average direction of existing bonds (weighted average, considering bond importance)
         total_vec = np.sum(existing_bond_vectors, axis=0)
         total_vec_norm = np.linalg.norm(total_vec)
         if total_vec_norm > 0.01:
             main_direction = total_vec / total_vec_norm
         else:
-            main_direction = np.array([1.0, 0.0, 0.0])  # 默认方向
+            main_direction = np.array([1.0, 0.0, 0.0])  # Default direction
     else:
-        # 没有已有键，使用默认方向
+        # No existing bonds, use default direction
         main_direction = np.array([1.0, 0.0, 0.0])
     
-    # 根据已有键的数量和需要添加的H数量，确定几何构型
+    # Determine geometric configuration based on number of existing bonds and number of H atoms to add
     total_bonds = len(existing_bond_vectors) + num_h
     
     if total_bonds == 1:
-        # 线性：H在已有键的相反方向
+        # Linear: H in opposite direction of existing bonds
         if existing_bond_vectors:
             h_direction = -existing_bond_vectors[0]
         else:
@@ -465,12 +465,12 @@ def _calculate_hydrogen_positions_3d(atom_pos, existing_bond_vectors, num_h, ato
         h_positions.append(h_pos.tolist())
         
     elif total_bonds == 2:
-        # 线性：两个原子在一条直线上
+        # Linear: two atoms on a straight line
         if existing_bond_vectors:
-            # 已有1个键，H在相反方向
+            # Existing 1 bond, H in opposite direction
             h_direction = -existing_bond_vectors[0]
         else:
-            # 需要添加2个H，在相反方向
+            # Need to add 2 H, in opposite direction
             h_direction = main_direction
             h_pos1 = atom_center + bond_length * h_direction
             h_pos2 = atom_center - bond_length * h_direction
@@ -482,34 +482,34 @@ def _calculate_hydrogen_positions_3d(atom_pos, existing_bond_vectors, num_h, ato
         h_positions.append(h_pos.tolist())
         
     elif total_bonds == 3:
-        # 三键情况（例如 sp2 / 三角平面 或 三角锥）
+        # Three-bond case (e.g. sp2 / triangular plane or tetrahedron)
         if existing_bond_vectors:
             n_existing = len(existing_bond_vectors)
-            # 情形 A: 已有 2 个键，只缺 1 个 H（最常见：=CH-，sp2）
-            # 目标：让新的 H 方向大致指向两个已有键的“对面”，
-            # 即与 v1、v2 都约 120 度：h_dir ≈ -normalize(v1 + v2)
+            # Case A: Existing 2 bonds, only missing 1 H (most common: =CH-, sp2)
+            # Goal: make new H direction roughly point to the "opposite" side of the two existing bonds,
+            # i.e. approximately 120° to v1 and v2: h_dir ≈ -normalize(v1 + v2)
             if n_existing >= 2 and num_h == 1:
                 v_sum = np.sum(existing_bond_vectors, axis=0)
                 v_norm = np.linalg.norm(v_sum)
                 if v_norm > 1e-2:
                     h_direction = -v_sum / v_norm
                 else:
-                    # 如果两个键几乎对消（数值退化），退回到任意一个键的反方向
+                    # If two bonds almost cancel out (numerical degeneration), fall back to the opposite direction of any one bond
                     h_direction = -existing_bond_vectors[0]
                 h_pos = atom_center + bond_length * h_direction
                 h_positions.append(h_pos.tolist())
-            # 情形 B: 已有 1 个键，需要补 2 个 H
-            # 目标：与已有键一起构成三角平面（或近似），三条键之间两两约 120 度。
+            # Case B: Existing 1 bond, need to add 2 H
+            # Goal: form a triangular plane (or approximate) with the existing bonds, with two bonds between each other approximately 120°.
             elif n_existing == 1 and num_h == 2:
                 existing_dir = existing_bond_vectors[0]
-                # 计算一个与已有键垂直的方向 u
+                # Calculate a direction perpendicular to the existing bond u
                 if abs(existing_dir[2]) < 0.9:
                     u = np.cross(existing_dir, np.array([0, 0, 1]))
                 else:
                     u = np.cross(existing_dir, np.array([1, 0, 0]))
                 u = u / np.linalg.norm(u)
-                # 利用 v2 = -0.5*v1 + (√3/2)*u, v3 = -0.5*v1 - (√3/2)*u
-                # 保证 v1,v2,v3 两两夹角约 120°
+                # Use v2 = -0.5*v1 + (√3/2)*u, v3 = -0.5*v1 - (√3/2)*u
+                # Ensure v1,v2,v3 are approximately 120° to each other
                 h_dir1 = -0.5 * existing_dir + (np.sqrt(3) / 2.0) * u
                 h_dir2 = -0.5 * existing_dir - (np.sqrt(3) / 2.0) * u
                 h_dir1 = h_dir1 / np.linalg.norm(h_dir1)
@@ -518,15 +518,15 @@ def _calculate_hydrogen_positions_3d(atom_pos, existing_bond_vectors, num_h, ato
                     h_pos = atom_center + bond_length * h_direction
                     h_positions.append(h_pos.tolist())
             else:
-                # 其他较少见的组合，退回到原有逻辑：
-                # 以已有键方向的平均向量作为“主方向”，在其垂直平面内均匀分布 H，
-                # 并调节到与已有键约 120 度。
+                # Other less common combinations, fall back to original logic:
+                # Use average direction of existing bonds as "main direction", distribute H uniformly in the perpendicular plane,
+                # and adjust to approximately 120° to the existing bonds.
                 avg_vec = np.sum(existing_bond_vectors, axis=0)
                 if np.linalg.norm(avg_vec) < 1e-2:
                     existing_dir = existing_bond_vectors[0]
                 else:
                     existing_dir = avg_vec / np.linalg.norm(avg_vec)
-                # 计算垂直于已有键平均方向的两个基向量
+                # Calculate two basis vectors perpendicular to the average direction of existing bonds
                 if abs(existing_dir[2]) < 0.9:
                     perp1 = np.cross(existing_dir, np.array([0, 0, 1]))
                 else:
@@ -534,7 +534,7 @@ def _calculate_hydrogen_positions_3d(atom_pos, existing_bond_vectors, num_h, ato
                 perp1 = perp1 / np.linalg.norm(perp1)
                 perp2 = np.cross(existing_dir, perp1)
                 perp2 = perp2 / np.linalg.norm(perp2)
-                # 在垂直平面内均匀分布 H，并使其与已有键形成约 120 度
+                # Distribute H uniformly in the perpendicular plane, and make it approximately 120° to the existing bonds
                 for i in range(num_h):
                     angle = 2 * np.pi * i / num_h
                     h_direction = np.cos(angle) * perp1 + np.sin(angle) * perp2
@@ -543,8 +543,8 @@ def _calculate_hydrogen_positions_3d(atom_pos, existing_bond_vectors, num_h, ato
                     h_pos = atom_center + bond_length * h_direction
                     h_positions.append(h_pos.tolist())
         else:
-            # 没有已有键，需要添加3个H：使用标准三角锥几何（键角约109.5度）
-            # 创建一个垂直于 main_direction 的平面
+            # No existing bonds, need to add 3 H: use standard tetrahedron geometry (bond angle approximately 109.5°)
+            # Create a plane perpendicular to main_direction
             base_normal = np.array([0, 0, 1])
             if np.abs(np.dot(main_direction, base_normal)) > 0.9:
                 base_normal = np.array([1, 0, 0])
@@ -554,7 +554,7 @@ def _calculate_hydrogen_positions_3d(atom_pos, existing_bond_vectors, num_h, ato
             perp2 = np.cross(main_direction, perp1)
             perp2 = perp2 / np.linalg.norm(perp2)
             
-            # 三角锥：一个H在上方，两个H在下方平面
+            # Tetrahedron: one H above, two H below the plane
             h1_direction = main_direction
             h_pos1 = atom_center + bond_length * h1_direction
             h_positions.append(h_pos1.tolist())
@@ -562,23 +562,23 @@ def _calculate_hydrogen_positions_3d(atom_pos, existing_bond_vectors, num_h, ato
             for i in range(num_h - 1):
                 angle = 2 * np.pi * i / (num_h - 1)
                 h_direction = np.cos(angle) * perp1 + np.sin(angle) * perp2
-                # 调整角度
+                # Adjust angle
                 h_direction = -0.333 * main_direction + 0.943 * h_direction  # 约109.5度
                 h_direction = h_direction / np.linalg.norm(h_direction)
                 h_pos = atom_center + bond_length * h_direction
                 h_positions.append(h_pos.tolist())
     
     elif total_bonds == 4:
-        # 四面体：键角约109.5度
+        # Tetrahedron: bond angle approximately 109.5°
         if existing_bond_vectors:
-            # 已有键的方向
+            # Direction of existing bonds
             existing_dir = existing_bond_vectors[0]
             
-            # 计算四面体的其他方向
-            # 使用标准四面体几何
+            # Calculate other directions of the tetrahedron
+            # Use standard tetrahedron geometry
             if len(existing_bond_vectors) == 1:
-                # 已有1个键，需要添加3个H形成四面体
-                # 计算垂直于已有键的平面
+                # Existing 1 bond, need to add 3 H to form a tetrahedron
+                # Calculate plane perpendicular to the existing bond
                 if abs(existing_dir[2]) < 0.9:
                     perp1 = np.cross(existing_dir, np.array([0, 0, 1]))
                 else:
@@ -587,23 +587,23 @@ def _calculate_hydrogen_positions_3d(atom_pos, existing_bond_vectors, num_h, ato
                 perp2 = np.cross(existing_dir, perp1)
                 perp2 = perp2 / np.linalg.norm(perp2)
                 
-                # 四面体：3个H在垂直于已有键的平面内，形成等边三角形
+                # Tetrahedron: 3 H in the plane perpendicular to the existing bond, forming an equilateral triangle
                 for i in range(num_h):
                     angle = 2 * np.pi * i / num_h
                     h_direction = np.cos(angle) * perp1 + np.sin(angle) * perp2
-                    # 调整角度，使其与已有键形成约109.5度角
+                    # Adjust angle, make it approximately 109.5° to the existing bonds
                     h_direction = -0.333 * existing_dir + 0.943 * h_direction
                     h_direction = h_direction / np.linalg.norm(h_direction)
                     h_pos = atom_center + bond_length * h_direction
                     h_positions.append(h_pos.tolist())
             elif len(existing_bond_vectors) == 2:
-                # 已有2个键，需要添加2个H
-                # 计算两个已有键的夹角平分线的垂直方向
+                # Existing 2 bonds, need to add 2 H
+                # Calculate direction perpendicular to the bisector of the two existing bonds
                 dir1 = existing_bond_vectors[0]
                 dir2 = existing_bond_vectors[1]
                 bisector = (dir1 + dir2) / np.linalg.norm(dir1 + dir2)
                 
-                # 计算垂直于平分线的方向
+                # Calculate direction perpendicular to the bisector
                 if abs(bisector[2]) < 0.9:
                     perp = np.cross(bisector, np.array([0, 0, 1]))
                 else:
@@ -617,15 +617,15 @@ def _calculate_hydrogen_positions_3d(atom_pos, existing_bond_vectors, num_h, ato
                     h_pos = atom_center + bond_length * h_direction
                     h_positions.append(h_pos.tolist())
             else:
-                # 已有3个键，需要添加1个H
-                # H在已有键的相反方向（四面体的第4个顶点）
+                # Existing 3 bonds, need to add 1 H
+                # H in opposite direction of the existing bonds (4th vertex of the tetrahedron)
                 total_existing = np.sum(existing_bond_vectors, axis=0)
                 h_direction = -total_existing / np.linalg.norm(total_existing)
                 h_pos = atom_center + bond_length * h_direction
                 h_positions.append(h_pos.tolist())
         else:
-            # 需要添加4个H，形成标准四面体
-            # 使用标准四面体顶点坐标
+            # Need to add 4 H to form a standard tetrahedron
+            # Use standard tetrahedron vertex coordinates
             tetra_vectors = [
                 np.array([1.0, 1.0, 1.0]),
                 np.array([1.0, -1.0, -1.0]),
@@ -638,14 +638,14 @@ def _calculate_hydrogen_positions_3d(atom_pos, existing_bond_vectors, num_h, ato
                 h_positions.append(h_pos.tolist())
     
     else:
-        # 对于更多键的情况，使用更通用的方法
-        # 在已有键的"对面"均匀分布H
+        # For more bonds, use a more general method
+        # Distribute H uniformly on the "opposite" side of the existing bonds
         if existing_bond_vectors:
-            # 计算已有键的平均方向
+            # Calculate average direction of existing bonds
             avg_direction = np.mean(existing_bond_vectors, axis=0)
             avg_direction = avg_direction / np.linalg.norm(avg_direction)
             
-            # 计算垂直于平均方向的方向
+            # Calculate direction perpendicular to the average direction
             if abs(avg_direction[2]) < 0.9:
                 perp1 = np.cross(avg_direction, np.array([0, 0, 1]))
             else:
@@ -654,22 +654,22 @@ def _calculate_hydrogen_positions_3d(atom_pos, existing_bond_vectors, num_h, ato
             perp2 = np.cross(avg_direction, perp1)
             perp2 = perp2 / np.linalg.norm(perp2)
             
-            # 在垂直于平均方向的平面内均匀分布H
+            # Distribute H uniformly in the plane perpendicular to the average direction
             for i in range(num_h):
                 angle = 2 * np.pi * i / num_h
                 h_direction = np.cos(angle) * perp1 + np.sin(angle) * perp2
-                # 稍微偏向已有键的相反方向
+                # Slightly towards the opposite direction of the existing bonds
                 h_direction = -0.5 * avg_direction + 0.866 * h_direction
                 h_direction = h_direction / np.linalg.norm(h_direction)
                 h_pos = atom_center + bond_length * h_direction
                 h_positions.append(h_pos.tolist())
         else:
-            # 没有已有键，在3D空间中均匀分布
-            # 使用球面均匀分布
+            # No existing bonds, distribute H uniformly in 3D space
+            # Use spherical uniform distribution
             for i in range(num_h):
-                # 使用球面坐标
-                theta = np.arccos(1 - 2 * (i + 0.5) / num_h)  # 极角
-                phi = 2 * np.pi * i * 0.618  # 方位角（使用黄金角度）
+                # Use spherical coordinates
+                theta = np.arccos(1 - 2 * (i + 0.5) / num_h)  # Polar angle
+                phi = 2 * np.pi * i * 0.618  # Azimuthal angle (using golden angle)
                 h_direction = np.array([
                     np.sin(theta) * np.cos(phi),
                     np.sin(theta) * np.sin(phi),
@@ -682,57 +682,57 @@ def _calculate_hydrogen_positions_3d(atom_pos, existing_bond_vectors, num_h, ato
 
 def add_hydrogens_manually_from_sdf(sdf_content):
     """
-    从 SDF 内容手动添加 H 原子，基于价态计算
+    Manually add H atoms from SDF content, based on valency calculation
     
-    1. 解析 SDF 得到分子对象（含键信息）
-    2. 对每个重原子计算当前价态（键级之和）和最大价态
-    3. 如果当前价态 < 最大价态，计算需要添加的 H 数量
-    4. 对于没有键的原子（价态=0），直接使用最大价态添加 H
-    5. 在重原子周围均匀分布添加 H 原子，使用标准键长（根据原子类型）
+    1. Parse SDF to get molecule object (containing bond information)
+    2. For each heavy atom, calculate current valency (sum of bond orders) and maximum valency
+    3. If current valency < maximum valency, calculate number of H to add
+    4. For atoms with no bonds (valency=0), add H directly using maximum valency
+    5. Add H atoms uniformly around heavy atoms, using standard bond lengths (based on atom type)
        - C-H: 1.09 Å, O-H: 0.96 Å, N-H: 1.01 Å, S-H: 1.34 Å 等
-    6. 使用最大排斥原则计算H原子位置，确保合理的几何构型
-    7. 转换回 SDF 格式
+    6. Use maximum repulsion principle to calculate H atom positions, ensuring reasonable geometry
+    7. Convert back to SDF format
     
     Args:
-        sdf_content: SDF 格式字符串（应包含键信息）
+        sdf_content: SDF format string (should contain bond information)
         
     Returns:
-        添加了 H 的新 SDF 格式字符串，或 None
+        New SDF format string with added H, or None
         
-    注意：
-    - 所有添加的H原子都会有有效的3D坐标（不会是0,0,0）
-    - 如果坐标计算失败，会使用备用方法（基于最大排斥原则的球面分布）
+    Note:
+    - All added H atoms will have valid 3D coordinates (not 0,0,0)
+    - If coordinate calculation fails, use fallback method (spherical distribution based on maximum repulsion principle)
     """
     try:
         from rdkit import Chem
         from rdkit.Geometry import Point3D
         
-        # 解析 SDF
+        # Parse SDF
         mol = Chem.MolFromMolBlock(sdf_content, sanitize=False)
         if mol is None:
             return None
         
-        # 尝试 sanitize（可能帮助推断键）
+        # Try sanitize (may help infer bonds)
         try:
             Chem.SanitizeMol(mol)
         except:
             pass
         
-        # 在补H之前排除单原子碎片（只有一个原子且没有键的连通分量）
-        # 避免单原子碎片（如Cl、Br）被补H后无法识别
-        # 保存原始分子的conformer（用于后续坐标复制）
+        # Before adding H, exclude single-atom fragments (connected components with only one atom and no bonds)
+        # Avoid single-atom fragments (e.g. Cl, Br) being added H after being unidentifiable
+        # Save original molecule's conformer (for subsequent coordinate copying)
         original_conf = mol.GetConformer() if mol.GetNumConformers() > 0 else None
         
         if mol.GetNumBonds() > 0 and mol.GetNumAtoms() > 1:
-            # 获取所有连通分量
+            # Get all connected components
             mol_frags = Chem.rdmolops.GetMolFrags(mol, asMols=True, sanitizeFrags=False)
             if len(mol_frags) > 1:
-                # 过滤掉单原子碎片（只有一个原子且没有键的连通分量）
+                # Filter out single-atom fragments (connected components with only one atom and no bonds)
                 valid_frags = [frag for frag in mol_frags if frag.GetNumBonds() > 0]
                 if len(valid_frags) > 0:
-                    # 如果只有一个有效片段，使用它
+                    # If there is only one valid fragment, use it
                     if len(valid_frags) == 1:
-                        # 找到这个有效片段在原始分子中的原子索引
+                        # Find the atom indices of this valid fragment in the original molecule
                         frag_atom_indices = Chem.rdmolops.GetMolFrags(mol, asMols=False)
                         valid_frag_idx = None
                         for i, frag in enumerate(mol_frags):
@@ -743,7 +743,7 @@ def add_hydrogens_manually_from_sdf(sdf_content):
                         if valid_frag_idx is not None:
                             valid_atom_indices = frag_atom_indices[valid_frag_idx]
                             mol = valid_frags[0]
-                            # 从原始分子复制conformer到新分子
+                            # Copy conformer from original molecule to new molecule
                             if original_conf is not None:
                                 new_conf = Chem.Conformer(mol.GetNumAtoms())
                                 for new_idx, old_idx in enumerate(valid_atom_indices):
@@ -754,11 +754,11 @@ def add_hydrogens_manually_from_sdf(sdf_content):
                         else:
                             mol = valid_frags[0]
                     else:
-                        # 如果有多个有效片段，合并它们（保留所有有键的片段）
+                        # If there are multiple valid fragments, merge them (keep all fragments with bonds)
                         new_mol = Chem.RWMol()
-                        atom_map = {}  # 原始分子中的原子索引 -> 新分子中的原子索引
+                        atom_map = {}  # Original molecule's atom indices -> new molecule's atom indices
                         
-                        # 获取所有有效片段的原子索引
+                        # Get all valid fragment's atom indices
                         frag_atom_indices = Chem.rdmolops.GetMolFrags(mol, asMols=False)
                         all_valid_atom_indices = []
                         for frag, atom_indices in zip(mol_frags, frag_atom_indices):
@@ -766,13 +766,13 @@ def add_hydrogens_manually_from_sdf(sdf_content):
                                 all_valid_atom_indices.extend(atom_indices)
                         all_valid_atom_indices = sorted(all_valid_atom_indices)
                         
-                        # 添加所有有效原子
+                        # Add all valid atoms
                         for old_idx in all_valid_atom_indices:
                             atom = mol.GetAtomWithIdx(old_idx)
                             new_idx = new_mol.AddAtom(atom)
                             atom_map[old_idx] = new_idx
                         
-                        # 添加所有有效片段的键
+                        # Add all valid fragment's bonds
                         for frag, atom_indices in zip(mol_frags, frag_atom_indices):
                             if frag.GetNumBonds() > 0:
                                 frag_atom_map = {old_idx: atom_map[old_idx] for old_idx in atom_indices}
@@ -786,10 +786,10 @@ def add_hydrogens_manually_from_sdf(sdf_content):
                                         end_new = frag_atom_map[end_orig]
                                         new_mol.AddBond(begin_new, end_new, bond.GetBondType())
                         
-                        # 转换为普通分子对象
+                        # Convert to normal molecule object
                         mol = new_mol.GetMol()
                         
-                        # 从原始分子复制坐标
+                        # Copy coordinates from original molecule
                         if original_conf is not None:
                             new_conf = Chem.Conformer(mol.GetNumAtoms())
                             for old_idx, new_idx in atom_map.items():
@@ -797,52 +797,52 @@ def add_hydrogens_manually_from_sdf(sdf_content):
                                 new_conf.SetAtomPosition(new_idx, pos)
                             mol.AddConformer(new_conf)
                 else:
-                    # 如果没有有效片段（所有片段都是单原子碎片），返回None
+                    # If there are no valid fragments (all fragments are single-atom fragments), return None
                     return None
         
-        # 创建新的分子对象
+        # Create new molecule object
         new_mol = Chem.RWMol(mol)
         
-        # 获取原始坐标
+        # Get original coordinates
         conf = mol.GetConformer()
         if conf is None:
             return None
         
-        # 计算每个原子需要添加的 H 数量
+        # Calculate number of H to add for each atom
         h_to_add = []
         for atom_idx in range(mol.GetNumAtoms()):
             atom = mol.GetAtomWithIdx(atom_idx)
             atomic_num = atom.GetAtomicNum()
             
-            # 跳过 H 原子
+            # Skip H atoms
             if atomic_num == 1:
                 continue
             
-            # 计算当前价态和最大价态
+            # Calculate current valency and maximum valency
             current_valency = calculate_atom_valency(mol, atom_idx)
             max_valency = get_atom_max_valency(atomic_num)
             
-            # 如果当前价态为 0（没有键），直接使用最大价态
+            # If current valency is 0 (no bonds), use maximum valency
             if current_valency == 0:
                 needed_h = max_valency
             else:
-                # 计算需要添加的 H 数量（取整，确保非负）
+                # Calculate number of H to add (round to nearest integer, ensure non-negative)
                 needed_h = max(0, int(round(max_valency - current_valency)))
             
-            # 只添加非负数量的 H，并且确保不会超过最大价态
+            # Only add non-negative number of H, and ensure it does not exceed maximum valency
             if needed_h > 0:
-                # 额外检查：确保添加H后不会超过最大价态
-                # 这里 current_valency 已经包含了所有键（包括到H的键）
-                # 所以如果 current_valency + needed_h > max_valency，说明计算有误
+                # Additional check: ensure adding H does not exceed maximum valency
+                # Here current_valency already contains all bonds (including bonds to H)
+                # So if current_valency + needed_h > max_valency, it means calculation is incorrect
                 if current_valency + needed_h <= max_valency:
                     h_to_add.append((atom_idx, needed_h))
         
         if not h_to_add:
-            # 没有需要添加的 H，返回原始 SDF
+            # No H to add, return original SDF
             return sdf_content
         
-        # 添加 H 原子
-        # 使用 h_map 记录每个 H 原子与其父原子的对应关系: [(parent_atom_idx, h_idx), ...]
+        # Add H atoms
+        # Use h_map to record the correspondence between each H atom and its parent atom: [(parent_atom_idx, h_idx), ...]
         h_map = []
         original_atom_count = new_mol.GetNumAtoms()
         for atom_idx, num_h in h_to_add:
@@ -850,65 +850,65 @@ def add_hydrogens_manually_from_sdf(sdf_content):
             atom_pos = conf.GetAtomPosition(atom_idx)
             
             for i in range(num_h):
-                # 创建 H 原子
-                h_atom = Chem.Atom(1)  # H 的原子序数是 1
+                # Create H atom
+                h_atom = Chem.Atom(1)  # Atomic number of H is 1
                 h_idx = new_mol.AddAtom(h_atom)
-                h_map.append((atom_idx, h_idx))  # 记录父原子索引和 H 原子索引
+                h_map.append((atom_idx, h_idx))  # Record parent atom index and H atom index
                 
-                # 添加键
+                # Add bond
                 new_mol.AddBond(atom_idx, h_idx, Chem.BondType.SINGLE)
         
-        # 转换为普通分子对象
+        # Convert to normal molecule object
         new_mol = new_mol.GetMol()
         
-        # 删除所有旧的conformer（如果有），确保新conformer是ID=0
-        # 这样MolToMolBlock就会使用我们的新conformer
+        # Delete all old conformers (if any), ensure new conformer is ID=0
+        # So MolToMolBlock will use our new conformer
         while new_mol.GetNumConformers() > 0:
             new_mol.RemoveConformer(0)
         
-        # 添加 conformer 并设置坐标
+        # Add conformer and set coordinates
         new_conf = Chem.Conformer(new_mol.GetNumAtoms())
-        # 复制原始坐标
+        # Copy original coordinates
         for i in range(mol.GetNumAtoms()):
             pos = conf.GetAtomPosition(i)
             new_conf.SetAtomPosition(i, pos)
         
-        # 为新添加的 H 设置坐标（考虑已有键的方向和合理的键角）
-        # 使用 h_map 来正确映射每个 H 原子的索引
-        h_map_idx = 0  # 用于遍历 h_map 的索引
+        # Set coordinates for new added H (consider direction of existing bonds and reasonable bond angles)
+        # Use h_map to correctly map each H atom's index
+        h_map_idx = 0  # Index for traversing h_map
         for atom_idx, num_h in h_to_add:
             atom = mol.GetAtomWithIdx(atom_idx)
             atom_symbol = atom.GetSymbol()
             atom_pos = conf.GetAtomPosition(atom_idx)
             
-            # 获取已有键的方向向量
+            # Get direction vectors of existing bonds
             existing_bond_vectors = []
             for bond in atom.GetBonds():
                 other_atom = bond.GetOtherAtom(atom)
                 other_pos = conf.GetAtomPosition(other_atom.GetIdx())
-                # 计算键方向向量（从重原子指向其他原子）
+                # Calculate bond direction vector (from heavy atom to other atoms)
                 bond_vec = np.array([
                     other_pos.x - atom_pos.x,
                     other_pos.y - atom_pos.y,
                     other_pos.z - atom_pos.z
                 ])
-                # 归一化
+                # Normalize
                 bond_len = np.linalg.norm(bond_vec)
-                if bond_len > 0.01:  # 避免除零
+                if bond_len > 0.01:  # Avoid division by zero
                     bond_vec = bond_vec / bond_len
                     existing_bond_vectors.append(bond_vec)
             
-            # 根据已有键的数量和需要添加的H数量，计算H的位置
+            # Calculate H positions based on number of existing bonds and number of H to add
             h_positions = _calculate_hydrogen_positions_3d(
                 atom_pos, existing_bond_vectors, num_h, atom_symbol=atom_symbol
             )
             
-            # 如果坐标计算失败（返回空列表），使用备用方法
+            # If coordinate calculation fails (returns empty list), use fallback method
             if len(h_positions) < num_h:
-                # 备用方法：基于最大排斥原则，在3D空间中均匀分布H
+                # Fallback method: uniformly distribute H in 3D space based on maximum repulsion principle
                 atom_center = np.array([atom_pos.x, atom_pos.y, atom_pos.z])
                 
-                # 获取标准键长
+                # Get standard bond lengths
                 if atom_symbol in BOND_LENGTHS_PM and 'H' in BOND_LENGTHS_PM[atom_symbol]:
                     bond_length = BOND_LENGTHS_PM[atom_symbol]['H'] / 100.0
                 else:
@@ -918,48 +918,48 @@ def add_hydrogens_manually_from_sdf(sdf_content):
                     }
                     bond_length = default_bond_lengths.get(atom_symbol, 1.0)
                 
-                # 计算已有键的平均方向（用于确定主要方向）
+                # Calculate average direction of existing bonds (for determining main direction)
                 if existing_bond_vectors:
                     main_direction = np.mean(existing_bond_vectors, axis=0)
                     main_direction = main_direction / np.linalg.norm(main_direction)
                 else:
                     main_direction = np.array([1.0, 0.0, 0.0])
                 
-                # 使用球面均匀分布（最大排斥）
+                # use spherical uniform distribution (maximum repulsion)
                 for i in range(num_h - len(h_positions)):
-                    # 使用黄金角度螺旋分布，确保最大排斥
-                    theta = np.arccos(1 - 2 * (i + 0.5) / num_h)  # 极角
-                    phi = 2 * np.pi * i * 0.618  # 方位角（黄金角度）
+                    # use golden angle spiral distribution, ensure maximum repulsion
+                    theta = np.arccos(1 - 2 * (i + 0.5) / num_h)  # Polar angle
+                    phi = 2 * np.pi * i * 0.618  # Azimuthal angle (golden angle)
                     h_direction = np.array([
                         np.sin(theta) * np.cos(phi),
                         np.sin(theta) * np.sin(phi),
                         np.cos(theta)
                     ])
-                    # 如果已有键，稍微偏向已有键的相反方向
+                    # If there are existing bonds, slightly偏向已有键的相反方向
                     if existing_bond_vectors:
                         h_direction = -0.3 * main_direction + 0.954 * h_direction
                         h_direction = h_direction / np.linalg.norm(h_direction)
-                    h_pos = atom_center + bond_length * h_direction
+                    h_pos = atom_center + bond_length * h_direction   
                     h_positions.append(h_pos.tolist())
             
-            # 确保有足够的坐标
+            # Ensure there are enough coordinates
             if len(h_positions) != num_h:
-                # 如果还是不够，使用简单的备用方法
+                # If still not enough, use simple fallback method
                 atom_center = np.array([atom_pos.x, atom_pos.y, atom_pos.z])
                 if atom_symbol in BOND_LENGTHS_PM and 'H' in BOND_LENGTHS_PM[atom_symbol]:
                     bond_length = BOND_LENGTHS_PM[atom_symbol]['H'] / 100.0
                 else:
                     bond_length = 1.0
                 while len(h_positions) < num_h:
-                    # 简单的均匀分布
+                    # Simple uniform distribution
                     angle = 2 * np.pi * len(h_positions) / num_h
                     h_direction = np.array([np.cos(angle), np.sin(angle), 0.0])
                     h_pos = atom_center + bond_length * h_direction
                     h_positions.append(h_pos.tolist())
             
-            # 确保h_positions的数量等于num_h
+            # Ensure number of h_positions equals num_h
             if len(h_positions) < num_h:
-                # 使用默认位置填充
+                # Use default position filling
                 atom_center = np.array([atom_pos.x, atom_pos.y, atom_pos.z])
                 bond_length = 1.0
                 while len(h_positions) < num_h:
@@ -968,22 +968,22 @@ def add_hydrogens_manually_from_sdf(sdf_content):
                     h_pos = atom_center + bond_length * h_direction
                     h_positions.append(h_pos.tolist())
             
-            # 设置H原子坐标 - 使用 h_map 中的真实索引
-            # 确保为这个原子的所有H设置坐标
+            # Set H atom coordinates - use real indices in h_map
+            # Ensure coordinates are set for all H atoms of this atom
             for i in range(num_h):
                 if h_map_idx >= len(h_map):
                     break
-                # 从 h_map 获取真实的 H 原子索引
+                # Get real H atom index from h_map
                 parent_atom_idx_in_map, h_idx = h_map[h_map_idx]
-                # 验证父原子索引是否匹配
+                # Verify if parent atom index matches
                 if parent_atom_idx_in_map != atom_idx:
                     break
                 
-                # 获取对应的坐标
+                # Get corresponding coordinates
                 if i < len(h_positions):
                     h_pos_3d = h_positions[i]
                 else:
-                    # 如果坐标不够，使用默认位置
+                    # If coordinates are not enough, use default position
                     atom_center = np.array([atom_pos.x, atom_pos.y, atom_pos.z])
                     angle = 2 * np.pi * i / num_h
                     h_direction = np.array([np.cos(angle), np.sin(angle), 0.0])
@@ -993,75 +993,74 @@ def add_hydrogens_manually_from_sdf(sdf_content):
                 new_conf.SetAtomPosition(h_idx, h_pos)
                 h_map_idx += 1
         
-        # 验证所有H原子都被处理了
+        # Verify all H atoms are processed
         if h_map_idx != len(h_map):
-            # 为剩余的H原子设置默认坐标
+            # Set default coordinates for remaining H atoms
             for remaining_idx in range(h_map_idx, len(h_map)):
                 parent_idx, h_idx = h_map[remaining_idx]
                 parent_pos = conf.GetAtomPosition(parent_idx)
-                # 使用简单的默认位置
+                # Use simple default position
                 h_pos = Point3D(parent_pos.x + 1.0, parent_pos.y, parent_pos.z)
                 new_conf.SetAtomPosition(h_idx, h_pos)
         
-        # 添加conformer到分子
+        # Add conformer to molecule
         conf_id = new_mol.AddConformer(new_conf)
                 
-        # 转换回 SDF 格式
-        # 如果分子无法被kekulize（如某些芳香环），尝试修复键类型后再生成SDF
+        # Convert back to SDF format
+        # If molecule cannot be kekulized (e.g. some aromatic rings), try fixing bond types后再生成SDF
         sdf_with_h = None
         
         try:
-            # 先尝试sanitize
+            # Try sanitize
             Chem.SanitizeMol(new_mol)
-            # 显式指定使用conformer ID=0（我们新添加的conformer）
+            # Explicitly specify using conformer ID=0 (our new added conformer)
             sdf_with_h = Chem.MolToMolBlock(new_mol, confId=conf_id)
         except (Chem.rdchem.KekulizeException, Chem.rdchem.AtomValenceException) as e:
-            # 如果sanitize失败（kekulization或价态错误），尝试修复键类型
-            # 将芳香键改为单键，这可能有助于某些情况
+            # If sanitize fails (kekulization or valence error), try fixing bond types
+            # Change aromatic bonds to single bonds
             try:
-                # 创建可编辑的分子对象
+                # Create editable molecule object
                 editable_mol = Chem.RWMol(new_mol)
-                # 遍历所有键，将芳香键改为单键
+                # Traverse all bonds, change aromatic bonds to single bonds
                 bonds_to_fix = []
                 for bond in editable_mol.GetBonds():
                     if bond.GetBondType() == Chem.BondType.AROMATIC:
                         bonds_to_fix.append((bond.GetBeginIdx(), bond.GetEndIdx()))
                 
-                # 修复芳香键
+                # Fix aromatic bonds
                 for begin_idx, end_idx in bonds_to_fix:
                     editable_mol.RemoveBond(begin_idx, end_idx)
                     editable_mol.AddBond(begin_idx, end_idx, Chem.BondType.SINGLE)
                 
-                # 尝试sanitize修复后的分子
+                # Try sanitize fixed molecule
                 fixed_mol = editable_mol.GetMol()
-                # 复制conformer到修复后的分子
+                # Copy conformer to fixed molecule
                 if new_mol.GetNumConformers() > 0:
                     fixed_mol.AddConformer(new_mol.GetConformer(conf_id))
                 try:
                     Chem.SanitizeMol(fixed_mol)
                     sdf_with_h = Chem.MolToMolBlock(fixed_mol, confId=conf_id if fixed_mol.GetNumConformers() > 0 else -1)
                 except:
-                    # 如果修复后还是无法sanitize，尝试直接生成SDF（不sanitize）
-                    # 注意：MolToMolBlock可能会抛出异常
+                    # If still cannot sanitize after fixing, try generating SDF directly (without sanitize)
+                    # Note: MolToMolBlock may throw exceptions
                     pass
             except Exception:
                 pass
             
-            # 如果修复键类型后还是失败，尝试直接生成SDF（可能会失败）
+            # If still fails after fixing bond types, try generating SDF directly (may fail)
             if sdf_with_h is None:
                 try:
-                    # 最后尝试：直接生成SDF，即使无法sanitize
+                    # Last try: generate SDF directly, even if cannot sanitize
                     sdf_with_h = Chem.MolToMolBlock(new_mol, confId=conf_id)
                 except Exception:
-                    # 如果连生成SDF都失败，返回原始SDF（不添加H）
-                    # 这样至少不会丢失原始信息
+                    # If even generating SDF fails, return original SDF (without adding H)
                     return sdf_content
         except Exception:
-            # 其他未知错误，尝试直接生成SDF
+            # Other unknown errors, try generating SDF directly
             try:
                 sdf_with_h = Chem.MolToMolBlock(new_mol, confId=conf_id)
             except Exception:
-                # 如果失败，返回原始SDF
+                # If fails, return original SDF
                 return sdf_content
         
         if sdf_with_h:
@@ -1075,7 +1074,7 @@ def add_hydrogens_manually_from_sdf(sdf_content):
         return None
 
 
-# 双键标准键长（单位：pm）
+# Standard bond lengths for double bonds (unit: pm)
 BONDS2_PM = {
     'C': {'C': 134, 'N': 129, 'O': 120, 'S': 160},
     'N': {'C': 129, 'N': 125, 'O': 121},
@@ -1084,62 +1083,62 @@ BONDS2_PM = {
     'S': {'P': 186}
 }
 
-# 三键标准键长（单位：pm）
+# Standard bond lengths for triple bonds (unit: pm)
 BONDS3_PM = {
     'C': {'C': 120, 'N': 116, 'O': 113},
     'N': {'C': 116, 'N': 110},
     'O': {'C': 113}
 }
 
-# 键判断容差（单位：pm）
-BOND_MARGIN1 = 40  # 单键容差
-BOND_MARGIN2 = 20  # 双键容差
-BOND_MARGIN3 = 12  # 三键容差
+# Bond judgment tolerance (unit: pm)
+BOND_MARGIN1 = 40  # Single bond tolerance
+BOND_MARGIN2 = 20  # Double bond tolerance
+BOND_MARGIN3 = 12  # Triple bond tolerance
 
 
 def fix_missing_bonds_from_sdf(sdf_content, bond_length_ratio=1.3, max_iterations=10):
     """
-    修复缺失的化学键：在OpenBabel处理之后、补H之前，遍历所有价态未饱和的原子，
-    检查最近的原子，如果距离不超过标准键长的指定比例，就添加化学键。
+    Fix missing chemical bonds: after OpenBabel processing, before adding H, traverse all unsaturated atoms,
+    check the nearest atom, if the distance is not greater than the specified ratio of the standard bond length, add a chemical bond.
     
     Args:
-        sdf_content: SDF格式字符串（应包含键信息）
-        bond_length_ratio: 标准键长的比例阈值（默认1.3，即距离≤标准键长×1.3时添加键）
-        max_iterations: 最大迭代次数（避免无限循环）
+        sdf_content: SDF format string (should contain bond information)
+        bond_length_ratio: standard bond length ratio threshold (default 1.3, i.e. add bond when distance ≤ standard bond length × 1.3)
+        max_iterations: maximum number of iterations (to avoid infinite loop)
         
     Returns:
-        修复后的SDF格式字符串，或None（如果失败）
+        Fixed SDF format string, or None (if fails)
     """
     try:
         from rdkit import Chem
         from rdkit.Geometry import Point3D
         import numpy as np
         
-        # 解析SDF
+        # Parse SDF
         mol = Chem.MolFromMolBlock(sdf_content, sanitize=False)
         if mol is None:
             return None
         
-        # 检查是否有conformer（用于坐标计算）
+        # Check if there is a conformer (for coordinate calculation)
         if mol.GetNumConformers() == 0:
-            return sdf_content  # 没有坐标，无法计算距离
+            return sdf_content  # No coordinates, cannot calculate distance
         
-        # 迭代修复缺失的键
+        # Iteratively fix missing bonds
         for iteration in range(max_iterations):
             bonds_added = 0
             bonds_upgraded = 0
             
-            # 重新获取conformer（因为分子可能已改变）
+            # Re-get conformer (because molecule may have changed)
             if mol.GetNumConformers() == 0:
                 break
             conf = mol.GetConformer()
             
-            # 第一步：升级已有单键为双键（在添加缺失键之前）
-            # 遍历所有单键，检查是否可以升级为双键
+            # Step 1: upgrade existing single bonds to double bonds (before adding missing bonds)
+            # Traverse all single bonds, check if they can be upgraded to double bonds
             bonds_to_upgrade = []
             for bond in mol.GetBonds():
                 if bond.GetBondType() != Chem.BondType.SINGLE:
-                    continue  # 只考虑单键
+                    continue  # Only consider single bonds
                 
                 begin_idx = bond.GetBeginAtomIdx()
                 end_idx = bond.GetEndAtomIdx()
@@ -1148,21 +1147,21 @@ def fix_missing_bonds_from_sdf(sdf_content, bond_length_ratio=1.3, max_iteration
                 begin_symbol = begin_atom.GetSymbol()
                 end_symbol = end_atom.GetSymbol()
                 
-                # 检查两个原子的价态是否都未饱和
+                # Check if the valencies of the two atoms are both unsaturated
                 begin_valency = calculate_atom_valency(mol, begin_idx)
                 end_valency = calculate_atom_valency(mol, end_idx)
                 begin_max_valency = get_atom_max_valency(begin_atom.GetAtomicNum())
                 end_max_valency = get_atom_max_valency(end_atom.GetAtomicNum())
                 
-                # 如果升级为双键，新价态 = 当前价态 - 1 + 2 = 当前价态 + 1
+                # If upgraded to double bond, new valency = current valency - 1 + 2 = current valency + 1
                 begin_new_valency = begin_valency + 1
                 end_new_valency = end_valency + 1
                 
-                # 检查升级后价态是否超限
+                # Check if the valency exceeds the limit after upgrading
                 if begin_new_valency > begin_max_valency or end_new_valency > end_max_valency:
-                    continue  # 升级后价态超限，跳过
+                    continue  # Valency exceeds the limit after upgrading, skip
                 
-                # 检查是否有双键的标准键长数据
+                # Check if there is standard bond length data for double bonds
                 standard_bond2_pm = None
                 if begin_symbol in BONDS2_PM and end_symbol in BONDS2_PM[begin_symbol]:
                     standard_bond2_pm = BONDS2_PM[begin_symbol][end_symbol]
@@ -1170,9 +1169,9 @@ def fix_missing_bonds_from_sdf(sdf_content, bond_length_ratio=1.3, max_iteration
                     standard_bond2_pm = BONDS2_PM[end_symbol][begin_symbol]
                 
                 if standard_bond2_pm is None:
-                    continue  # 没有双键标准键长数据，跳过
+                    continue  # No standard bond length data for double bonds, skip
                 
-                # 计算距离
+                # Calculate distance
                 begin_pos = conf.GetAtomPosition(begin_idx)
                 end_pos = conf.GetAtomPosition(end_idx)
                 begin_pos_array = np.array([begin_pos.x, begin_pos.y, begin_pos.z])
@@ -1180,35 +1179,35 @@ def fix_missing_bonds_from_sdf(sdf_content, bond_length_ratio=1.3, max_iteration
                 distance = np.linalg.norm(end_pos_array - begin_pos_array)
                 distance_pm = distance * 100.0
                 
-                # 检查距离是否在双键的容差范围内
+                # Check if the distance is within the tolerance range for double bonds
                 threshold2_pm = standard_bond2_pm * bond_length_ratio
                 if distance_pm <= threshold2_pm:
-                    # 计算相对偏差
+                    # Calculate relative deviation
                     relative_deviation = abs(distance_pm - standard_bond2_pm) / standard_bond2_pm
                     bonds_to_upgrade.append((begin_idx, end_idx, distance_pm, standard_bond2_pm, relative_deviation))
             
-            # 按相对偏差排序，优先升级距离最接近标准双键键长的
+            # Sort by relative deviation, prioritize upgrading bonds with the shortest distance to the standard double bond length
             bonds_to_upgrade.sort(key=lambda x: x[4])
             
-            # 升级单键为双键
+            # Upgrade single bonds to double bonds
             for begin_idx, end_idx, distance_pm, standard_bond2_pm, _ in bonds_to_upgrade:
                 try:
                     rw_mol = Chem.RWMol(mol)
-                    # 找到对应的键
+                    # Find the corresponding bond
                     bond = rw_mol.GetBondBetweenAtoms(begin_idx, end_idx)
                     if bond is not None and bond.GetBondType() == Chem.BondType.SINGLE:
-                        # 删除旧键
+                        # Delete old bond
                         rw_mol.RemoveBond(begin_idx, end_idx)
-                        # 添加双键
+                        # Add double bond
                         rw_mol.AddBond(begin_idx, end_idx, Chem.BondType.DOUBLE)
                         mol = rw_mol.GetMol()
                         bonds_upgraded += 1
                 except Exception as e:
-                    # 如果升级失败，继续
+                    # If upgrade fails, continue
                     continue
             
-            # 第二步：添加缺失的键（原有逻辑）
-            # 找到所有价态未饱和的原子
+            # Step 2: add missing bonds (original logic)
+            # Find all unsaturated atoms
             unsaturated_atoms = []
             for atom_idx in range(mol.GetNumAtoms()):
                 atom = mol.GetAtomWithIdx(atom_idx)
@@ -1220,28 +1219,25 @@ def fix_missing_bonds_from_sdf(sdf_content, bond_length_ratio=1.3, max_iteration
                     unsaturated_atoms.append(atom_idx)
             
             if not unsaturated_atoms and bonds_upgraded == 0:
-                break  # 所有原子都已饱和且没有键需要升级，无需继续
+                break  # All atoms are saturated and no bonds need to be upgraded, no need to continue
             
-            # 按未连通片段大小排序：小的片段优先处理
-            # 获取所有连通分量
+            # Sort by size of disconnected fragments: smaller fragments are processed first
             try:
-                frags = Chem.rdmolops.GetMolFrags(mol, asMols=False)
-                # frags 是一个列表，每个元素是一个连通分量中的原子索引列表
-                
-                # 为每个原子找到它所在的连通分量大小
+                frags = Chem.rdmolops.GetMolFrags(mol, asMols=False)                
+                # For each atom, find the size of the connected component it belongs to
                 atom_to_frag_size = {}
                 for frag in frags:
                     frag_size = len(frag)
                     for atom_idx in frag:
                         atom_to_frag_size[atom_idx] = frag_size
                 
-                # 按连通分量大小排序，然后按原子索引排序（保持稳定性）
+                # Sort by size of connected components, then by atom index (maintain stability)
                 unsaturated_atoms.sort(key=lambda idx: (atom_to_frag_size.get(idx, float('inf')), idx))
             except Exception:
-                # 如果获取连通分量失败，保持原有顺序
+                # If getting connected components fails, keep original order
                 pass
             
-            # 对每个价态未饱和的原子，尝试添加缺失的键
+            # For each unsaturated atom, try to add missing bonds
             for atom_idx in unsaturated_atoms:
                 atom = mol.GetAtomWithIdx(atom_idx)
                 atom_symbol = atom.GetSymbol()
@@ -1249,17 +1245,17 @@ def fix_missing_bonds_from_sdf(sdf_content, bond_length_ratio=1.3, max_iteration
                 current_valency = calculate_atom_valency(mol, atom_idx)
                 max_valency = get_atom_max_valency(atomic_num)
                 
-                # 获取已连接的原子索引
+                # Get connected atom indices
                 connected_atoms = set()
                 for bond in atom.GetBonds():
                     other_idx = bond.GetOtherAtomIdx(atom_idx)
                     connected_atoms.add(other_idx)
                 
-                # 获取原子坐标
+                # Get atom coordinates
                 pos1 = conf.GetAtomPosition(atom_idx)
                 pos1_array = np.array([pos1.x, pos1.y, pos1.z])
                 
-                # 找到最近的未连接且价态未饱和的原子
+                # Find the nearest unsaturated atom that is not connected
                 nearest_atom_idx = None
                 nearest_distance = float('inf')
                 
@@ -1271,31 +1267,31 @@ def fix_missing_bonds_from_sdf(sdf_content, bond_length_ratio=1.3, max_iteration
                     other_symbol = other_atom.GetSymbol()
                     other_atomic_num = other_atom.GetAtomicNum()
                     
-                    # 只考虑重原子之间的键，以及重原子与H之间的键
+                    # Only consider bonds between heavy atoms, and heavy atoms and H
                     if atomic_num == 1 and other_atomic_num == 1:
-                        continue  # 不考虑H-H键
+                        continue  # Do not consider H-H bonds
                     
-                    # 检查目标原子的价态：如果已经饱和，跳过（至少需要能添加一个单键）
+                    # Check the valency of the target atom: if it is saturated, skip (at least one single bond needs to be added)
                     other_current_valency = calculate_atom_valency(mol, other_idx)
                     other_max_valency = get_atom_max_valency(other_atomic_num)
                     if other_current_valency >= other_max_valency:
-                        continue  # 目标原子已价态饱和，跳过
+                        continue  # Target atom is saturated, skip
                     
-                    # 检查：如果两个原子都是孤立原子（都没有其他键），且距离异常近（<0.1Å），跳过
-                    # 这可能是坐标错误导致的，不应该连接
+                    # Check: if both atoms are isolated atoms (no other bonds), and the distance is extremely close (<0.1Å), skip
+                    # This may be due to coordinate errors, and should not be connected
                     if current_valency == 0 and other_current_valency == 0:
                         pos2 = conf.GetAtomPosition(other_idx)
                         pos2_array = np.array([pos2.x, pos2.y, pos2.z])
                         distance = np.linalg.norm(pos2_array - pos1_array)
-                        if distance < 0.1:  # 距离小于0.1Å，很可能是坐标错误
-                            continue  # 跳过这种异常近的孤立原子对
+                        if distance < 0.1:  # Distance is less than 0.1Å, very likely due to coordinate errors
+                            continue  # Skip this extremely close isolated atom pair
                     
-                    # 计算距离
+                    # Calculate distance
                     pos2 = conf.GetAtomPosition(other_idx)
                     pos2_array = np.array([pos2.x, pos2.y, pos2.z])
                     distance = np.linalg.norm(pos2_array - pos1_array)
                     
-                    # 获取标准键长（单键）
+                    # Get standard bond length (single bond)
                     standard_bond_length_pm = None
                     if atom_symbol in BOND_LENGTHS_PM and other_symbol in BOND_LENGTHS_PM[atom_symbol]:
                         standard_bond_length_pm = BOND_LENGTHS_PM[atom_symbol][other_symbol]
@@ -1303,7 +1299,7 @@ def fix_missing_bonds_from_sdf(sdf_content, bond_length_ratio=1.3, max_iteration
                         standard_bond_length_pm = BOND_LENGTHS_PM[other_symbol][atom_symbol]
                     
                     if standard_bond_length_pm is None:
-                        # 如果没有标准键长数据，使用默认阈值（2.0 Å）
+                        # If there is no standard bond length data, use default threshold (2.0 Å)
                         if distance <= 2.0 * bond_length_ratio:
                             if distance < nearest_distance:
                                 nearest_distance = distance
@@ -1317,8 +1313,8 @@ def fix_missing_bonds_from_sdf(sdf_content, bond_length_ratio=1.3, max_iteration
                         nearest_distance = distance
                         nearest_atom_idx = other_idx
                 
-                # 如果找到最近的原子，尝试添加键
-                # 注意：此时目标原子的价态已经检查过（未饱和），但需要再次检查以确保在迭代过程中没有变化
+                # If found the nearest atom, try to add bond
+                # Note: at this time, the valency of the target atom has been checked (unsaturated), but it needs to be checked again to ensure that it has not changed in the iteration process
                 if nearest_atom_idx is not None:
                     other_atom = mol.GetAtomWithIdx(nearest_atom_idx)
                     other_symbol = other_atom.GetSymbol()
@@ -1326,40 +1322,40 @@ def fix_missing_bonds_from_sdf(sdf_content, bond_length_ratio=1.3, max_iteration
                     other_current_valency = calculate_atom_valency(mol, nearest_atom_idx)
                     other_max_valency = get_atom_max_valency(other_atomic_num)
                     
-                    # 再次检查价态（可能在迭代过程中已变化）
+                    # Check valency again (may have changed in the iteration process)
                     if other_current_valency >= other_max_valency:
-                        continue  # 目标原子已价态饱和，跳过
+                        continue  # Target atom is saturated, skip
                     
-                    # 根据距离判断候选键类型
-                    # 注意：这里应该使用 bond_length_ratio 来判断，而不是固定的容差
+                    # Based on distance, determine candidate bond types
+                    # Note: here should use bond_length_ratio to determine, not fixed tolerance
                     candidate_bonds = []
-                    distance_pm = nearest_distance * 100.0  # 转换为pm
+                    distance_pm = nearest_distance * 100.0  # Convert to pm
                     
-                    # 检查三键
+                    # Check triple bonds
                     if (atom_symbol in BONDS3_PM and other_symbol in BONDS3_PM[atom_symbol]) or \
                        (other_symbol in BONDS3_PM and atom_symbol in BONDS3_PM[other_symbol]):
                         standard_bond3_pm = BONDS3_PM.get(atom_symbol, {}).get(other_symbol) or \
                                            BONDS3_PM.get(other_symbol, {}).get(atom_symbol)
                         if standard_bond3_pm is not None:
-                            # 使用 bond_length_ratio 而不是固定容差
+                            # Use bond_length_ratio instead of fixed tolerance
                             threshold3_pm = standard_bond3_pm * bond_length_ratio
                             if distance_pm < threshold3_pm:
                                 relative_deviation = abs(distance_pm - standard_bond3_pm) / standard_bond3_pm
                                 candidate_bonds.append((3, standard_bond3_pm, relative_deviation))
                     
-                    # 检查双键
+                    # Check double bonds
                     if (atom_symbol in BONDS2_PM and other_symbol in BONDS2_PM[atom_symbol]) or \
                        (other_symbol in BONDS2_PM and atom_symbol in BONDS2_PM[other_symbol]):
                         standard_bond2_pm = BONDS2_PM.get(atom_symbol, {}).get(other_symbol) or \
                                            BONDS2_PM.get(other_symbol, {}).get(atom_symbol)
                         if standard_bond2_pm is not None:
-                            # 使用 bond_length_ratio 而不是固定容差
+                            # Use bond_length_ratio instead of fixed tolerance
                             threshold2_pm = standard_bond2_pm * bond_length_ratio
                             if distance_pm < threshold2_pm:
                                 relative_deviation = abs(distance_pm - standard_bond2_pm) / standard_bond2_pm
                                 candidate_bonds.append((2, standard_bond2_pm, relative_deviation))
                     
-                    # 检查单键
+                    # Check single bonds
                     if atom_symbol in BOND_LENGTHS_PM and other_symbol in BOND_LENGTHS_PM[atom_symbol]:
                         standard_bond1_pm = BOND_LENGTHS_PM[atom_symbol][other_symbol]
                     elif other_symbol in BOND_LENGTHS_PM and atom_symbol in BOND_LENGTHS_PM[other_symbol]:
@@ -1368,20 +1364,20 @@ def fix_missing_bonds_from_sdf(sdf_content, bond_length_ratio=1.3, max_iteration
                         standard_bond1_pm = None
                     
                     if standard_bond1_pm is not None:
-                        # 使用 bond_length_ratio 而不是固定容差
+                        # Use bond_length_ratio instead of fixed tolerance
                         threshold1_pm = standard_bond1_pm * bond_length_ratio
                         if distance_pm < threshold1_pm:
                             relative_deviation = abs(distance_pm - standard_bond1_pm) / standard_bond1_pm
                             candidate_bonds.append((1, standard_bond1_pm, relative_deviation))
                     
-                    # 如果没有候选键，跳过
+                    # If there are no candidate bonds, skip
                     if not candidate_bonds:
                         continue
                     
-                    # 按相对偏差排序候选键类型
+                    # Sort candidate bond types by relative deviation
                     candidate_bonds.sort(key=lambda x: x[2])
                     
-                    # 根据价态约束筛选合适的键类型（从键级高到低）
+                    # Filter suitable bond types based on valency constraints (from high to low bond order)
                     selected_bond_order = None
                     for bond_order, _, _ in reversed(candidate_bonds):  # 从高到低（三键→双键→单键）
                         new_valency_i = current_valency + bond_order
@@ -1391,16 +1387,16 @@ def fix_missing_bonds_from_sdf(sdf_content, bond_length_ratio=1.3, max_iteration
                             selected_bond_order = bond_order
                             break
                     
-                    # 如果所有候选键类型都不满足价态约束，选择单键（最保守）
+                    # If all candidate bond types do not satisfy valency constraints, select single bond (most conservative)
                     if selected_bond_order is None:
                         selected_bond_order = 1
-                        # 但还是要检查单键是否满足价态约束
+                        # But still need to check if the single bond satisfies the valency constraint
                         new_valency_i = current_valency + 1
                         new_valency_j = other_current_valency + 1
                         if new_valency_i > max_valency or new_valency_j > other_max_valency:
-                            continue  # 即使单键也不满足，跳过
+                            continue  # Even if the single bond does not satisfy, skip
                     
-                    # 添加键
+                    # Add bond
                     try:
                         rw_mol = Chem.RWMol(mol)
                         if selected_bond_order == 1:
@@ -1416,21 +1412,21 @@ def fix_missing_bonds_from_sdf(sdf_content, bond_length_ratio=1.3, max_iteration
                         mol = rw_mol.GetMol()
                         bonds_added += 1
                     except Exception as e:
-                        # 如果添加键失败（例如键已存在），继续
+                        # If adding bond fails (e.g. bond already exists), continue
                         continue
             
-            # 如果本次迭代没有添加任何键且没有升级任何键，停止迭代
+            # If this iteration does not add any bonds and does not upgrade any bonds, stop iteration
             if bonds_added == 0 and bonds_upgraded == 0:
                 break
-            # 调试信息：打印添加和升级的键数
+            # Debug information: print the number of added and upgraded bonds
             if iteration == 0 and (bonds_added > 0 or bonds_upgraded > 0):
                 import warnings
                 if bonds_upgraded > 0:
-                    warnings.warn(f"fix_missing_bonds_from_sdf: 第1次迭代升级了 {bonds_upgraded} 个键为双键")
+                    warnings.warn(f"fix_missing_bonds_from_sdf: First iteration upgraded {bonds_upgraded} bonds to double bonds")
                 if bonds_added > 0:
-                    warnings.warn(f"fix_missing_bonds_from_sdf: 第1次迭代添加了 {bonds_added} 个键")
+                    warnings.warn(f"fix_missing_bonds_from_sdf: First iteration added {bonds_added} bonds")
         
-        # 转换回SDF格式
+        # Convert back to SDF format
         try:
             sdf_block = Chem.MolToMolBlock(mol)
             if sdf_block:
@@ -1438,22 +1434,22 @@ def fix_missing_bonds_from_sdf(sdf_content, bond_length_ratio=1.3, max_iteration
                     sdf_block = sdf_block.rstrip() + "\n$$$$\n"
                 return sdf_block
             else:
-                # 如果生成SDF失败，返回原始SDF
+                # If generating SDF fails, return original SDF
                 import warnings
                 warnings.warn("fix_missing_bonds_from_sdf: MolToMolBlock 返回空字符串，返回原始SDF")
                 return sdf_content
         except Exception as e:
-            # 如果转换失败，返回原始SDF
+            # If conversion fails, return original SDF
             import warnings
-            warnings.warn(f"fix_missing_bonds_from_sdf: 转换SDF时出现异常: {e}，返回原始SDF")
+            warnings.warn(f"fix_missing_bonds_from_sdf: Exception occurred when converting SDF: {e}, returning original SDF")
             return sdf_content
         
         return sdf_content
         
     except Exception as e:
-        # 如果出现任何错误，返回原始SDF
+        # If any error occurs, return original SDF
         import warnings
-        warnings.warn(f"fix_missing_bonds_from_sdf 出现异常: {e}，返回原始SDF")
+        warnings.warn(f"fix_missing_bonds_from_sdf: Exception occurred: {e}, returning original SDF")
         return sdf_content
 
 
