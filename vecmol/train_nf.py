@@ -32,7 +32,7 @@ from vecmol.utils.utils_nf import (
     load_checkpoint_state_nf,
     compute_decoder_field_loss
 )
-from vecmol.utils.utils_fm import find_checkpoint_path
+from vecmol.utils.utils_diffusion import find_checkpoint_path
 from vecmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
 from vecmol.models.vecmol import create_vecmol
 

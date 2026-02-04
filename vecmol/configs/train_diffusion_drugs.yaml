@@ -11,7 +11,7 @@ debug: False
 wandb: True
 seed: 1234
 
-diffusion_method: "ddpm_x0"  # ddpm_epsilon（预测噪声）或 ddpm_x0（预测 x0）
+diffusion_method: "ddpm_x0"  # ddpm_epsilon（predict noise）或 ddpm_x0（predict x0）
 
 # DDPM 配置
 ddpm:  
@@ -55,7 +55,7 @@ field_loss_finetune:
 
 nf_pretrained_path: exps/neural_field/nf_drugs/20260126/lightning_logs/version_0/checkpoints/last.ckpt
 exp_dir: ../exps/vecmol
-exp_name: "fm_${dset.dset_name}/${now:%Y%m%d}" # NOTE: in lightning, no time stamp needed
+exp_name: "diffusion_${dset.dset_name}/${now:%Y%m%d}" # NOTE: in lightning, no time stamp needed
 dirname: "${exp_dir}/${exp_name}"
 reload_model_path: exps/vecmol/fm_drugs/20260126/lightning_logs/version_0/checkpoints/last.ckpt
 # reload_model_path: exps/vecmol/fm_drugs/20260116/lightning_logs/version_2/checkpoints/model-epoch=09.ckpt

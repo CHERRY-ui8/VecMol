@@ -20,7 +20,7 @@ from torch_geometric.utils import to_dense_batch
 
 from vecmol.utils.utils_nf import load_neural_field
 from vecmol.dataset.dataset_field import create_field_loaders, create_gnf_converter
-from vecmol.utils.utils_fm import compute_position_weights
+from vecmol.utils.utils_diffusion import compute_position_weights
 from vecmol.models.encoder import create_grid_coords
 
 

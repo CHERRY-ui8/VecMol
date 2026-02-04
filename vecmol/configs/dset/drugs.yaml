@@ -30,7 +30,7 @@ batch_size: 20
 lr_enc: 2e-5  # 2e-4
 lr_dec: 2e-5  # 1e-3
 
-# Code / LMDB 数据相关（train_fm 等使用）
+# Code / LMDB 数据相关（train_diffusion 等使用）
 # num_augmentations: 选择 LMDB 的单一来源
 smooth_sigma: 0.5
 normalize_codes: 0  # 0=False: 不使用归一化

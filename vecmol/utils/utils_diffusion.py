@@ -152,14 +152,14 @@ def find_checkpoint_path(checkpoint_path_or_dir):
     return checkpoint_path
 
 
-def load_checkpoint_fm(
+def load_checkpoint_diffusion(
     model: torch.nn.Module,
     pretrained_path: str,
     optimizer: torch.optim.Optimizer = None,
 ):
     """
     Loads a checkpoint file and restores the model and optimizer states.
-    Used for inference scenarios (e.g., sample_fm.py).
+    Used for inference scenarios (e.g., sample_diffusion.py).
 
     Args:
         model (torch.nn.Module): The model to load the checkpoint into.
@@ -659,7 +659,7 @@ def get_stats(
     return max_val, min_val, mean, std
 
 
-def load_checkpoint_state_fm(model, checkpoint_path_or_dir):
+def load_checkpoint_state_diffusion(model, checkpoint_path_or_dir):
     """
     Helper function to load checkpoint state for VecMol model.
     Automatically finds checkpoint file if a directory is provided.

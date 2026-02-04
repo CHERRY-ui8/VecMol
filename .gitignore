@@ -3,7 +3,6 @@ vecmol/dataset/data/*
 vecmol/wandb/*
 vecmol/outputs/*
 
-# Python
 vecmol/dataset/__pycache__/*
 vecmol/models/__pycache__/*
 vecmol/.hydra/*
@@ -14,6 +13,7 @@ __pycache__/
 *$py.class
 debug.log
 *.pyc
+.vscode/*
 
 graphs/*
 figures/*
@@ -33,7 +33,7 @@ vecmol/configs/noise_robustness_drugs.yaml
 vecmol/configs/noise_robustness_qm9.yaml
 
 vecmol/configs/train_nf_qm9_segnn.yaml
-vecmol/configs/sample_fm_drugs.yaml
+vecmol/configs/sample_diffusion_drugs.yaml
 vecmol/configs/encoder/segnn_encoder.yaml
 vecmol/configs/decoder/segnn_decoder.yaml
 vecmol/models/decoder_segnn.py
@@ -42,3 +42,4 @@ vecmol/models/segnn
 
 *.ipynb
 vecmol/notebooks/*
+

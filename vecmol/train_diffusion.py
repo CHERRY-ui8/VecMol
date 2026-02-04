@@ -33,10 +33,10 @@ from omegaconf import OmegaConf
 import hydra
 
 from vecmol.models.vecmol import create_vecmol
-from vecmol.utils.utils_fm import (
+from vecmol.utils.utils_diffusion import (
     add_noise_to_code,
     compute_code_stats_offline, compute_codes,
-    load_checkpoint_state_fm,
+    load_checkpoint_state_diffusion,
     compute_position_weights
 )
 from vecmol.models.adamw import AdamW
@@ -1350,8 +1350,8 @@ class VecmolLightningModule(pl.LightningModule):
         if "best_loss" in checkpoint:
             self.best_loss = checkpoint["best_loss"]
 
-@hydra.main(config_path="configs", config_name="train_fm_drugs", version_base=None)
-# @hydra.main(config_path="configs", config_name="train_fm_qm9", version_base=None)
+# @hydra.main(config_path="configs", config_name="train_diffusion_drugs", version_base=None)
+@hydra.main(config_path="configs", config_name="train_diffusion_qm9", version_base=None)
 def main_hydra(config):
     """Entry point for Hydra configuration system"""
     main(config)
@@ -1420,7 +1420,7 @@ def main(config):
         try:
             checkpoint_path = config["reload_model_path"]
             if os.path.isdir(checkpoint_path):
-                from vecmol.utils.utils_fm import find_checkpoint_path
+                from vecmol.utils.utils_diffusion import find_checkpoint_path
                 checkpoint_path = find_checkpoint_path(checkpoint_path)
             
             print(f">> Loading checkpoint config from: {checkpoint_path}")
@@ -1813,7 +1813,7 @@ def main(config):
     # Load checkpoint if specified
     if config["reload_model_path"] is not None:
         try:
-            training_state = load_checkpoint_state_fm(model, config["reload_model_path"])
+            training_state = load_checkpoint_state_diffusion(model, config["reload_model_path"])
             
             # Apply training state
             if training_state["epoch"] is not None:

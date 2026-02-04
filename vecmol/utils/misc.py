@@ -52,7 +52,7 @@ def load_vecmol_config(config_name: str, nf_config: OmegaConf) -> Dict[str, Any]
     """Load VecMol config from YAML.
     
     Args:
-        config_name: Config file name (e.g. "train_fm_qm9")
+        config_name: Config file name (e.g. "train_diffusion_qm9")
         nf_config: Neural Field config
     
     Returns:

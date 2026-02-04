@@ -9,7 +9,7 @@ from vecmol.models.vecmol import create_vecmol
 import hydra
 import torch
 import traceback
-from vecmol.utils.utils_fm import load_checkpoint_fm, find_checkpoint_path
+from vecmol.utils.utils_diffusion import load_checkpoint_diffusion, find_checkpoint_path
 from vecmol.dataset.dataset_field import create_gnf_converter
 from vecmol.utils.utils_nf import load_neural_field, create_neural_field
 from vecmol.utils.utils_base import xyz_to_sdf
@@ -33,7 +33,7 @@ def gpu_worker_process(
     logical_gpu_id: int,
     physical_gpu_id: int,
     config_dict: dict,
-    fm_pretrained_path: str,
+    diffusion_pretrained_path: str,
     nf_pretrained_path: str,
     task_queue: Queue,
     result_queue: Queue
@@ -45,7 +45,7 @@ def gpu_worker_process(
         logical_gpu_id: Logical GPU ID (GPU ID in worker process, usually 0)
         physical_gpu_id: Physical GPU ID (actual GPU ID in main process, for logging)
         config_dict: Configuration dictionary
-        fm_pretrained_path: VecMol checkpoint path
+        diffusion_pretrained_path: VecMol (diffusion) checkpoint path
         nf_pretrained_path: Neural field checkpoint path
         task_queue: Task queue (from main process to receive tasks)
         result_queue: Result queue (from worker process to send results to main process)
@@ -76,7 +76,7 @@ def gpu_worker_process(
     # Load models (each worker independently)
     with torch.no_grad():
         vecmol = create_vecmol(config_dict)
-        vecmol, code_stats = load_checkpoint_fm(vecmol, fm_pretrained_path)
+        vecmol, code_stats = load_checkpoint_diffusion(vecmol, diffusion_pretrained_path)
         vecmol = vecmol.cuda()
         vecmol.eval()
         
@@ -85,10 +85,10 @@ def gpu_worker_process(
         decoder = None
         
         if load_decoder_from_diffusion:
-            # Try to load decoder_state_dict from checkpoint in fm_pretrained_path
+            # Try to load decoder_state_dict from checkpoint in diffusion_pretrained_path
             # If joint_finetune is enabled, decoder should be saved in diffusion checkpoint
             try:
-                checkpoint_path = find_checkpoint_path(fm_pretrained_path)
+                checkpoint_path = find_checkpoint_path(diffusion_pretrained_path)
                 lightning_checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
                 
                 if "decoder_state_dict" in lightning_checkpoint:
@@ -376,17 +376,17 @@ def main_process_postprocess(
         }
 
 
-def extract_checkpoint_identifier(fm_path: str) -> str:
+def extract_checkpoint_identifier(diffusion_path: str) -> str:
     """
     Extract a unique identifier from checkpoint path for creating independent output directories.
     
     Args:
-        fm_path: Path to the checkpoint file (e.g., .ckpt file)
+        diffusion_path: Path to the checkpoint file (e.g., .ckpt file)
     
     Returns:
         A unique identifier string, e.g., "20251212_version_2_last" or "version_0_epoch_199"
     """
-    path = Path(fm_path)
+    path = Path(diffusion_path)
     parts = path.parts
     
     # Extract date (if present, typically in format YYYYMMDD)
@@ -465,7 +465,7 @@ def extract_checkpoint_identifier(fm_path: str) -> str:
     return identifier if identifier else 'checkpoint'
 
 
-@hydra.main(config_path="configs", config_name="sample_fm", version_base=None)
+@hydra.main(config_path="configs", config_name="sample_diffusion", version_base=None)
 def main(config: DictConfig) -> None:
     # Set multiprocessing startup method (must be set in main process)
     setup_multiprocessing_spawn()
@@ -483,39 +483,39 @@ def main(config: DictConfig) -> None:
     
     # Set output directory
     exps_root = Path(__file__).parent.parent / "exps"
-    fm_path = config.get("fm_pretrained_path")
+    diffusion_path = config.get("diffusion_pretrained_path")
     
-    # If fm_pretrained_path points to a .ckpt file, need to find the corresponding directory
-    if fm_path.endswith('.ckpt'):
+    # If diffusion_pretrained_path points to a .ckpt file, need to find the corresponding directory
+    if diffusion_path.endswith('.ckpt'):
         # Extract directory structure from .ckpt file path
-        fm_path_parts = Path(fm_path).parts
+        diffusion_path_parts = Path(diffusion_path).parts
         try:
-            vecmol_idx = fm_path_parts.index('vecmol')
-            if vecmol_idx + 2 < len(fm_path_parts):
-                exp_name = f"{fm_path_parts[vecmol_idx + 1]}/{fm_path_parts[vecmol_idx + 2]}"
+            vecmol_idx = diffusion_path_parts.index('vecmol')
+            if vecmol_idx + 2 < len(diffusion_path_parts):
+                exp_name = f"{diffusion_path_parts[vecmol_idx + 1]}/{diffusion_path_parts[vecmol_idx + 2]}"
             else:
-                exp_name = fm_path_parts[vecmol_idx + 1]
+                exp_name = diffusion_path_parts[vecmol_idx + 1]
         except ValueError:
             # If vecmol is not found, use the name of the parent directory
-            exp_name = Path(fm_path).parent.parent.name
+            exp_name = Path(diffusion_path).parent.parent.name
     else:
-        # If fm_pretrained_path points to a directory, use it directly
-        fm_path_parts = Path(fm_path).parts
+        # If diffusion_pretrained_path points to a directory, use it directly
+        diffusion_path_parts = Path(diffusion_path).parts
         try:
-            vecmol_idx = fm_path_parts.index('vecmol')
-            if vecmol_idx + 2 < len(fm_path_parts):
-                exp_name = f"{fm_path_parts[vecmol_idx + 1]}/{fm_path_parts[vecmol_idx + 2]}"
+            vecmol_idx = diffusion_path_parts.index('vecmol')
+            if vecmol_idx + 2 < len(diffusion_path_parts):
+                exp_name = f"{diffusion_path_parts[vecmol_idx + 1]}/{diffusion_path_parts[vecmol_idx + 2]}"
             else:
-                exp_name = fm_path_parts[vecmol_idx + 1]
+                exp_name = diffusion_path_parts[vecmol_idx + 1]
         except ValueError:
-            exp_name = Path(fm_path).parent.parent.name
+            exp_name = Path(diffusion_path).parent.parent.name
     
     # Base output directory
     base_output_dir = exps_root / "vecmol" / exp_name
     base_output_dir.mkdir(parents=True, exist_ok=True)
     
     # Extract checkpoint identifier and create independent subdirectories
-    checkpoint_identifier = extract_checkpoint_identifier(fm_path)
+    checkpoint_identifier = extract_checkpoint_identifier(diffusion_path)
     # checkpoint_identifier = "20260120_version_2_last_decoder_finetuned_0(more epoch)"  # Temporary hardcoding
     output_dir = base_output_dir / "samples" / checkpoint_identifier
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -537,7 +537,7 @@ def main(config: DictConfig) -> None:
     print(f"Number of workers: {num_workers}")
     print(f"Physical GPUs: {main_gpu_list}")
     print(f"Output directory: {output_dir}")
-    print("fm_pretrained_path: ", config["fm_pretrained_path"])
+    print("diffusion_pretrained_path: ", config["diffusion_pretrained_path"])
     print("nf_pretrained_path: ", config["nf_pretrained_path"])
     
     
@@ -604,7 +604,7 @@ def main(config: DictConfig) -> None:
                 logical_gpu_id,
                 physical_gpu_id,
                 config_dict,
-                config["fm_pretrained_path"],
+                config["diffusion_pretrained_path"],
                 config["nf_pretrained_path"],
                 task_queue,
                 result_queue

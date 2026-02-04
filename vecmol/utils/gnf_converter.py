@@ -381,7 +381,7 @@ class GNFConverter(nn.Module):
                         # 只在指定间隔时保存
                         if iter_idx % interval == 0 or iter_idx == self.n_iter - 1:
                             try:
-                                from vecmol.sample_fm import xyz_to_sdf
+                                from vecmol.sample_diffusion import xyz_to_sdf
                                 elements = [ELEMENTS_HASH_INV.get(i, f"Type{i}") for i in range(n_atom_types)]
                                 
                                 # 收集所有类型的query_points

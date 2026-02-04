@@ -66,7 +66,7 @@ class ClusteringHistorySaver:
     ) -> None:
         """保存所有原子类型的聚类历史为SDF文件，每轮一个分子（所有类型合并）"""
         try:
-            from vecmol.sample_fm import xyz_to_sdf
+            from vecmol.sample_diffusion import xyz_to_sdf
             
             sdf_strings = []
             
