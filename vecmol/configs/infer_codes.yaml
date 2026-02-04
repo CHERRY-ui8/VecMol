@@ -1,21 +1,15 @@
 defaults:
-  - dset: qm9  # 包含必要的数据集配置 qm9, drugs
-  - converter: gnf_converter_qm9  # 包含必要的转换器配置 gnf_converter_qm9, gnf_converter_drugs
+  - dset: qm9 
+  - converter: gnf_converter_qm9
   - override hydra/job_logging: custom
   - _self_
 
 wandb: False
 seed: 1234
-# nf_pretrained_path: null  # 必须指定Lightning checkpoint文件路径，例如: /path/to/checkpoints/model-50.ckpt
-# nf_pretrained_path: exps/neural_field/nf_qm9/20251121/lightning_logs/version_1/checkpoints/model-epoch=999.ckpt
-# nf_pretrained_path: exps/neural_field/nf_qm9/20251024/lightning_logs/version_0/checkpoints/model-epoch=409.ckpt
-# nf_pretrained_path: exps/neural_field/nf_qm9/20260116/lightning_logs/version_0/checkpoints/model-epoch=275.ckpt
 nf_pretrained_path: exps/neural_field/nf_qm9/20260124/lightning_logs/version_0/checkpoints/last.ckpt
 
 # debug options
 debug: False
-
-# dirname 将自动基于 nf_pretrained_path 的目录计算
 
 # overwrite
 split: test # train, val, test
@@ -24,23 +18,15 @@ dset:
   batch_size: 32
 
 # data augmentation
-use_data_augmentation: False  # 是否启用数据增强（对分子坐标进行增强后再infer codes）
-num_augmentations: 1  # 每个分子生成多少个增强版本（包括原始版本），例如：3表示1个原始版本+2个增强版本
+use_data_augmentation: False
+num_augmentations: 1
 data_augmentation:
-  apply_rotation: True  # 是否应用旋转增强
-  apply_translation: False  # 是否应用平移增强（平移距离为1/2个anchor_spacing）
-
-# position weight configuration (for pre-computing position weights during code inference)
-# 如果启用，会在infer codes时计算并保存position_weights，训练时直接加载，避免每个epoch重新计算
-position_weight:
-  enabled: False  # 是否在infer codes时计算并保存position_weights
-  radius: 3.0     # 计算附近原子的半径阈值（单位：埃）
-  alpha: 0.5      # 权重系数：weight = 1 + alpha * num_atoms
- # 也用过权重系数：weight = 0.1 + alpha * num_atoms
+  apply_rotation: True
+  apply_translation: False
 
 hydra:
   run:
-    dir: outputs  # 使用默认的 outputs 目录
+    dir: outputs
   job:
     config:
       override_dirname:

@@ -104,9 +104,9 @@ def convert_codes_to_lmdb(codes_dir, split, lmdb_path, keys_path, num_augmentati
     
     # Create LMDB database
     # Add serialization overhead (pickle overhead) and LMDB overhead
-    # pickle serialization increases about 50-100% overhead, LMDB also has少量overhead
-    estimated_size_per_sample = actual_size_per_sample * 2.0 + 4096  # 2倍用于序列化和overhead，4096 bytes额外overhead
-    map_size = max(100 * (1024 * 1024 * 1024), total_samples * estimated_size_per_sample * 2)  # 至少100GB，或2倍估算大小
+    # pickle serialization adds ~50-100% overhead; LMDB has some overhead too
+    estimated_size_per_sample = actual_size_per_sample * 2.0 + 4096  # 2x for serialization + overhead, 4096 bytes extra
+    map_size = max(100 * (1024 * 1024 * 1024), total_samples * estimated_size_per_sample * 2)  # at least 100GB or 2x estimate
     
     print(f"Creating LMDB database with map_size: {map_size / (1024**3):.2f} GB")
     print(f"  Actual size per sample: {actual_size_per_sample / (1024**2):.2f} MB")
@@ -271,8 +271,8 @@ def convert_position_weights_to_lmdb(codes_dir, split, codes_keys, num_augmentat
             os.remove(weights_lmdb_path)
     
     # Estimate size (position_weights is usually much smaller than codes)
-    estimated_size_per_sample = samples_per_file * 4 * 2.0 + 4096  # float32, 2倍开销
-    map_size = max(10 * (1024 * 1024 * 1024), total_samples * estimated_size_per_sample * 2)  # 至少10GB
+    estimated_size_per_sample = samples_per_file * 4 * 2.0 + 4096  # float32, 2x overhead
+    map_size = max(10 * (1024 * 1024 * 1024), total_samples * estimated_size_per_sample * 2)  # at least 10GB
     
     print(f"Creating position_weights LMDB database with map_size: {map_size / (1024**3):.2f} GB")
     db = lmdb.open(weights_lmdb_path, map_size=int(map_size))

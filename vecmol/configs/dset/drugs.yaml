@@ -1,12 +1,12 @@
 dset_name: drugs
 data_dir: dataset/data
 data_aug: True
-grid_dim: 64 # TODO: 可能覆盖不了全部，但是vecmol里就是设置的这个参数，说明是合理的
+grid_dim: 64 # TODO: may not cover all; vecmol uses this value
 resolution: .25
 
 # 20260112/version0
-# grid_size: 13  # 从 calculate_diameter.ipynb 中计算得到最大直径是33左右
-# anchor_spacing: 1.5  # 锚点间距，单位为埃，大一些可以大幅减小计算量
+# grid_size: 13  # max diameter ~33 from calculate_diameter.ipynb
+# anchor_spacing: 1.5  # anchor spacing (Angstrom), larger reduces compute
 
 # 20260112/version1, 20260113/version0
 # grid_size: 9
@@ -18,7 +18,7 @@ anchor_spacing: 3
 
 elements: ["C", "H", "O", "N", "F", "S", "Cl", "Br"]
 n_channels: 8
-n_points: 500 # TODO：后面可以再调大一些，暂时先保留500
+n_points: 500 # TODO: may increase later
 subsampling_ratio: 2
 
 # Query points sampling configuration
@@ -30,18 +30,18 @@ batch_size: 20
 lr_enc: 2e-5  # 2e-4
 lr_dec: 2e-5  # 1e-3
 
-# Code / LMDB 数据相关（train_diffusion 等使用）
-# num_augmentations: 选择 LMDB 的单一来源
+# Code / LMDB (train_diffusion etc.)
+# num_augmentations: single LMDB source
 smooth_sigma: 0.5
-normalize_codes: 0  # 0=False: 不使用归一化
+normalize_codes: 0  # 0=False: no normalization
 on_the_fly: True  # use False if codes are computed offline
 use_augmented_codes: False
-num_augmentations: 1  # null 或具体数字
+num_augmentations: 1  # null or number
 
 position_weight:
   enabled: False
   radius: 3.0
   alpha: 0.5
-use_sharded_lmdb: true  # 是否使用分片LMDB。null=自动检测，true=强制分片，false=强制完整LMDB
+use_sharded_lmdb: true  # null=auto, true=sharded, false=full LMDB
 codes_dir_no_aug: "exps/neural_field/nf_drugs/20260113/lightning_logs/version_1/checkpoints/code_no_aug/"
 # code_stats_path: exps/neural_field/nf_drugs/20260113/lightning_logs/version_1/checkpoints/code_stats_train_aug1_norm1.pt

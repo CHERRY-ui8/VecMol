@@ -135,7 +135,7 @@ class FieldDataset(Dataset):
     def _use_lmdb_database(self, lmdb_path, keys_path):
         """Use LMDB database to load data"""
         self.lmdb_path = lmdb_path
-        self.keys = torch.load(keys_path)  # 直接加载keys文件
+        self.keys = torch.load(keys_path)  # load keys file directly
         self.db = None
         self.use_lmdb = True
         
@@ -373,7 +373,7 @@ class FieldDataset(Dataset):
         
         if self.sample_full_grid:
             query_points = self.full_grid_high_res.to(device)
-            point_types = torch.zeros(len(query_points), dtype=torch.long, device=device)  # 全部是grid点
+            point_types = torch.zeros(len(query_points), dtype=torch.long, device=device)  # all grid points
             return query_points, point_types
         
         grid_size = len(self.full_grid_high_res) # grid_dim**3
@@ -393,7 +393,7 @@ class FieldDataset(Dataset):
             
             indices = torch.randperm(unique_points.size(0), device=device)[:self.n_points]
             query_points = unique_points[indices]
-            point_types = torch.zeros(self.n_points, dtype=torch.long, device=device)  # 全部是grid点
+            point_types = torch.zeros(self.n_points, dtype=torch.long, device=device)  # all grid points
             return query_points, point_types
         
         else:
@@ -706,7 +706,7 @@ def create_field_loaders(
         num_workers=config["dset"]["num_workers"],
         shuffle=True if split == "train" else False,
         pin_memory=True,  # Accelerate GPU data transfer
-        persistent_workers=True if config["dset"]["num_workers"] > 0 else False,  # 保持worker进程，减少启动开销
+        persistent_workers=True if config["dset"]["num_workers"] > 0 else False,  # keep workers to reduce startup cost
         drop_last=True,
     )
     print(f">> {split} set size: {len(dset)}")
@@ -723,7 +723,7 @@ def create_gnf_converter(config: dict) -> GNFConverter:
     Returns:
         GNFConverter: Configured GNFConverter instance
     """
-    # Force get converter configuration from config,不允许fallback
+    # Force get converter configuration from config, no fallback
     if "converter" in config:
         gnf_config = config["converter"]
     elif "gnf_converter" in config:
@@ -731,18 +731,18 @@ def create_gnf_converter(config: dict) -> GNFConverter:
     else:
         raise ValueError("GNF converter configuration not found in config! Must have either 'converter' or 'gnf_converter' key.")
     
-    # Get the number of atom types in the dataset configuration,不允许默认值
+    # Get the number of atom types from dataset config, no default
     dset_config = config["dset"]
     n_atom_types = dset_config["n_channels"]
     
-    # Get gradient field method,不允许默认值
+    # Get gradient field method, no default
     gradient_field_method = gnf_config["gradient_field_method"]
     
-    # Get method specific configuration,不允许默认值
+    # Get method-specific configuration, no default
     method_configs = gnf_config["method_configs"]
     default_config = gnf_config["default_config"]
     
-    # Select parameter configuration based on method, force get from configuration,不允许默认值
+    # Select parameter config by method, force from configuration, no default
     if gradient_field_method in method_configs:
         method_config = method_configs[gradient_field_method]
         # Use method specific parameters, force get
@@ -761,7 +761,7 @@ def create_gnf_converter(config: dict) -> GNFConverter:
         eps = default_config["eps"]
         min_samples = default_config["min_samples"]
     
-    # Get other required parameters, force get from configuration,不允许默认值
+    # Get other required parameters from configuration, no default
     sigma = gnf_config["sigma"]
     n_iter = gnf_config["n_iter"]
     temperature = gnf_config["temperature"]
@@ -781,7 +781,7 @@ def create_gnf_converter(config: dict) -> GNFConverter:
     min_iterations = gnf_config["min_iterations"]
     
     # Get the number of query_points for each atom type (optional)
-    # If n_query_points_per_type is provided in the configuration, use it; otherwise, use None, and use统一的 n_query_points
+    # If n_query_points_per_type in config, use it; else None and use unified n_query_points
     n_query_points_per_type = None
     if "n_query_points_per_type" in gnf_config:
         n_query_points_per_type = gnf_config["n_query_points_per_type"]
@@ -805,11 +805,11 @@ def create_gnf_converter(config: dict) -> GNFConverter:
     min_min_samples = autoregressive_config["min_min_samples"]
     max_clustering_iterations = autoregressive_config["max_clustering_iterations"]
     bond_length_tolerance = autoregressive_config["bond_length_tolerance"]
-    bond_length_lower_tolerance = autoregressive_config.get("bond_length_lower_tolerance", 0.2)  # 默认值0.2
+    bond_length_lower_tolerance = autoregressive_config.get("bond_length_lower_tolerance", 0.2)  # default 0.2
     enable_clustering_history = autoregressive_config["enable_clustering_history"]
     # Debug options (optional, default is False)
     debug_bond_validation = autoregressive_config.get("debug_bond_validation", False)
-    # First N atoms不受键长限制（可选，默认为3）
+    # First N atoms exempt from bond length check (optional, default 3)
     n_initial_atoms_no_bond_check = autoregressive_config.get("n_initial_atoms_no_bond_check", 3)
     # Whether to enable bond length check (optional, default is True)
     enable_bond_validation = autoregressive_config.get("enable_bond_validation", True)
@@ -928,7 +928,7 @@ def prepare_data_with_sample_idx(config, device, sample_idx, split="val"):
             single_data = Data(
                 pos=target_pos,
                 x=target_x,
-                batch=torch.zeros(target_pos.shape[0], dtype=torch.long, device=device),  # 所有原子都属于样本0
+                batch=torch.zeros(target_pos.shape[0], dtype=torch.long, device=device),  # all atoms belong to sample 0
                 **target_data
             )
             

@@ -15,61 +15,52 @@ exp_name: "nf_${dset.dset_name}/${now:%Y%m%d}"
 dirname: "${exp_dir}/${exp_name}"
 
 reload_model_path: exps/neural_field/nf_drugs/20260126/lightning_logs/version_0/checkpoints/last.ckpt
-auto_resume: True  # 是否自动加载最新的checkpoint继续训练
+auto_resume: True
 
 # training params
-ckpt_every_n_epochs: 1  # 每隔多少epoch保存一次ckpt
+ckpt_every_n_epochs: 1
 n_epochs: 500
 eval_every: 1
 
 # Learning rate scheduler configuration
-lr_decay: True  # 启用学习率衰减，防止后期loss爆炸
-lr_scheduler_type: "plateau"  # "plateau" (ReduceLROnPlateau) 或 "multistep" (MultiStepLR)
+lr_decay: True
+lr_scheduler_type: "plateau"  # "plateau" (ReduceLROnPlateau) or "multistep" (MultiStepLR)
 
 # Warmup configuration
 warmup:
-  enabled: False  # 是否启用学习率 warmup
-  warmup_steps: 10000  # warmup 的步数（steps），学习率从 0 线性增长到目标学习率
+  enabled: False
+  warmup_steps: 10000
 
-# ReduceLROnPlateau 参数（当 lr_scheduler_type="plateau" 时使用）
-# 智能学习率调整：当验证损失不再下降时自动降低学习率
-lr_factor: 0.8  # 学习率衰减因子（每次降低为原来的0.5倍）
-lr_patience: 5  # 等待多少个epoch验证损失没有改善才降低学习率
-lr_min: 1e-6  # 最小学习率下限
-lr_mode: "min"  # "min" 表示监控指标下降（val_loss越小越好）
+lr_factor: 0.8
+lr_patience: 5
+lr_min: 1e-6
+lr_mode: "min"
 
-# MultiStepLR 参数（当 lr_scheduler_type="multistep" 时使用）
-lr_milestones: [30, 60, 90]  # 在这些epoch降低学习率
-lr_gamma: 0.5  # 每次衰减为原来的0.5倍（比默认0.1更温和）
+lr_milestones: [30, 60, 90]
+lr_gamma: 0.5
 
-# Loss weighting: 对更重要的区域（原子附近）加权
+# Loss weighting: weight the more important regions (near atoms)
 loss_weighting:
-  enabled: False  # 是否启用loss加权
-  atom_distance_scale: 0.5  # 原子距离衰减尺度（越小，距离衰减越快）
-  # 分别计算grid点和邻近点的loss时的权重
-  grid_loss_weight: 1.0  # grid点loss的权重
-  neighbor_loss_weight: 1.0  # 邻近点loss的权重
+  enabled: False
+  atom_distance_scale: 0.5
+  grid_loss_weight: 1.0
+  neighbor_loss_weight: 1.0
 
 # Fine-tuning settings: freeze encoder and only train decoder
 finetune_decoder:
-  enabled: True  # 是否启用decoder微调模式
-  freeze_encoder: True  # 是否冻结encoder（True=只训练decoder，False=同时训练encoder和decoder）
-  # 使用denoiser生成codes（替代encoder）
-  use_denoiser_for_codes: False  # 是否使用denoiser生成codes（如果为True，需要指定denoiser_checkpoint_path）。注意：如果denoiser是用旧的code_dim训练的，会导致维度不匹配
+  enabled: True
+  freeze_encoder: True
+  use_denoiser_for_codes: False
   denoiser_checkpoint_path: null
-  # 当 use_denoiser_for_codes=False 时，使用 on-the-fly 模式：
-  # 实时从冻结的 encoder 计算 codes（类似于 diffusion 训练的 on_the_fly=True）
-  # 微调模式下的特殊精细配置
-  sample_near_atoms_only: False  # 是否只在采样时采样原子附近的点（微调模式下推荐True）
-  atom_distance_threshold: 1  # 只采样距离原子多少Å内的query points（单位：Å，可以设置较小值如0.3-0.5）
-  n_points: 500  # query points数量（如果未设置，则使用dset.n_points，默认500）
-  cosine_loss_weight: 0  # cosine loss的权重，>0则使用cosine loss，0则不使用。总loss=cosine_loss_weight*cosine_loss+length_loss_weight*length_loss+magnitude_loss
-  length_loss_weight: 0  # 模长损失（length loss）的权重，计算预测场和真实场的模长之间的MSE损失。可以与cosine_loss和magnitude_loss一起使用。设置为0表示不使用模长损失
-  max_timestep_for_decoder: 10  # 每次从[0, max_timestep_for_decoder)中随机均匀采样一个timestep进行轻微加噪，然后去噪。这样codes只是经过轻微扰动，去噪后应该接近原始codes，decoder应该能够从这些codes得到和原先ground truth近似的field
-  real_code_ratio: 1  # 真实codes的使用比例（0.0-1.0），剩余比例使用denoised codes。例如：0.5表示50%使用真实codes（直接从encoder编码，不经过diffusion），50%使用denoised codes（经过diffusion去噪）。真实codes和denoised codes会一起随机均匀采样
+  sample_near_atoms_only: False
+  atom_distance_threshold: 1
+  n_points: 500
+  cosine_loss_weight: 0
+  length_loss_weight: 0
+  max_timestep_for_decoder: 10
   code_augmentation:
-    enabled: False  # 微调模式下自动启用codes扰动
-    noise_std: 0.003  # 高斯噪声标准差
+    enabled: False
+    noise_std: 0.003
 
 # set the running dir
 hydra:

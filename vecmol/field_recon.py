@@ -84,7 +84,7 @@ def worker_process(gpu_id, physical_gpu_id, tasks, result_queue):
     Note: In spawn mode, the subprocess will re-execute the entire script
     We set CUDA_VISIBLE_DEVICES through the environment variable _WORKER_GPU_ID before script execution
     """
-    # Note: CUDA_VISIBLE_DEVICES has already been set through the environment variable _WORKER_GPU_ID in the script开头
+    # Note: CUDA_VISIBLE_DEVICES is set via _WORKER_GPU_ID at script start
     # Here torch has already been imported and uses the correct CUDA_VISIBLE_DEVICES setting
     
     # Verify GPU settings
@@ -580,7 +580,7 @@ def main(config: DictConfig) -> None:
                     all_tasks.append((
                         sample_idx, logical_gpu_id, physical_gpu_id, method_config, field_mode, field_method,
                         str(output_dir), str(csv_path), str(mol_save_dir), 
-                        data_dir, config.dset.dset_name, config.dset.elements,  # 使用转换后的绝对路径
+                        data_dir, config.dset.dset_name, config.dset.elements,  # use converted absolute path
                         nf_pretrained_path, nf_pretrained_path, config_dict
                     ))
         
@@ -759,7 +759,7 @@ def main(config: DictConfig) -> None:
                                 
                             elif field_mode == 'nf_field':
                                 decoder = decoder  # Use global decoder
-                                codes = batch_codes_list[i]  # 使用批次编码的对应分子
+                                codes = batch_codes_list[i]  # corresponding molecule from batch codes
                             
                             # Read saved parameters from configuration
                             autoregressive_config = config_dict.get("converter", {}).get("autoregressive_clustering", {})

@@ -118,7 +118,7 @@ def compute_field_at_points(
         if points.device != target_device:
             points = points.to(target_device)
         
-        # 生成随机噪声代码
+        # Generate random noise codes
         grid_size = config.dset.grid_size
         code_dim = config.encoder.code_dim
         batch_size = 1
@@ -255,12 +255,12 @@ def setup_worker_gpu_environment():
 
 def parse_gpu_list_from_config(config, default_use_all: bool = True) -> Tuple[List[int], Optional[str]]:
     """
-    从配置中解析GPU列表（优先级：配置文件 > 环境变量 > 所有GPU）
-    
+    Parse GPU list from config (priority: config file > env var > all GPUs).
+
     Args:
-        config: 配置对象（DictConfig或dict）
-        default_use_all: 如果没有找到配置，是否使用所有GPU（默认True）
-    
+        config: Config object (DictConfig or dict)
+        default_use_all: If no config found, whether to use all GPUs (default True)
+
     Returns:
         (physical GPU ID list, CUDA_VISIBLE_DEVICES string or None)
     """
@@ -359,14 +359,14 @@ def distribute_tasks_to_gpus(
     num_gpus: int
 ) -> Dict[int, List[int]]:
     """
-    将任务索引分配给不同的GPU（轮询分配）
-    
+    Distribute task indices to GPUs (round-robin).
+
     Args:
-        task_indices: 任务索引列表
-        num_gpus: GPU数量
-    
+        task_indices: List of task indices
+        num_gpus: Number of GPUs
+
     Returns:
-        Dict[int, List[int]]: {逻辑GPU ID: [任务索引列表]}
+        Dict[int, List[int]]: {logical GPU ID: [task index list]}
     """
     gpu_assignments = {}
     for idx, task_idx in enumerate(task_indices):

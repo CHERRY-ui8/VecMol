@@ -347,7 +347,7 @@ def add_bonds_with_openbabel(coords, atom_type, ele_list, fallback_to_xyz_to_sdf
         return ""
 
 
-# 原子最大价态（常见元素）
+# Max valency for common elements
 MAX_VALENCY = {
     1: 1,   # H
     6: 4,   # C
@@ -383,7 +383,7 @@ def calculate_atom_valency(mol, atom_idx):
     try:
         valency = float(atom.GetTotalValence())
         # For some molecules that are not sanitized or have incomplete information, RDKit may return 0 or negative values,
-        # 这种情况下回退到根据键级求和的旧实现。
+        # Fall back to bond-order-sum implementation in this case.
         if valency > 0:
             return valency
     except Exception:
@@ -398,7 +398,7 @@ def calculate_atom_valency(mol, atom_idx):
 
 def get_atom_max_valency(atomic_num):
     """Get the maximum valency of an atom"""
-    return MAX_VALENCY.get(atomic_num, 4)  # 默认 4
+    return MAX_VALENCY.get(atomic_num, 4)  # default 4
 
 def _calculate_hydrogen_positions_3d(atom_pos, existing_bond_vectors, num_h, atom_symbol='C', bond_length=None):
     """
@@ -431,7 +431,7 @@ def _calculate_hydrogen_positions_3d(atom_pos, existing_bond_vectors, num_h, ato
                 'Cl': 1.27, # Cl-H
                 'Br': 1.41, # Br-H
             }
-            bond_length = default_bond_lengths.get(atom_symbol, 1.0)  # 默认1.0 Å
+            bond_length = default_bond_lengths.get(atom_symbol, 1.0)  # default 1.0 Å
     # Use numpy imported at the top of the file
     atom_center = np.array([atom_pos.x, atom_pos.y, atom_pos.z])
     h_positions = []
@@ -563,7 +563,7 @@ def _calculate_hydrogen_positions_3d(atom_pos, existing_bond_vectors, num_h, ato
                 angle = 2 * np.pi * i / (num_h - 1)
                 h_direction = np.cos(angle) * perp1 + np.sin(angle) * perp2
                 # Adjust angle
-                h_direction = -0.333 * main_direction + 0.943 * h_direction  # 约109.5度
+                h_direction = -0.333 * main_direction + 0.943 * h_direction  # ~109.5 deg
                 h_direction = h_direction / np.linalg.norm(h_direction)
                 h_pos = atom_center + bond_length * h_direction
                 h_positions.append(h_pos.tolist())
@@ -689,7 +689,7 @@ def add_hydrogens_manually_from_sdf(sdf_content):
     3. If current valency < maximum valency, calculate number of H to add
     4. For atoms with no bonds (valency=0), add H directly using maximum valency
     5. Add H atoms uniformly around heavy atoms, using standard bond lengths (based on atom type)
-       - C-H: 1.09 Å, O-H: 0.96 Å, N-H: 1.01 Å, S-H: 1.34 Å 等
+       - C-H: 1.09 Å, O-H: 0.96 Å, N-H: 1.01 Å, S-H: 1.34 Å, etc.
     6. Use maximum repulsion principle to calculate H atom positions, ensuring reasonable geometry
     7. Convert back to SDF format
     
@@ -935,7 +935,7 @@ def add_hydrogens_manually_from_sdf(sdf_content):
                         np.sin(theta) * np.sin(phi),
                         np.cos(theta)
                     ])
-                    # If there are existing bonds, slightly偏向已有键的相反方向
+                    # If there are existing bonds, slightly bias toward opposite of existing bonds
                     if existing_bond_vectors:
                         h_direction = -0.3 * main_direction + 0.954 * h_direction
                         h_direction = h_direction / np.linalg.norm(h_direction)
@@ -1007,7 +1007,7 @@ def add_hydrogens_manually_from_sdf(sdf_content):
         conf_id = new_mol.AddConformer(new_conf)
                 
         # Convert back to SDF format
-        # If molecule cannot be kekulized (e.g. some aromatic rings), try fixing bond types后再生成SDF
+        # If molecule cannot be kekulized (e.g. some aromatic rings), try fixing bond types then write SDF
         sdf_with_h = None
         
         try:
@@ -1379,7 +1379,7 @@ def fix_missing_bonds_from_sdf(sdf_content, bond_length_ratio=1.3, max_iteration
                     
                     # Filter suitable bond types based on valency constraints (from high to low bond order)
                     selected_bond_order = None
-                    for bond_order, _, _ in reversed(candidate_bonds):  # 从高到低（三键→双键→单键）
+                    for bond_order, _, _ in reversed(candidate_bonds):  # high to low (triple -> double -> single)
                         new_valency_i = current_valency + bond_order
                         new_valency_j = other_current_valency + bond_order
                         
@@ -1436,7 +1436,7 @@ def fix_missing_bonds_from_sdf(sdf_content, bond_length_ratio=1.3, max_iteration
             else:
                 # If generating SDF fails, return original SDF
                 import warnings
-                warnings.warn("fix_missing_bonds_from_sdf: MolToMolBlock 返回空字符串，返回原始SDF")
+                warnings.warn("fix_missing_bonds_from_sdf: MolToMolBlock returned empty string, returning original SDF")
                 return sdf_content
         except Exception as e:
             # If conversion fails, return original SDF

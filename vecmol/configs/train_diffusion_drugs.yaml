@@ -11,47 +11,37 @@ debug: False
 wandb: True
 seed: 1234
 
-diffusion_method: "ddpm_x0"  # ddpm_epsilon（predict noise）或 ddpm_x0（predict x0）
+diffusion_method: "ddpm_x0"  # ddpm_epsilon (predict noise) / ddpm_x0 (predict x0)
 
-# DDPM 配置
 ddpm:  
-  # 扩散过程配置
   beta_start: 1e-4
   beta_end: 0.02
   num_timesteps: 1000
-  schedule: "cosine"  # "linear" 或 "cosine"
-  s: 0.008  # cosine 调度的偏移参数（仅当 schedule 为 cosine 时使用）
+  schedule: "cosine"
+  s: 0.008
+  use_time_weight: False  # whether to use time weight 1 + num_timesteps/(t+1)
 
-  # 损失权重配置（仅当 diffusion_method 为 ddpm_x0 时使用）
-  use_time_weight: False  # 是否使用时间步权重 1 + num_timesteps/(t+1)
-
-# position_weight 在 dset/drugs.yaml 中定义，此处可覆盖
-
-# NOTE: 联合微调配置（decoder + denoiser）
-# 启用后，decoder 和 denoiser 将同时优化，encoder 始终冻结
-# decoder 默认使用 neural field checkpoint 中的 decoder，如果从 reload_model_path 加载的 checkpoint 中包含 decoder_state_dict，则优先使用
-joint_finetune:
-  enabled: False  # 是否启用联合微调（同时优化 decoder 和 denoiser）
-  decoder_loss_weight: 1000.0  # decoder 损失权重（λ），用于组合损失：total_loss = denoiser_loss + λ * decoder_loss
-  decoder_lr: 5e-5  # decoder 的学习率，如果为 null 则使用 denoiser 的学习率（lr）
-
-  num_timesteps_for_decoder: 10  # 从[0, num_timesteps_for_decoder)中随机均匀采样一个timestep进行decoder loss计算（避免OOM）
-
-  n_points: null  # joint fine-tuning时使用的query points数量（如果未设置，则使用dset.n_points，默认500）
-  targeted_sampling_ratio: null  # grid点和邻近点的比例 (n_grid / n_neighbor)，null表示使用dset.targeted_sampling_ratio
-  atom_distance_threshold: null  # 只采样距离原子多少Å内的query points（单位：Å），null表示使用dset.atom_distance_threshold
-  atom_distance_scale: null  # 原子距离衰减尺度（用于loss weighting的指数衰减），null表示使用loss_weighting.atom_distance_scale或默认值0.5
-  
-  use_cosine_loss: False  # 是否使用余弦距离loss（替代MSE loss）
-  magnitude_loss_weight: 0.1  # magnitude loss的权重（用于余弦距离+magnitude loss）
-
-# NOTE: Field Loss Finetune配置（decoder冻结）
-# 启用后，decoder参数保持冻结，只用于提供field loss监督信号给denoiser
-# query points采样方法：使用dataset的_get_xs方法，一部分采样neighbor，一部分采样grid点
+# Field Loss Finetune (decoder frozen)
+# use decoder to provide field loss supervision to denoiser
 field_loss_finetune:
-  enabled: False  # 是否启用field loss finetune
-  field_loss_weight: 100.0  # field loss的权重（λ），用于组合损失：total_loss = denoiser_loss + λ * field_loss
-  num_timesteps_for_field_loss: 500  # 从[0, num_timesteps_for_field_loss)中随机均匀采样一个timestep进行field loss计算（避免OOM）
+  enabled: False
+  field_loss_weight: 100.0  # Combined loss: total_loss = denoiser_loss + λ * field_loss
+  num_timesteps_for_field_loss: 500  # sample a timestep uniformly from [0, num_timesteps_for_field_loss) for field loss calculation
+
+# Joint finetune (decoder + denoiser), freeze encoder
+# decoder uses neural field checkpoint by default, if reload_model_path contains decoder_state_dict, use it
+joint_finetune:
+  enabled: False
+  decoder_loss_weight: 1000.0  # Combined loss: total_loss = denoiser_loss + λ * decoder_loss
+  decoder_lr: 5e-5  # If null, use denoiser learning rate
+  num_timesteps_for_decoder: 10  # sample a timestep uniformly from [0, num_timesteps_for_decoder) for decoder loss calculation
+  n_points: null  # query points number for joint finetune, if null, use dset.n_points (default 500)
+  targeted_sampling_ratio: null  # grid and neighbor ratio (n_grid / n_neighbor), null means use dset.targeted_sampling_ratio
+  atom_distance_threshold: null  # query points distance threshold (Å), null means use dset.atom_distance_threshold
+  atom_distance_scale: null  # atom distance scale for loss weighting, null means use loss_weighting.atom_distance_scale or default 0.5
+  use_cosine_loss: False  # whether to use cosine distance loss
+  magnitude_loss_weight: 0.1  # magnitude loss weight (for cosine distance + magnitude loss)
+
 
 nf_pretrained_path: exps/neural_field/nf_drugs/20260126/lightning_logs/version_0/checkpoints/last.ckpt
 exp_dir: ../exps/vecmol
@@ -60,15 +50,14 @@ dirname: "${exp_dir}/${exp_name}"
 reload_model_path: exps/vecmol/fm_drugs/20260126/lightning_logs/version_0/checkpoints/last.ckpt
 # reload_model_path: exps/vecmol/fm_drugs/20260116/lightning_logs/version_2/checkpoints/model-epoch=09.ckpt
 
-# training params（data/code 相关已移至 dset/drugs.yaml）
 num_epochs: 5000
 dset:
   batch_size: 144
   num_workers: 6
 
-ckpt_every_n_epochs: 1  # 每隔多少epoch保存一次ckpt
+ckpt_every_n_epochs: 1
 decoder:
-  code_dim: 384 # 和encoder的code_dim一致
+  code_dim: 384 # same as encoder's code_dim
 
 # optim params
 lr: 2e-4 # 1e-3 # 5e-4
@@ -76,7 +65,7 @@ use_lr_schedule: 0
 num_warmup_iter: 4000
 wd: 1e-6
 ema_decay: 0.999
-max_grad_norm: 0.5  # 梯度裁剪阈值，防止梯度爆炸
+max_grad_norm: 0.5
 
 # set the running dir
 hydra:

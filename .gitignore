@@ -25,6 +25,7 @@ paper/*
 evaluate/*
 
 vecmol/analysis
+vecmol/_deprecated_analysis/_deprecated
 vecmol/configs/field_quality_drugs.yaml
 vecmol/configs/field_quality_qm9.yaml
 vecmol/configs/field_recon_drugs.yaml

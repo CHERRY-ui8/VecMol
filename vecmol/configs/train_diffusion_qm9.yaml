@@ -11,7 +11,7 @@ debug: False
 wandb: False
 seed: 1234
 
-diffusion_method: "ddpm_x0"  # ddpm_epsilon（predict noise）或 ddpm_x0（predict x0）
+diffusion_method: "ddpm_x0"  # ddpm_epsilon (predict noise) / ddpm_x0 (predict x0)
 
 ddpm:
   schedule: "cosine"
@@ -36,14 +36,14 @@ field_loss_finetune:
 # decoder uses neural field checkpoint by default, if reload_model_path contains decoder_state_dict, use it
 joint_finetune:
   enabled: False
-  decoder_loss_weight: 10.0  # decoder loss weight (λ), for combined loss: total_loss = denoiser_loss + λ * decoder_loss
-  decoder_lr: 1e-4  # decoder learning rate, if null, use denoiser learning rate (lr)
+  decoder_loss_weight: 10.0  # Combined loss: total_loss = denoiser_loss + λ * decoder_loss
+  decoder_lr: 1e-4  # If null, use denoiser learning rate
   num_timesteps_for_decoder: 10  # sample a timestep uniformly from [0, num_timesteps_for_decoder) for decoder loss calculation
   n_points: null  # query points number for joint finetune, if null, use dset.n_points (default 500)
   targeted_sampling_ratio: null  # grid and neighbor ratio (n_grid / n_neighbor), null means use dset.targeted_sampling_ratio
   atom_distance_threshold: null  # query points distance threshold (Å), null means use dset.atom_distance_threshold
   atom_distance_scale: null  # atom distance scale for loss weighting, null means use loss_weighting.atom_distance_scale or default 0.5
-  use_cosine_loss: False  # whether to use cosine distance loss (replace MSE loss)
+  use_cosine_loss: False  # whether to use cosine distance loss
   magnitude_loss_weight: 0.1  # magnitude loss weight (for cosine distance + magnitude loss)
 
 
@@ -58,31 +58,26 @@ reload_model_path: exps/vecmol/fm_qm9/20260125/lightning_logs/version_0/checkpoi
 # reload_model_path: exps/vecmol/fm_qm9/20260124/lightning_logs/version_1/checkpoints/last.ckpt
 # reload_model_path: exps/vecmol/fm_qm9/20260120/lightning_logs/version_2/checkpoints/last.ckpt
 # reload_model_path: exps/vecmol/fm_qm9/20260105/lightning_logs/version_1/checkpoints
-  # Funcmol (denoiser) checkpoint 路径，支持两种格式：
-  # 1. Lightning checkpoint 文件路径（.ckpt 文件），例如：/path/to/model-epoch=100.ckpt
-  # 2. 目录路径，会自动查找 last.ckpt 或最新的 .ckpt 文件，例如：/path/to/checkpoint_dir
 
-# training params（data/code 相关已移至 dset/qm9.yaml）
 num_epochs: 50000
-num_iterations: 50000  # 总迭代次数，用于学习率调度
+num_iterations: 50000
 dset:
   batch_size: 44
   num_workers: 4
 
-ckpt_every_n_epochs: 1  # 每隔多少epoch保存一次ckpt
+ckpt_every_n_epochs: 1
 decoder:
-  code_dim: 384 # 和encoder的code_dim一致
+  code_dim: 384 # same as encoder's code_dim
 
 # optim params
 lr: 2e-4 # 1e-3 # 5e-4
 # use_lr_schedule: 1 # 0-NOT use lr schedule, 1-use lr schedule
-use_lr_schedule: 0 # 暂时禁用学习率调度，使用固定学习率
+use_lr_schedule: 0
 # num_warmup_iter: 4000
 num_warmup_iter: 1000
 wd: 1e-6
-# ema_decay: 0.999
-ema_decay: 0.999  # 启用EMA
-max_grad_norm: 0.5  # 0.5，1
+ema_decay: 0.999
+max_grad_norm: 0.5
 
 # set the running dir
 hydra:

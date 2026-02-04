@@ -288,7 +288,7 @@ def compute_code_stats_offline(
         if num_augmentations is not None:
             cache_filename = f"code_stats_{split}_aug{num_augmentations}_norm{normalize_codes}.pt"
         else:
-            cache_filename = f"code_stats_{split}_norm{normalize_codes}.pt"  # 向后兼容
+            cache_filename = f"code_stats_{split}_norm{normalize_codes}.pt"  # backward compatibility
         cache_path = os.path.join(cache_dir, cache_filename)
     elif hasattr(dataset, 'codes_dir'):
         # Traditional mode: use codes_dir as cache directory
@@ -296,7 +296,7 @@ def compute_code_stats_offline(
         if num_augmentations is not None:
             cache_filename = f"code_stats_{split}_aug{num_augmentations}_norm{normalize_codes}.pt"
         else:
-            cache_filename = f"code_stats_{split}_norm{normalize_codes}.pt"  # 向后兼容
+            cache_filename = f"code_stats_{split}_norm{normalize_codes}.pt"  # backward compatibility
         cache_path = os.path.join(cache_dir, cache_filename)
     
     # Try to load cache
@@ -341,7 +341,7 @@ def compute_code_stats_offline(
             print(f"Another process is computing code statistics, waiting for cache file...")
             
             # Wait for other processes to complete computation (maximum wait time is 2 hours)
-            max_wait_time = 7200  # 2小时
+            max_wait_time = 7200  # 2 hours
             wait_interval = 2  # Check every 2 seconds
             elapsed_time = 0
             

@@ -230,7 +230,7 @@ def process_gpu_batch(
         converter = create_gnf_converter(method_config)
         
         # 2. Generate codes (single molecule, batch_size=1)
-        # DDPM 采样
+        # DDPM sampling
         shape = (1, grid_size**3, code_dim)
         with torch.no_grad():
             denoised_codes_3d = vecmol.sample_ddpm(shape, code_stats=code_stats, progress=False)

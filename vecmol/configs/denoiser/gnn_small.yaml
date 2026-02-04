@@ -1,36 +1,36 @@
 use_gnn: True
 
-# 模型架构参数（用于 GNNDenoiser）
-hidden_dim: 1024  # GNN隐藏层维度，可选值：128, 256, 384, 512
-num_layers: 10    # GNN层数，可选值：4, 6, 8, 10
-time_emb_dim: 512 # 时间嵌入维度（仅用于new/new_x0方法），可选值：64, 128, 192, 256
-dropout: 0.15     # Dropout率，可选值：0.1, 0.15
+# Model architecture (GNNDenoiser)
+hidden_dim: 1024  # GNN hidden dim; options: 128, 256, 384, 512
+num_layers: 10    # GNN layers; options: 4, 6, 8, 10
+time_emb_dim: 512 # Time embedding dim (new/new_x0); options: 64, 128, 192, 256
+dropout: 0.15     # Dropout; options: 0.1, 0.15
 
-# hidden_dim: 384  # GNN隐藏层维度，可选值：128, 256, 384, 512
-# num_layers: 8    # GNN层数，可选值：4, 6, 8, 10
-# time_emb_dim: 192 # 时间嵌入维度（仅用于new/new_x0方法），可选值：64, 128, 192, 256
-# dropout: 0.15     # Dropout率，可选值：0.1, 0.15
+# hidden_dim: 384  # GNN hidden dim
+# num_layers: 8    # GNN layers
+# time_emb_dim: 192 # Time embedding dim
+# dropout: 0.15     # Dropout
 
-# hidden_dim: 256  # GNN隐藏层维度，可选值：128, 256, 384
-# num_layers: 6    # GNN层数，可选值：4, 6, 8
-# time_emb_dim: 128  # 时间嵌入维度（仅用于new/new_x0方法），可选值：64, 128, 192
-# dropout: 0.15     # Dropout率，可选值：0.1, 0.15
+# hidden_dim: 256  # GNN hidden dim
+# num_layers: 6    # GNN layers
+# time_emb_dim: 128  # Time embedding dim
+# dropout: 0.15     # Dropout
 
-# hidden_dim: 128  # GNN隐藏层维度，可选值：128, 256, 384
-# num_layers: 4    # GNN层数，可选值：4, 6, 8
-# time_emb_dim: 64 # 时间嵌入维度（仅用于new/new_x0方法），可选值：64, 128, 192
-# dropout: 0.1     # Dropout率，可选值：0.1, 0.15
+# hidden_dim: 128  # GNN hidden dim
+# num_layers: 4    # GNN layers
+# time_emb_dim: 64 # Time embedding dim
+# dropout: 0.1     # Dropout
 
-# GNN图构建参数
-cutoff: 8.0          # 截断距离
-radius: 5.4         # 半径图构建的半径 anchor1.5的时候，r=2.7最好；r=2.5的时候，试过 7.0
+# GNN graph construction
+cutoff: 8.0          # Cutoff distance
+radius: 5.4         # Radius for radius graph (anchor1.5: r=2.7 best; r=2.5 tried 7.0)
 
-# cutoff: 6.0          # 截断距离
-# radius: 4.0          # 半径图构建的半径
+# cutoff: 6.0          # Cutoff distance
+# radius: 4.0          # Radius
 
-# cutoff: 5.0          # 截断距离
-# radius: 3.0         # 半径图构建的半径
+# cutoff: 5.0          # Cutoff distance
+# radius: 3.0         # Radius
 
-# cutoff: 8.0          # 截断距离
-# radius: 6.0          # 半径图构建的半径
-use_radius_graph: True  # 是否使用半径图
+# cutoff: 8.0          # Cutoff distance
+# radius: 6.0          # Radius
+use_radius_graph: True  # Use radius graph
