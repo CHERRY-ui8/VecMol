@@ -16,7 +16,7 @@ debug.log
 .vscode/*
 
 graphs/*
-figures/*
+analysis_figures/*
 zzz_rubbish_analyze/*
 zzz_trash/*
 outputs/*
