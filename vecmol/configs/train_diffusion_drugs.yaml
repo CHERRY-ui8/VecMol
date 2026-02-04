@@ -42,13 +42,11 @@ joint_finetune:
   use_cosine_loss: False  # whether to use cosine distance loss
   magnitude_loss_weight: 0.1  # magnitude loss weight (for cosine distance + magnitude loss)
 
-
-nf_pretrained_path: exps/neural_field/nf_drugs/20260126/lightning_logs/version_0/checkpoints/last.ckpt
+nf_pretrained_path: null
 exp_dir: ../exps/vecmol
 exp_name: "diffusion_${dset.dset_name}/${now:%Y%m%d}" # NOTE: in lightning, no time stamp needed
 dirname: "${exp_dir}/${exp_name}"
-reload_model_path: exps/vecmol/fm_drugs/20260126/lightning_logs/version_0/checkpoints/last.ckpt
-# reload_model_path: exps/vecmol/fm_drugs/20260116/lightning_logs/version_2/checkpoints/model-epoch=09.ckpt
+reload_model_path: null
 
 num_epochs: 5000
 dset:
@@ -60,7 +58,7 @@ decoder:
   code_dim: 384 # same as encoder's code_dim
 
 # optim params
-lr: 2e-4 # 1e-3 # 5e-4
+lr: 2e-4
 use_lr_schedule: 0
 num_warmup_iter: 4000
 wd: 1e-6

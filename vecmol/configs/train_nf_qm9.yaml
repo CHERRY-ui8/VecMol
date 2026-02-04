@@ -10,11 +10,10 @@ debug: False
 wandb: False
 seed: 1234
 exp_dir: ../exps/neural_field
-# exp_name: "nf_${dset.dset_name}/${now:%Y%m%d}/${now:%H%M%S}_${now:%f}"
 exp_name: "nf_${dset.dset_name}/${now:%Y%m%d}"
 dirname: "${exp_dir}/${exp_name}"
 
-reload_model_path: exps/neural_field/nf_qm9/20260124/lightning_logs/version_1/checkpoints/last.ckpt
+reload_model_path: null
 
 auto_resume: True
 

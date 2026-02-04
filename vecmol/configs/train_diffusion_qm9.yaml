@@ -47,17 +47,12 @@ joint_finetune:
   magnitude_loss_weight: 0.1  # magnitude loss weight (for cosine distance + magnitude loss)
 
 
-# nf_pretrained_path: ../exps/neural_field/nf_qm9
-# nf_pretrained_path: ../exps/neural_field/nf_qm9_20250812_181425_750832
-nf_pretrained_path: exps/neural_field/nf_qm9/20260124/lightning_logs/version_0/checkpoints/last.ckpt
+nf_pretrained_path: null
 exp_dir: ../exps/vecmol
 exp_name: "diffusion_${dset.dset_name}/${now:%Y%m%d}"
 dirname: "${exp_dir}/${exp_name}"
 
-reload_model_path: exps/vecmol/fm_qm9/20260125/lightning_logs/version_0/checkpoints/last.ckpt
-# reload_model_path: exps/vecmol/fm_qm9/20260124/lightning_logs/version_1/checkpoints/last.ckpt
-# reload_model_path: exps/vecmol/fm_qm9/20260120/lightning_logs/version_2/checkpoints/last.ckpt
-# reload_model_path: exps/vecmol/fm_qm9/20260105/lightning_logs/version_1/checkpoints
+reload_model_path: null
 
 num_epochs: 50000
 num_iterations: 50000
@@ -70,7 +65,7 @@ decoder:
   code_dim: 384 # same as encoder's code_dim
 
 # optim params
-lr: 2e-4 # 1e-3 # 5e-4
+lr: 2e-4
 # use_lr_schedule: 1 # 0-NOT use lr schedule, 1-use lr schedule
 use_lr_schedule: 0
 # num_warmup_iter: 4000
