@@ -4,7 +4,7 @@ This repository contains an implementation of [VecMol](), a model for unconditio
 
 ## 1. Setup
 
-<img src="overall.pdf" alt="Overall Pipeline">
+<img src="figures/overall.png" alt="Overall Pipeline">
 
 ## Workflow
 We assume the user have anaconda (or, preferably mamba) installed.
