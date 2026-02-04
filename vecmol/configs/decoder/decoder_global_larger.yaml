@@ -3,7 +3,5 @@ code_dim: 384
 hidden_dim: 1024
 coord_dim: 3
 n_layers: 6
-# Graph is built with knn (k_neighbors=32), not radius
-radius: 3  # TODO: 0.5 too small; may tune with simulation
-cutoff: 8.0 # 6.0
+cutoff: 8.0
 k_neighbors: 32  # k_neighbors for knn graph

@@ -1,69 +1,46 @@
 sigma: 1
-# 也许不能太多，要控制，不是所有元素都需要收敛，收敛太慢也是收敛能力差的一种表现
-n_iter: 500  # 每次迭代都会调用decoder，很费时间（NOTE: 如果撒点范围-7到7，请用600） 600
-# 早停机制配置（可选）
-enable_early_stopping: False  # 启用早停机制，当梯度收敛时提前停止，可大幅减少迭代次数
-convergence_threshold: 1e-6  # 收敛阈值（梯度模长变化），仅在启用早停时有效
-min_iterations: 50  # 最少迭代次数（早停前必须达到的最小迭代数），仅在启用早停时有效
+# Keep n_iter moderate; not all elements need full convergence
+n_iter: 500  # Each iteration calls decoder (NOTE: use 600 if sampling range is -7 to 7)
+# Early stopping (optional)
+enable_early_stopping: False  # Stop when gradient converges to reduce iterations
+convergence_threshold: 1e-6  # Gradient magnitude change threshold; only when early stopping enabled
+min_iterations: 50  # Minimum iterations before early stopping
 
-# 梯度计算批次大小（可选，用于优化性能）
-# 关键：需要找到最优批次大小，平衡GPU利用率和内存占用
-# - null: 一次性处理所有点（19200个），可能内存占用高，但调用次数最少
-# - 1000: 分成20个批次，调用次数多，但单次计算快
-# - 2000-5000: 可能的最优值，平衡调用次数和单次计算速度
-# 建议：先尝试 2000 或 3000，根据实际性能调整
-gradient_batch_size: 2000  # 尝试中等批次大小，平衡性能和内存
+# Gradient batch size: balance GPU utilization and memory (null = all points; 2000–5000 often optimal)
+gradient_batch_size: 2000
 
 sigma_ratios:
-  C: 0.9    # 碳原子，较小的 sigma 使梯度场更集中
-  H: 1.3    # 氢原子，较大的 sigma 使梯度场更分散
-  O: 1.1    # 氧原子，中等 sigma
-  'N': 1.0    # 氮原子，略小于氧原子
-  F: 1.2    # 氟原子，略大于氧原子
+  C: 0.9    # Carbon: smaller sigma -> more concentrated field
+  H: 1.3    # Hydrogen: larger sigma -> more spread
+  O: 1.1    # Oxygen: medium
+  'N': 1.0    # Nitrogen: slightly smaller than O
+  F: 1.2    # Fluorine: slightly larger than O
 gradient_field_method: gaussian_hole # softmax, sfnorm, logsumexp, inverse_square, tanh, gaussian_mag, distance, gaussian_hole
-temperature: 0.01 # 温度越高，分布越尖锐，越容易收敛（很可能极端地收敛到单个原子）；温度越低，分布越平缓，越不易收敛
-logsumexp_eps: 1e-8  # logsumexp方法的数值稳定性参数
-inverse_square_strength: 1.0 # 距离平方反比方法的强度参数
-gradient_clip_threshold: 0.3 # 梯度模长截断阈值
-gaussian_hole_clip: 0.8 # gaussian_hole 方法中距离裁剪的上限
+temperature: 0.01 # Higher = sharper, easier convergence; lower = flatter, harder to converge
+logsumexp_eps: 1e-8  # logsumexp numerical stability
+inverse_square_strength: 1.0 # Inverse-square strength
+gradient_clip_threshold: 0.3 # Gradient magnitude clip
+gaussian_hole_clip: 0.8 # gaussian_hole distance clip upper bound
 
-# 采样基于field变化率（方差）
-gradient_sampling_candidate_multiplier: 3  # 候选点数量 = max_query_points * 此倍数
-# field变化率采样参数
-field_variance_k_neighbors: 10     # 计算方差时使用的最近邻数量（k值越大，方差计算越平滑）
-field_variance_weight: 0.01         # softmax温度参数：值越小，分布越尖锐（更倾向方差大的点）；值越大，分布越平缓
+# Sampling by field variance
+gradient_sampling_candidate_multiplier: 3  # Candidates = max_query_points * this
+field_variance_k_neighbors: 10     # k for variance (larger k = smoother)
+field_variance_weight: 0.01         # Softmax temp: smaller = sharper (favor high variance)
 
-# 撒点范围（单位：Å）
-sampling_range_min: -4.0  # 撒点范围的最小值
-sampling_range_max: 4.0   # 撒点范围的最大值    
+# Sampling range (Angstrom)
+sampling_range_min: -4.0
+sampling_range_max: 4.0
 
-# 每个原子类型的 query_points 数（optional）
-# 如果是None，则所有原子类型将使用统一的 n_query_points
-# 键为原子类型符号（C, H, O, N, F），值为对应的 query_points 数
-# 这个是撒点范围-7到7的时候的query_points数
-# n_query_points_per_type:
-#   C: 4000  # 碳原子的 query_points 数
-#   H: 4000  # 氢原子的 query_points 数
-#   O: 300  # 氧原子的 query_points 数
-#   N: 250  # 氮原子的 query_points 数
-#   F: 150  # 氟原子的 query_points 数
-
-# n_query_points_per_type:
-#   C: 300  # 碳原子的 query_points 数 300
-#   H: 300  # 氢原子的 query_points 数 300
-#   O: 50  # 氧原子的 query_points 数 50
-#   N: 50  # 氮原子的 query_points 数 50
-#   F: 15  # 氟原子的 query_points 数
-
-# 缩小撒点范围之后，应该可以减少query_points数
+# Query points per atom type (optional; None = use unified n_query_points)
+# Values below are for reduced range -4 to 4; use larger counts for -7 to 7
 n_query_points_per_type:
-  C: 200  # 碳原子的 query_points 数
-  H: 200  # 氢原子的 query_points 数
-  O: 30  # 氧原子的 query_points 数
-  N: 30  # 氮原子的 query_points 数
-  F: 15  # 氟原子的 query_points 数
+  C: 200
+  H: 200
+  O: 30
+  N: 30
+  F: 15
 
-# 不同方法的参数配置
+# Method-specific configs
 method_configs:
   gaussian_mag:
     n_query_points: 1000
@@ -72,38 +49,31 @@ method_configs:
     sig_mag: 0.45
 
   tanh:
-    n_query_points: 2000 # 1000 deprecated
-    step_size: 0.2 # 0.05
+    n_query_points: 2000
+    step_size: 0.2
     sig_sf: 0.1
     sig_mag: 2
-  
 
 default_config: # softmax, logsumexp, inverse_square
   n_query_points: 600
   step_size: 0.1
   sig_sf: 0.1
   sig_mag: 0.45
-  eps: 0.1 # 0.05
+  eps: 0.1
   min_samples: 3
 
-# 自回归聚类配置（可选）
+# Autoregressive clustering (optional)
 autoregressive_clustering:
-  enable: False  # 是否启用自回归聚类，默认False
-  max_clustering_iterations: 10  # 最大迭代轮数
-
-  initial_min_samples: 80  # 初始min_samples，null表示使用默认min_samples
-  min_samples_decay_factor: 0.2  # 每轮min_samples衰减因子
-  min_min_samples: 5  # min_samples下限
-  
-  # 这个值需要调得较大？并不应该
-  bond_length_tolerance: 2  # 键长合理性检查的上限容差（单位：Å），在标准键长基础上增加的容差
-  bond_length_lower_tolerance: 0.5  # 键长合理性检查的下限容差（单位：Å），从标准键长中减去的容差
-  n_initial_atoms_no_bond_check: 2  # 前N个原子不受键长限制（无论上限还是下限），避免第一个错误原子阻止后续正确原子被重建
-  debug_bond_validation: True  # 是否输出键长检查的调试信息，默认False
-
-  enable_clustering_history: True  # 是否记录聚类历史，默认False
-  save_gradient_ascent_sdf: True  # 是否保存梯度上升过程SDF，默认False
-  gradient_ascent_sdf_interval: 100  # 梯度上升SDF保存间隔（每多少轮保存一次），默认100
-
-  enable_timing: True  # 是否启用时间统计，默认False
-
+  enable: False
+  max_clustering_iterations: 10
+  initial_min_samples: 80
+  min_samples_decay_factor: 0.2
+  min_min_samples: 5
+  bond_length_tolerance: 2  # Upper tolerance (Angstrom) from standard bond length
+  bond_length_lower_tolerance: 0.5  # Lower tolerance (Angstrom)
+  n_initial_atoms_no_bond_check: 2  # First N atoms skip bond check
+  debug_bond_validation: True
+  enable_clustering_history: True
+  save_gradient_ascent_sdf: True
+  gradient_ascent_sdf_interval: 100
+  enable_timing: True

@@ -22,7 +22,7 @@ class Decoder(nn.Module):
             grid_size=config["grid_size"],
             hidden_dim=config["hidden_dim"],
             num_layers=config["n_layers"],
-            radius=config["radius"],
+            radius=config.get("radius", 3.0),  # only used as cutoff default when cutoff is None
             n_atom_types=config["n_channels"],
             code_dim=config["code_dim"],
             cutoff=config.get("cutoff", None),  # Add cutoff parameter with default None
