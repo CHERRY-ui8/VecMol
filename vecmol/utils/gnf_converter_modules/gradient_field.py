@@ -2,7 +2,6 @@
 梯度场计算模块：计算梯度场（GNF的核心功能）
 """
 import torch
-from typing import Dict
 
 
 class GradientFieldComputer:
@@ -10,7 +9,6 @@ class GradientFieldComputer:
     
     def __init__(
         self,
-        sigma_params: Dict[int, float],
         sigma: float,
         gradient_field_method: str = "softmax",
         temperature: float = 1.0,
@@ -25,8 +23,7 @@ class GradientFieldComputer:
         初始化梯度场计算器
         
         Args:
-            sigma_params: 每个原子类型的sigma参数字典
-            sigma: 默认sigma值
+            sigma: sigma value used for all atom types
             gradient_field_method: 梯度场计算方法
             temperature: softmax温度参数
             logsumexp_eps: logsumexp方法的数值稳定性参数
@@ -36,7 +33,6 @@ class GradientFieldComputer:
             sig_mag: magnitude的sigma参数
             gaussian_hole_clip: gaussian_hole方法中距离裁剪的上限值
         """
-        self.sigma_params = sigma_params
         self.sigma = sigma
         self.gradient_field_method = gradient_field_method
         self.temperature = temperature
@@ -78,8 +74,8 @@ class GradientFieldComputer:
         # 创建原子类型掩码矩阵 [n_atoms, n_atom_types]
         atom_type_mask = (atom_types.unsqueeze(1) == torch.arange(n_atom_types, device=device).unsqueeze(0))  # [n_atoms, n_atom_types]
         
-        # 创建sigma参数矩阵 [n_atom_types]
-        sigma_values = torch.tensor([self.sigma_params.get(t, self.sigma) for t in range(n_atom_types)], device=device, dtype=torch.float32)  # [n_atom_types]
+        # Sigma for all atom types (uniform)
+        sigma_values = torch.full((n_atom_types,), self.sigma, device=device, dtype=torch.float32)  # [n_atom_types]
         
         # 初始化结果张量
         vector_field = torch.zeros(n_points, n_atom_types, 3, device=device)

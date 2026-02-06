@@ -9,12 +9,6 @@ min_iterations: 50  # Minimum iterations before early stopping
 # Gradient batch size: balance GPU utilization and memory (null = all points; 2000–5000 often optimal)
 gradient_batch_size: 2000
 
-sigma_ratios:
-  C: 0.9    # Carbon: smaller sigma -> more concentrated field
-  H: 1.3    # Hydrogen: larger sigma -> more spread
-  O: 1.1    # Oxygen: medium
-  'N': 1.0    # Nitrogen: slightly smaller than O
-  F: 1.2    # Fluorine: slightly larger than O
 gradient_field_method: gaussian_hole # softmax, sfnorm, logsumexp, inverse_square, tanh, gaussian_mag, distance, gaussian_hole
 temperature: 0.01 # Higher = sharper, easier convergence; lower = flatter, harder to converge
 logsumexp_eps: 1e-8  # logsumexp numerical stability

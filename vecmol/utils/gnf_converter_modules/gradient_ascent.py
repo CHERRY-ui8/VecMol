@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import time
 import gc
-from typing import Optional, Dict
+from typing import Optional
 
 
 class GradientAscentOptimizer:
@@ -15,8 +15,6 @@ class GradientAscentOptimizer:
         self,
         n_iter: int,
         step_size: float,
-        sigma_params: Dict[int, float],
-        sigma: float,
         enable_early_stopping: bool = True,
         convergence_threshold: float = 1e-6,
         min_iterations: int = 50,
@@ -27,9 +25,7 @@ class GradientAscentOptimizer:
         
         Args:
             n_iter: 最大迭代次数
-            step_size: 步长
-            sigma_params: 每个原子类型的sigma参数字典
-            sigma: 默认sigma值
+            step_size: 步长（所有原子类型统一）
             enable_early_stopping: 是否启用早停机制
             convergence_threshold: 收敛阈值
             min_iterations: 最少迭代次数
@@ -38,8 +34,6 @@ class GradientAscentOptimizer:
         """
         self.n_iter = n_iter
         self.step_size = step_size
-        self.sigma_params = sigma_params
-        self.sigma = sigma
         self.enable_early_stopping = enable_early_stopping
         self.convergence_threshold = convergence_threshold
         self.min_iterations = min_iterations
@@ -95,19 +89,6 @@ class GradientAscentOptimizer:
         elif enable_timing:
             print(f"    [梯度上升] 未使用分批处理: 总点数={n_total_points}, "
                   f"配置的批次大小={self.gradient_batch_size}")
-        
-        # 预计算sigma_ratios和adjusted_step_sizes（避免每次迭代重复计算）
-        # 优化：使用张量索引替代 .item() 循环，避免 GPU-CPU 同步
-        # 创建 sigma 值查找表
-        max_atom_type = int(atom_types.max().item()) if len(atom_types) > 0 else 0
-        sigma_lookup = torch.full((max_atom_type + 1,), self.sigma, device=device, dtype=torch.float32)
-        for atom_type, sigma_val in self.sigma_params.items():
-            if atom_type <= max_atom_type:
-                sigma_lookup[atom_type] = sigma_val
-        
-        # 使用索引查找，完全在 GPU 上操作
-        sigma_ratios = (sigma_lookup[atom_types] / self.sigma)  # [n_total_points]
-        adjusted_step_sizes = self.step_size * sigma_ratios.unsqueeze(-1)  # [n_total_points, 1]
         
         for iter_idx in range(self.n_iter):
             t_single_iter_start = time.perf_counter() if enable_timing else None
@@ -172,8 +153,8 @@ class GradientAscentOptimizer:
                 if enable_timing or (self.enable_early_stopping and iter_idx < self.min_iterations):
                     prev_grad_norm = current_grad_norm_tensor.item()
                 
-                # 更新采样点位置
-                z = z + adjusted_step_sizes * grad
+                # 更新采样点位置（统一步长）
+                z = z + self.step_size * grad
                 
                 # 调用迭代回调（如果提供）
                 # 优化：默认不拷贝，减少内存开销

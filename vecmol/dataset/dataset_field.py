@@ -768,7 +768,6 @@ def create_gnf_converter(config: dict) -> GNFConverter:
     logsumexp_eps = gnf_config["logsumexp_eps"]
     inverse_square_strength = gnf_config["inverse_square_strength"]
     gradient_clip_threshold = gnf_config["gradient_clip_threshold"]
-    sigma_ratios = gnf_config["sigma_ratios"]
     # Training specific gradient sampling parameters
     gradient_sampling_candidate_multiplier = gnf_config["gradient_sampling_candidate_multiplier"]
     # field variance sampling parameters
@@ -828,7 +827,6 @@ def create_gnf_converter(config: dict) -> GNFConverter:
         step_size=step_size,
         eps=eps,
         min_samples=min_samples,
-        sigma_ratios=sigma_ratios,
         gradient_field_method=gradient_field_method,
         temperature=temperature,
         logsumexp_eps=logsumexp_eps,

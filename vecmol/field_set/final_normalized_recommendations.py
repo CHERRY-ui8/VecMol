@@ -40,8 +40,6 @@ def final_normalized_recommendations():
     query_points = torch.cat([query_points, torch.zeros_like(query_points), torch.zeros_like(query_points)], dim=1)
     query_points = query_points.unsqueeze(0)
     
-    sigma_ratios = {'C': 1.0, 'H': 1.0, 'O': 1.0, 'N': 1.0, 'F': 1.0}
-    
     # 测试三种方法
     methods = [
         ('gaussian_mag', '最平滑且衰减好'),
@@ -62,11 +60,9 @@ def final_normalized_recommendations():
             step_size=0.01,
             eps=0.1,
             min_samples=2,
-            sigma_ratios=sigma_ratios,
             gradient_field_method=method_name,
             sig_sf=RECOMMENDED_SIG_SF,
             sig_mag=RECOMMENDED_SIG_MAG,
-            device=device
         )
         
         vector_field = converter.mol2gnf(coords, atom_types, query_points)
@@ -112,12 +108,10 @@ converter = GNFConverter(
     step_size=0.01,
     eps=0.1,
     min_samples=2,
-    sigma_ratios={{'C': 1.0, 'H': 1.0, 'O': 1.0, 'N': 1.0, 'F': 1.0}},
     gradient_field_method='gaussian_mag',  # 最平滑且衰减好
     sig_sf={RECOMMENDED_SIG_SF},          # 归一化空间推荐值
     sig_mag={RECOMMENDED_SIG_MAG},        # 归一化空间推荐值
     temperature=1.0,
-    device='cuda'
 )
 
 ## 2. 参数调优指南（归一化空间）

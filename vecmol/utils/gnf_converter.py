@@ -41,7 +41,6 @@ class GNFConverter(nn.Module):
                 step_size: float,
                 eps: float,  # DBSCAN neighborhood radius
                 min_samples: int,  # DBSCAN min samples
-                sigma_ratios: Dict[str, float],
                 gradient_field_method: str = "softmax",  # gradient field method: "gaussian", "softmax", "logsumexp", etc.
                 temperature: float = 1.0,  # softmax temperature (sharper distribution when higher)
                 logsumexp_eps: float = 1e-8,  # logsumexp numerical stability
@@ -79,7 +78,6 @@ class GNFConverter(nn.Module):
         self.step_size = step_size
         self.eps = eps
         self.min_samples = min_samples
-        self.sigma_ratios = sigma_ratios
         self.gradient_field_method = gradient_field_method
         self.temperature = temperature
         self.logsumexp_eps = logsumexp_eps
@@ -112,16 +110,8 @@ class GNFConverter(nn.Module):
         self.sampling_range_min = sampling_range_min
         self.sampling_range_max = sampling_range_max
         
-        # Per-atom-type sigma (5 for QM9, 6 for CREMP, 8 for GEOM-drugs)
-        # Atom type index: 0=C, 1=H, 2=O, 3=N, 4=F, 5=S, 6=Cl, 7=Br
-        atom_type_mapping = {0: 'C', 1: 'H', 2: 'O', 3: 'N', 4: 'F', 5: 'S', 6: 'Cl', 7: 'Br'}
-        self.sigma_params = {}
-        for atom_idx in range(n_atom_types):
-            atom_symbol = atom_type_mapping.get(atom_idx, f'Type{atom_idx}')
-            ratio = self.sigma_ratios.get(atom_symbol, 1.0)
-            self.sigma_params[atom_idx] = sigma * ratio
-
         # Per-atom-type query_points; if n_query_points_per_type given use it, else unified n_query_points
+        atom_type_mapping = {0: 'C', 1: 'H', 2: 'O', 3: 'N', 4: 'F', 5: 'S', 6: 'Cl', 7: 'Br'}
         self.n_query_points_per_type = {}
         if n_query_points_per_type is not None:
             for atom_idx in range(n_atom_types):
@@ -143,7 +133,6 @@ class GNFConverter(nn.Module):
         
         # Gradient field computer
         self.gradient_field_computer = GradientFieldComputer(
-            sigma_params=self.sigma_params,
             sigma=sigma,
             gradient_field_method=gradient_field_method,
             temperature=temperature,
@@ -159,8 +148,6 @@ class GNFConverter(nn.Module):
         self.gradient_ascent_optimizer = GradientAscentOptimizer(
             n_iter=n_iter,
             step_size=step_size,
-            sigma_params=self.sigma_params,
-            sigma=sigma,
             enable_early_stopping=enable_early_stopping,
             convergence_threshold=convergence_threshold,
             min_iterations=min_iterations,

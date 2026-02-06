@@ -100,8 +100,6 @@ def test_real_space_field_behavior():
     query_points = torch.cat([query_points, torch.zeros_like(query_points), torch.zeros_like(query_points)], dim=1)
     query_points = query_points.unsqueeze(0)
     
-    sigma_ratios = {'C': 1.0, 'H': 1.0, 'O': 1.0, 'N': 1.0, 'F': 1.0}
-    
     # 测试三种方法（包括tanh）
     methods = ['tanh', 'gaussian_mag', 'distance']
     
@@ -134,7 +132,6 @@ def test_real_space_field_behavior():
             step_size=step_size,
             eps=eps,
             min_samples=min_samples,
-            sigma_ratios=sigma_ratios,
             gradient_field_method=method,
             sig_sf=sig_sf,
             sig_mag=sig_mag,
@@ -280,8 +277,6 @@ def create_real_space_usage_example():
     query_points = torch.stack([X.flatten(), Y.flatten(), Z.flatten()], dim=1)
     query_points = query_points.unsqueeze(0)
     
-    sigma_ratios = {'C': 1.0, 'H': 1.0, 'O': 1.0, 'N': 1.0, 'F': 1.0}
-    
     # 使用配置文件中的gaussian_mag参数
     method_config = CONFIG.method_configs.gaussian_mag
     converter = GNFConverter(
@@ -291,7 +286,6 @@ def create_real_space_usage_example():
         step_size=method_config.step_size,
         eps=method_config.eps,
         min_samples=method_config.min_samples,
-        sigma_ratios=sigma_ratios,
         gradient_field_method='gaussian_mag',
         sig_sf=method_config.sig_sf,
         sig_mag=method_config.sig_mag,
@@ -394,8 +388,6 @@ def compare_all_three_methods():
     query_points = torch.cat([query_points, torch.zeros_like(query_points), torch.zeros_like(query_points)], dim=1)
     query_points = query_points.unsqueeze(0)
     
-    sigma_ratios = {'C': 1.0, 'H': 1.0, 'O': 1.0, 'N': 1.0, 'F': 1.0}
-    
     # 测试三种方法（包括tanh）
     methods = ['tanh', 'gaussian_mag', 'distance']
     colors = ['blue', 'red', 'green']
@@ -429,7 +421,6 @@ def compare_all_three_methods():
             step_size=step_size,
             eps=eps,
             min_samples=min_samples,
-            sigma_ratios=sigma_ratios,
             gradient_field_method=method,
             sig_sf=sig_sf,
             sig_mag=sig_mag,
